@@ -50,16 +50,17 @@ export default function App() {
   }, [deckAPlaying, deckBPlaying, deckATrack, deckBTrack]);
 
   const refresh = useCallback(async () => {
-    // Reintento por si el backend aún está arrancando (carrera de inicio)
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Reintento por si el backend aún está arrancando (la ventana se abre al
+    // instante y ssa-backend.exe inicializa en paralelo: puede tardar segundos)
+    for (let attempt = 0; attempt < 10; attempt++) {
       try {
         const [f, s] = await Promise.all([api.listFolders(), api.listSets()]);
         setFolders(f);
         setSets(s);
         return;
       } catch (err) {
-        if (attempt === 2) throw err;
-        await new Promise((r) => setTimeout(r, 1500));
+        if (attempt === 9) throw err;
+        await new Promise((r) => setTimeout(r, 1200));
       }
     }
   }, []);

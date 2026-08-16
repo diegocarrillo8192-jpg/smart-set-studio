@@ -84,9 +84,10 @@ export default function LibraryTable({
       });
       setTracks(result);
     } catch (e) {
-      // El backend puede tardar más que el renderer en arrancar: reintentar
-      if (attempt < 3) {
-        setTimeout(() => void load(attempt + 1), 1500);
+      // El backend puede tardar más que el renderer en arrancar (ventana
+      // instantánea + backend en paralelo): reintentar con margen amplio.
+      if (attempt < 8) {
+        setTimeout(() => void load(attempt + 1), 1200);
       } else {
         console.error(e);
       }

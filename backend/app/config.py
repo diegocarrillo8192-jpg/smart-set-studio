@@ -13,6 +13,10 @@ DB_PATH = DATA_DIR / "library.db"
 EXPORTS_DIR = DATA_DIR / "exports"
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Caché persistente de carátulas: imágenes procesadas (sha1 como nombre)
+ARTWORK_CACHE_DIR = DATA_DIR / "artwork_cache"
+ARTWORK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
 # Extensiones de audio soportadas
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".aiff", ".aif", ".ogg", ".m4a", ".opus"}
 

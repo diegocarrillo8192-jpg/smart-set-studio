@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import AUDIO_EXTENSIONS
 from ..models import Folder, ScanJob, Track
 from .analyzer import analyze_file, embedded_key_to_camelot, read_metadata
+from .artwork_cache import extract_embedded, get_cached, store_embedded
 from .id3_writer import write_camelot_id3
 from .settings import get_all_settings
 
@@ -43,6 +44,23 @@ def discover_audio_files(root: str) -> list[Path]:
     return files
 
 
+def _cache_artwork_once(path: str) -> None:
+    """Precache en el primer escaneo: la carátula embebida se extrae UNA vez
+    y se persiste (disco sha1 + SQLite). Así, al abrir una carpeta ya
+    escaneada, el endpoint sirve el 100% de las portadas desde la caché en
+    <1 ms cada una. SOLO guarda positivos: el negativo (sin arte) lo decide
+    el endpoint, porque la carpeta puede tener una portada adjunta."""
+    try:
+        if get_cached(path) is not None:
+            return
+        embedded = extract_embedded(path)
+        if embedded is not None:
+            data, mime = embedded
+            store_embedded(path, data, mime)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Arte de %s no precacheable: %s", path, exc)
+
+
 def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track | None:
     """Inserta o actualiza un track (solo si el archivo cambió o no fue analizado)."""
     track = db.query(Track).filter_by(file_path=path).one_or_none()
@@ -61,6 +79,7 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
         )
         db.add(track)
         db.flush()
+        _cache_artwork_once(path)
         return track
 
     # Actualizar metadatos si el archivo cambió
@@ -76,6 +95,7 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
         track.analyzed = False
         track.has_error = False
         track.error_message = None
+        _cache_artwork_once(path)
 
     return track
 

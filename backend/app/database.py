@@ -42,8 +42,57 @@ def init_db() -> None:
     # Migraciones incrementales: columnas añadidas a modelos existentes
     _ensure_column("tracks", "embedded_key", "VARCHAR(16)")
 
+    # Caché persistente de carátulas (RAW, sin ORM): path → imagen procesada
+    # en disco (file) o negativo confirmado (file NULL → sin carátula).
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS artwork_cache (
+                path TEXT PRIMARY KEY,
+                file TEXT,
+                mime TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+
     # Datos heredados: rutas con mojibake (ver repair_legacy_mojibake)
     repair_legacy_mojibake()
+
+
+def get_artwork_cache(path: str) -> tuple[str, str] | None:
+    """(file, mime) si hay carátula cacheada; (None, mime) si hay negativo
+    confirmado (sin carátula); None si todavía no hay fila para `path`."""
+    try:
+        with engine.connect() as conn:
+            row = conn.exec_driver_sql(
+                "SELECT file, mime FROM artwork_cache WHERE path = ?", (path,)
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Lectura artwork_cache fallida: %s", exc)
+        return None
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+def set_artwork_cache(path: str, file: str | None, mime: str | None) -> None:
+    """Upsert de la fila de caché: `file` NULL = confirmado sin carátula."""
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                """
+                INSERT INTO artwork_cache (path, file, mime, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(path) DO UPDATE SET
+                    file = excluded.file,
+                    mime = excluded.mime,
+                    updated_at = excluded.updated_at
+                """,
+                (path, file, mime),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Escritura artwork_cache fallida: %s", exc)
 
 
 def repair_legacy_mojibake() -> int:

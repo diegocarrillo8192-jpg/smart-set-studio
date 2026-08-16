@@ -23,9 +23,15 @@ if (!gotSingleInstanceLock) {
     mainWindow.focus();
   });
 
-  app.whenReady().then(async () => {
-    await startBackend();
+  app.whenReady().then(() => {
+    // APERTURA INSTANTÁNEA: la ventana (con su Splash animado) se crea y se
+    // muestra de inmediato. El backend de Python (ssa-backend.exe) se inicia
+    // después, en paralelo y totalmente asíncrono: la UI arranca con su
+    // splash mientras inicializa, sin bloquear el doble clic.
     createWindow();
+    void startBackend().catch((err) =>
+      console.error("[smart-set] Error iniciando el backend:", err)
+    );
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -111,9 +117,13 @@ function createWindow() {
     height: 940,
     minWidth: 1200,
     minHeight: 720,
-    backgroundColor: "#0a0c12",
+    // ARRANQUE INSTANTÁNEO: la ventana se muestra nativamente de inmediato
+    // (sin esperar DOM/React ni el backend). El backgroundColor pinta al
+    // instante y el splash estático embebido en index.html da feedback
+    // visual en <200ms; React lo reemplaza sin corte visual.
+    backgroundColor: "#0f172a",
     title: "AI Smart Set Architect",
-    show: false,
+    show: true,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -122,9 +132,8 @@ function createWindow() {
     },
   });
 
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.show();
-  });
+  // Sin bloqueo por ready-to-show: la ventana ya es visible desde el t0.
+  // El splash interno (index.html + SplashScreen) se encarga del feedback.
 
   // Diagnóstico: volcar la consola del renderer al stdout del proceso
   mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
@@ -154,8 +163,8 @@ function createWindow() {
 
 async function loadApp() {
   if (isDev) {
-    const ok = await waitForUrl(DEV_URL, 45000);
-    console.log(ok ? "[smart-set] Vite listo, cargando UI" : "[smart-set] Vite no respondió, intentando cargar igualmente");
+    // Carga inmediata: si Vite aún no está listo, el splash estático ya
+    // cubre la pantalla y los reintentos de did-fail-load la completan.
     mainWindow.loadURL(DEV_URL);
   } else {
     mainWindow.loadFile(path.join(__dirname, "..", "frontend", "dist", "index.html"));

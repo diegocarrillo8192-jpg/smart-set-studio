@@ -12,25 +12,15 @@ from ..database import get_db
 from ..models import Folder, Track
 from ..schemas import TrackOut
 from ..services.camelot import normalize_camelot, relation
+from ..services import artwork_cache as art
 from ..config import AUDIO_EXTENSIONS
 
 router = APIRouter(prefix="/api", tags=["tracks"])
 
-# Caché en memoria de carátulas embebidas: {file_path: (bytes, mime)}
+# Caché caliente en memoria de carátulas: {file_path: (bytes, mime)}
 _artwork_cache: dict[str, tuple[bytes, str]] = {}
-# Archivos confirmados SIN imagen embebida (evita re-abrir mutagen por pista)
+# Archivos confirmados SIN carátula (evita re-probar por pista en esta sesión)
 _no_artwork: set[str] = set()
-
-
-def _sniff_mime(data: bytes) -> str:
-    """Detecta el MIME por las magic bytes (JPEG/PNG/GIF); por defecto JPEG."""
-    if data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    return "image/jpeg"
 
 
 def _cors_headers() -> dict[str, str]:
@@ -86,76 +76,6 @@ def _is_indexed(db: Session, path: str) -> bool:
         is not None
     )
 
-
-def _read_embedded_artwork(path: str) -> tuple[bytes, str] | None:
-    """Extrae la portada incrustada con mutagen y sin fallos silenciosos:
-    1) frames ID3 APIC (MP3, AIFF, WAV con chunk ID3) · 2) pictures
-    (FLAC/OGG/OPUS) · 3) covr (MP4/M4A) · 4) APE "Cover Art (Front)".
-    Cada formato se intenta en su propio bloque: un tag corrupto de un
-    contenedor no impide probar los demás."""
-    try:
-        from mutagen import File
-    except ImportError:
-        return None
-    try:
-        audio = File(path)
-        if audio is None:
-            return None
-    except Exception:
-        return None
-    tags = getattr(audio, "tags", None)
-
-    # 1) ID3 APIC (MP3 / AIFF / WAV): todos los frames, tolere fallos parciales
-    if tags is not None and hasattr(tags, "getall"):
-        try:
-            for apic in tags.getall("APIC"):
-                data = getattr(apic, "data", None)
-                if data:
-                    mime = getattr(apic, "mime", None) or None
-                    return data, mime or _sniff_mime(bytes(data))
-        except Exception:
-            pass
-
-    # 2) FLAC / OGG / OPUS: pictures
-    try:
-        pictures = getattr(audio, "pictures", None) or []
-        for pic in pictures:
-            data = getattr(pic, "data", None)
-            if data:
-                mime = getattr(pic, "mime", None) or None
-                return data, mime or _sniff_mime(bytes(data))
-    except Exception:
-        pass
-
-    # 3) MP4 / M4A: covr
-    try:
-        if tags is not None and tags.get("covr"):
-            item = tags["covr"][0]
-            data = getattr(item, "data", None) or (
-                bytes(item) if isinstance(item, bytes) else None
-            )
-            if data:
-                return data, _sniff_mime(bytes(data))
-    except Exception:
-        pass
-
-    # 4) APE tags: "Cover Art (Front)" → valor binario tras el separador NUL
-    try:
-        if tags is not None and hasattr(tags, "keys"):
-            for key in tags.keys():
-                if "cover art" in str(key).lower():
-                    val = tags.get(key)
-                    if not val:
-                        continue
-                    raw = bytes(val) if not isinstance(val, bytes) else val
-                    parts = raw.split(b"\x00", 2)
-                    data = parts[2] if len(parts) > 2 else raw
-                    if data:
-                        return data, _sniff_mime(data)
-    except Exception:
-        pass
-
-    return None
 
 SORTABLE = {
     "title": Track.title,
@@ -375,10 +295,16 @@ def stream_audio_alias(path: str, db: Session = Depends(get_db)):
 def track_artwork(path: str, db: Session = Depends(get_db)):
     """Carátula (album art) del track: /api/audio/artwork?path=...
 
-    Prioridad: 1) carátula EMBEBIDA en el archivo (ID3 APIC / FLAC PICTURE /
-    M4A covr, extraída con mutagen y cacheada en memoria); 2) imagen gemela
-    del audio ("track.mp3" -> "track.jpg"); 3) nombres estándar de portada
-    en su carpeta (cover/folder/front/artwork/art/album). Misma validación
+    Prioridad de fuentes (primera que exista gana):
+    1) CACHÉ PERSISTENTE (SQLite `artwork_cache` + imagen sha1 en disco):
+       el primer arranque tras escanear devuelve el 100% de las portadas de
+       una carpeta en <1 ms por pista, sin re-abrir mutagen ni re-leer tags.
+    2) carátula EMBEBIDA en el archivo (ID3 APIC / FLAC PICTURE / M4A covr /
+       APE, extraída con mutagen) → se persiste en (1) automáticamente.
+    3) imagen gemela del audio ("track.mp3" → "track.jpg") y nombres estándar
+       de portada en su carpeta (cover/folder/front/artwork/art/album).
+    Solo cuando TODOS fallan se confirma el "negativo" (fetch → 404), que
+    también se persiste: la pista nunca se vuelve a probar. Misma validación
     de biblioteca indexada que el streaming (Path Traversal).
     """
     if not path or not path.strip():
@@ -389,40 +315,36 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "El archivo ya no existe en disco")
     if not _is_indexed(db, str(Path(path.strip()).expanduser())):
         raise HTTPException(403, "Ruta no autorizada")
+    key = str(p)
 
-    # 1) Carátula embebida (ID3 Cover Picture) con caché en memoria
-    cached = _artwork_cache.get(str(p))
+    # 0) Caché caliente en memoria (misma sesión)
+    cached = _artwork_cache.get(key)
     if cached is not None:
         data, mime = cached
-        return Response(
-            content=data,
-            media_type=mime,
-            headers={
-                **_cors_headers(),
-                "Cache-Control": "public, max-age=86400",
-            },
-        )
-    if str(p) in _no_artwork:
+        return _artwork_bytes(data, mime, "memory")
+    if key in _no_artwork:
         raise HTTPException(404, "Sin carátula")
-    embedded = _read_embedded_artwork(str(p))
+
+    # 1) Caché persistente SQLite → imagen sha1 en disco (fuente principal)
+    cached_hit = art.get_cached(key)
+    if cached_hit is not None:
+        cache_file, mime = cached_hit
+        if cache_file is None:
+            _no_artwork.add(key)
+            raise HTTPException(404, "Sin carátula")
+        return _artwork_file(cache_file, mime, "db")
+
+    # 2) Carátula embebida (primera extracción → se persiste para siempre)
+    embedded = art.extract_embedded(key)
     if embedded is not None:
         data, mime = embedded
-        if len(_artwork_cache) > 256:
+        art.store_embedded(key, data, mime)
+        if len(_artwork_cache) > 512:
             _artwork_cache.clear()
-        _artwork_cache[str(p)] = (data, mime)
-        return Response(
-            content=data,
-            media_type=mime,
-            headers={
-                **_cors_headers(),
-                "Cache-Control": "public, max-age=86400",
-            },
-        )
-    if len(_no_artwork) > 256:
-        _no_artwork.clear()
-    _no_artwork.add(str(p))
+        _artwork_cache[key] = (data, mime)
+        return _artwork_bytes(data, mime, "embedded")
 
-    # 2-3) Carátulas adjuntas en disco
+    # 3) Carátulas adjuntas en disco (gemelas + nombres estándar de la carpeta)
     candidates = [p.with_suffix(ext) for ext in (".jpg", ".jpeg", ".png")]
     folder = p.parent
     for name in ("cover", "folder", "front", "artwork", "art", "album", "scan"):
@@ -434,10 +356,49 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
                 headers={
                     **_cors_headers(),
                     "Cache-Control": "public, max-age=86400",
+                    "X-Artwork-Source": "disk",
                 },
             )
-    # Confirmación explícita de "no tiene imagen": 404 (y no re-intentar).
+
+    # 4) Confirmación explícita de "no tiene imagen": 404 persistente.
+    # (El negativo SOLO se marca aquí, tras agotar las fuentes; así una
+    # portada adjunta nunca queda envenenada por un intento anterior.)
+    art.store_negative(key)
+    if len(_no_artwork) > 512:
+        _no_artwork.clear()
+    _no_artwork.add(key)
     raise HTTPException(404, "Sin carátula")
+
+
+def _artwork_bytes(data: bytes, mime: str, source: str) -> Response:
+    """Responde bytes de imagen con ETag (hash sha1) + caché pública."""
+    import hashlib
+
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            **_cors_headers(),
+            "Cache-Control": "public, max-age=86400",
+            "ETag": f'"{hashlib.sha1(bytes(data)).hexdigest()}"',
+            "X-Artwork-Source": source,
+        },
+    )
+
+
+def _artwork_file(cache_file: str, mime: str, source: str) -> FileResponse:
+    """Responde la imagen desde el caché de disco. El nombre del archivo ES
+    el sha1 de los bytes → sirve de ETag estable para 304s de Chromium."""
+    return FileResponse(
+        cache_file,
+        media_type=mime,
+        headers={
+            **_cors_headers(),
+            "Cache-Control": "public, max-age=86400",
+            "ETag": f'"{Path(cache_file).stem}"',
+            "X-Artwork-Source": source,
+        },
+    )
 
 
 @router.get("/audio/analysis")
