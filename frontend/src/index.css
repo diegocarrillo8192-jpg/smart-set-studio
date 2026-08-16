@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0a0c12;
+  color: #e2e8f0;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Micro-interacciones ultra suaves del reproductor */
+@keyframes artwork-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-artwork-in {
+  animation: artwork-in 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.6s ease-out;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 8s linear infinite;
+}
+
+@keyframes shine {
+  0% {
+    background-position: 180% 0;
+  }
+  60%,
+  100% {
+    background-position: -60% 0;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a3346;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b4760;
+}
+
+@theme {
+  --color-panel: #0f1420;
+  --color-panel-2: #141a2a;
+  --color-panel-3: #1b2336;
+  --color-accent: #7c3aed;
+  --color-accent-2: #06b6d4;
+  --color-good: #34d399;
+  --color-warn: #fbbf24;
+  --color-danger: #f87171;
+}
+
+input[type="range"] {
+  accent-color: #7c3aed;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: #7c3aed;
+}

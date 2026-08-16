@@ -1,0 +1,32 @@
+# Dependencias
+node_modules/
+frontend/node_modules/
+electron/node_modules/
+.venv/
+
+# Builds y empaquetado
+dist/
+release/
+frontend/dist/
+build/ssa-backend.spec
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tsbuildinfo
+
+# Logs y datos locales
+*.log
+dev.log
+dev.err.log
+electron.log
+electron.out.log
+.smart-set-studio/
+
+# Entorno / editor
+.env
+.env.local
+.vscode/
+.idea/

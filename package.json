@@ -1,0 +1,75 @@
+{
+  "name": "smart-set-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI Smart Set Architect & DJ Library Manager - Desktop app (Electron + FastAPI + React)",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n BACKEND,FRONTEND,ELECTRON -c blue,magenta,green \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:electron\"",
+    "dev:backend": "cd backend && ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:electron": "npx electron .",
+    "build:frontend": "cd frontend && npm run build",
+    "backend:install": "python -m venv .venv && .\\.venv\\Scripts\\pip install -r backend\\requirements.txt",
+    "frontend:install": "cd frontend && npm install",
+    "electron:install": "cd electron && npm install --save-dev electron",
+    "bundle:backend": ".venv\\Scripts\\python.exe -m PyInstaller --noconfirm --onedir --name ssa-backend --paths=backend --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=uvicorn.protocols.websockets.auto --hidden-import=uvicorn.lifespan.on backend\\run_server.py",
+    "dist:win": "npm run build:frontend && npm run bundle:backend && electron-builder --win",
+    "dist": "npm run dist:win"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.smartsetstudio.app",
+    "productName": "Smart Set Architect",
+    "copyright": "© 2026 Diego Carrillo",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/ssa-backend",
+        "to": "backend"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Smart Set Architect - Setup.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Smart Set Architect",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.music",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Audio",
+      "target": [
+        "AppImage"
+      ]
+    }
+  }
+}
