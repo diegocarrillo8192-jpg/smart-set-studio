@@ -488,7 +488,35 @@ export function cachedTrackArtwork(track: Track): string | null | undefined {
 }
 
 // Deduplica peticiones concurrentes (biblioteca + recomendados + deck).
-const artworkInFlight = new Map<string, Promise<string | null>>();
+const artworkInFlight = new Map<string, Promise<string | null | undefined>>();
+
+// Cola de concurrencia: máx. 6 peticiones de carátulas a la vez. En listados
+// masivos evita saturar el backend y que cada petición individual caduque
+// por timeout (el servidor extrae el APIC por archivo bajo demanda).
+const artworkQueue: Array<() => void> = [];
+let artworkActive = 0;
+const ARTWORK_CONCURRENCY = 6;
+
+function enqueueArtwork<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const run = () => {
+      artworkActive += 1;
+      void task()
+        .then(resolve)
+        .catch(reject)
+        .finally(() => {
+          artworkActive -= 1;
+          const next = artworkQueue.shift();
+          if (next) void next();
+        });
+    };
+    if (artworkActive < ARTWORK_CONCURRENCY) {
+      run();
+    } else {
+      artworkQueue.push(run);
+    }
+  });
+}
 
 /**
  * Precarga diferida (lazy) de carátulas para un listado: dispara el fetch de
@@ -509,23 +537,36 @@ export function prefetchArtworks(tracks: Track[], count = 24): void {
  * navegador, así que SIEMPRE se pide al servidor local (/api/audio/artwork),
  * que extrae el ID3 en el backend y entrega la imagen como Blob image/jpeg.
  */
-export async function getTrackArtwork(track: Track): Promise<string | null> {
+/**
+ * Data URL (base64) de la carátula, cacheada en memoria para la sesión.
+ * Resultado por estados:
+ *  string    = portada lista para la UI.
+ *  null      = el servidor CONFIRMÓ (HTTP 404) que el archivo no tiene NINGUNA
+ *              imagen (embebida ni adyacente): aquí el fallback es la marca.
+ *  undefined = aún extrayendo o error transitorio (timeout/403/5xx): NO es
+ *              una confirmación de ausencia; la UI muestra carga y se re-
+ *              intentará en el próximo montaje, sin marcar "sin portada".
+ * Web: la ruta local absoluta (C:\musica\track.mp3) no es legible por el
+ * navegador, así que SIEMPRE se pide al servidor local (/api/audio/artwork),
+ * que extrae el ID3 en el backend y entrega la imagen como Blob image/jpeg.
+ */
+export async function getTrackArtwork(track: Track): Promise<string | null | undefined> {
   const key = track.file_path;
   const matched = artworkKeyFor(key);
   const matchedHit = matched !== null ? artworkCache.get(matched) : undefined;
   if (matchedHit !== undefined) {
     if (matchedHit !== null) return matchedHit; // portada lista (no la re-pides)
-    if (matched === key) return null; // ruta ya verificada: sin portada en ningún lado
+    if (matched === key) return null; // 404 ya confirmado por el servidor
     // null local = sin carátula EMBEBIDA, pero el servidor aún puede servir
     // la imagen adyacente (track.jpg / cover.jpg) de la ruta absoluta.
   }
 
   const pending =
     artworkInFlight.get(key) ??
-    (async () => {
+    enqueueArtwork(async () => {
       const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 8000);
-      let result: string | null = null;
+      const timer = window.setTimeout(() => controller.abort(), 12000);
+      let result: string | null | undefined = undefined;
       try {
         const res = await fetch(
           `${BASE}/audio/artwork?path=${encodeURIComponent(key)}`,
@@ -533,10 +574,13 @@ export async function getTrackArtwork(track: Track): Promise<string | null> {
         );
         if (res.ok) {
           const blob = await res.blob();
-          if (blob.size > 32) result = await blobToDataUrl(blob);
+          result = blob.size > 32 ? await blobToDataUrl(blob) : null;
+        } else if (res.status === 404) {
+          result = null; // el servidor confirma: el archivo no tiene imagen
         }
+        // 403/5xx/timeout → `undefined`: transitorio, no definitivo.
       } catch {
-        result = null;
+        result = undefined;
         markWebCacheUnhealthy();
       } finally {
         window.clearTimeout(timer);
@@ -544,12 +588,17 @@ export async function getTrackArtwork(track: Track): Promise<string | null> {
       // Evitar crecimiento ilimitado con bibliotecas grandes (misma filosofía
       // que el caché del backend): reciclar el mapa al superar el tope.
       if (artworkCache.size >= 600) artworkCache.clear();
-      // No pisar una carátula ya extraída localmente en web.
+      // No pisar una carátula ya extraída localmente en web. Los negativos
+      // solo se cachean cuando el servidor los confirmó (404); los fallos
+      // transitorios quedan sin caché para poder reintentarse.
+      if (result === undefined) {
+        return undefined;
+      }
       if (result !== null) artworkCache.set(key, result);
       else if (!artworkCache.has(key)) artworkCache.set(key, null);
       notifyArtworkChanged();
       return result;
-    })().finally(() => artworkInFlight.delete(key));
+    }).finally(() => artworkInFlight.delete(key));
   artworkInFlight.set(key, pending);
   return pending;
 }

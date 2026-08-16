@@ -18,6 +18,19 @@ router = APIRouter(prefix="/api", tags=["tracks"])
 
 # Caché en memoria de carátulas embebidas: {file_path: (bytes, mime)}
 _artwork_cache: dict[str, tuple[bytes, str]] = {}
+# Archivos confirmados SIN imagen embebida (evita re-abrir mutagen por pista)
+_no_artwork: set[str] = set()
+
+
+def _sniff_mime(data: bytes) -> str:
+    """Detecta el MIME por las magic bytes (JPEG/PNG/GIF); por defecto JPEG."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
 
 
 def _cors_headers() -> dict[str, str]:
@@ -75,8 +88,11 @@ def _is_indexed(db: Session, path: str) -> bool:
 
 
 def _read_embedded_artwork(path: str) -> tuple[bytes, str] | None:
-    """Extrae la portada incrustada con mutagen: ID3 APIC (MP3), PICTURE
-    (FLAC/Vorbis), covr (MP4/M4A), APE. Devuelve (bytes, mime) o None."""
+    """Extrae la portada incrustada con mutagen y sin fallos silenciosos:
+    1) frames ID3 APIC (MP3, AIFF, WAV con chunk ID3) · 2) pictures
+    (FLAC/OGG/OPUS) · 3) covr (MP4/M4A) · 4) APE "Cover Art (Front)".
+    Cada formato se intenta en su propio bloque: un tag corrupto de un
+    contenedor no impide probar los demás."""
     try:
         from mutagen import File
     except ImportError:
@@ -85,27 +101,60 @@ def _read_embedded_artwork(path: str) -> tuple[bytes, str] | None:
         audio = File(path)
         if audio is None:
             return None
-        # MP3 / ID3: etiquetas APIC
-        tags = getattr(audio, "tags", None)
-        if tags is not None:
+    except Exception:
+        return None
+    tags = getattr(audio, "tags", None)
+
+    # 1) ID3 APIC (MP3 / AIFF / WAV): todos los frames, tolere fallos parciales
+    if tags is not None and hasattr(tags, "getall"):
+        try:
             for apic in tags.getall("APIC"):
-                data = apic.data if hasattr(apic, "data") else None
+                data = getattr(apic, "data", None)
                 if data:
-                    return (data, apic.mime or "image/jpeg")
-        # FLAC / OGG / OPUS: pictures
-        pictures = getattr(audio, "pictures", []) or []
+                    mime = getattr(apic, "mime", None) or None
+                    return data, mime or _sniff_mime(bytes(data))
+        except Exception:
+            pass
+
+    # 2) FLAC / OGG / OPUS: pictures
+    try:
+        pictures = getattr(audio, "pictures", None) or []
         for pic in pictures:
             data = getattr(pic, "data", None)
             if data:
-                return (data, getattr(pic, "mime", None) or "image/jpeg")
-        # MP4 / M4A: covr
+                mime = getattr(pic, "mime", None) or None
+                return data, mime or _sniff_mime(bytes(data))
+    except Exception:
+        pass
+
+    # 3) MP4 / M4A: covr
+    try:
         if tags is not None and tags.get("covr"):
             item = tags["covr"][0]
-            data = getattr(item, "data", None) or (bytes(item) if isinstance(item, bytes) else None)
+            data = getattr(item, "data", None) or (
+                bytes(item) if isinstance(item, bytes) else None
+            )
             if data:
-                return (data, "image/jpeg" if not isinstance(item, bytes) else "image/jpeg")
+                return data, _sniff_mime(bytes(data))
     except Exception:
-        return None
+        pass
+
+    # 4) APE tags: "Cover Art (Front)" → valor binario tras el separador NUL
+    try:
+        if tags is not None and hasattr(tags, "keys"):
+            for key in tags.keys():
+                if "cover art" in str(key).lower():
+                    val = tags.get(key)
+                    if not val:
+                        continue
+                    raw = bytes(val) if not isinstance(val, bytes) else val
+                    parts = raw.split(b"\x00", 2)
+                    data = parts[2] if len(parts) > 2 else raw
+                    if data:
+                        return data, _sniff_mime(data)
+    except Exception:
+        pass
+
     return None
 
 SORTABLE = {
@@ -353,6 +402,8 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
                 "Cache-Control": "public, max-age=86400",
             },
         )
+    if str(p) in _no_artwork:
+        raise HTTPException(404, "Sin carátula")
     embedded = _read_embedded_artwork(str(p))
     if embedded is not None:
         data, mime = embedded
@@ -367,6 +418,9 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
                 "Cache-Control": "public, max-age=86400",
             },
         )
+    if len(_no_artwork) > 256:
+        _no_artwork.clear()
+    _no_artwork.add(str(p))
 
     # 2-3) Carátulas adjuntas en disco
     candidates = [p.with_suffix(ext) for ext in (".jpg", ".jpeg", ".png")]
@@ -382,6 +436,7 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
                     "Cache-Control": "public, max-age=86400",
                 },
             )
+    # Confirmación explícita de "no tiene imagen": 404 (y no re-intentar).
     raise HTTPException(404, "Sin carátula")
 
 

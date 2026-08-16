@@ -85,7 +85,9 @@ export default function Artwork({ track, accent, size = 56, remountKey }: Props)
           key={remountKey}
           className="animate-fade-in relative h-full w-full overflow-hidden rounded-[9px] bg-slate-950"
         >
-          {art ? (
+          {art === null ? (
+            <LogoFallback accent={accent} />
+          ) : art ? (
             <img
               src={art}
               alt={track?.title ?? "carátula"}
@@ -93,7 +95,7 @@ export default function Artwork({ track, accent, size = 56, remountKey }: Props)
               className="h-full w-full object-cover"
             />
           ) : (
-            <LogoFallback accent={accent} />
+            <LoadingPlaceholder accent={accent} />
           )}
         </div>
       </div>
@@ -113,7 +115,16 @@ export function CoverThumb({ track, size = 28, className }: { track: Track; size
       className={`relative inline-block shrink-0 overflow-hidden rounded-md border border-slate-700/60 bg-gradient-to-br from-slate-800 to-slate-950 ${className ?? ""}`}
       style={{ width: size, height: size }}
     >
-      {art ? (
+      {art === null ? (
+        <img
+          src={LOGO_URL}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className="absolute inset-0 m-auto h-[62%] w-[62%] rounded object-cover opacity-80"
+        />
+      ) : art ? (
         <img
           src={art}
           alt=""
@@ -123,16 +134,32 @@ export function CoverThumb({ track, size = 28, className }: { track: Track; size
           className="h-full w-full object-cover"
         />
       ) : (
-        <img
-          src={LOGO_URL}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          draggable={false}
-          className="absolute inset-0 m-auto h-[62%] w-[62%] rounded object-cover opacity-80"
-        />
+        <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-slate-800/50" />
       )}
     </span>
+  );
+}
+
+/**
+ * Estado "extrayendo": la petición al backend aún está en vuelo (pending) o
+ * falló de forma transitoria. MUY importante: no es una confirmación de que
+ * el track carezca de portada; por eso aquí jamás se muestra el logo (solo
+ * un placeholder neutro que pulsa suavemente) para no "vestir" de sin-
+ * portada un cover real que tarda unos milisegundos en llegar.
+ */
+function LoadingPlaceholder({ accent }: { accent: string }) {
+  return (
+    <div className="absolute inset-0 animate-pulse">
+      <div
+        className="absolute inset-0"
+        style={{
+          background: `radial-gradient(circle at 50% 40%, ${hexRgba(
+            accent,
+            0.16
+          )} 0%, rgba(10,13,20,0.8) 65%)`,
+        }}
+      />
+    </div>
   );
 }
 
