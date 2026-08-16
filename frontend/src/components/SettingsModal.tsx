@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Loader2, Save, X } from "lucide-react";
+import { Eraser, Loader2, Save, X } from "lucide-react";
 import type { Settings } from "../types";
-import { api } from "../api";
+import { api, resetWebCache } from "../api";
 
 interface Props {
   open: boolean;
@@ -12,8 +12,27 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [resetting, setResetting] = useState(false);
   /** En la app de escritorio (Electron) el preload expone smartSet.isDesktop. */
   const isDesktop = typeof window !== "undefined" && !!window.smartSet?.isDesktop;
+
+  const resetWeb = async () => {
+    if (
+      !window.confirm(
+        "Se borrarán las cachés locales del NAVEGADOR (carátulas, metadatos y almacenamiento web). La biblioteca de la base de datos y la app de escritorio NO se ven afectadas. ¿Continuar?"
+      )
+    ) {
+      return;
+    }
+    setResetting(true);
+    try {
+      await resetWebCache();
+      window.location.reload();
+    } catch (e) {
+      console.error(e);
+      setResetting(false);
+    }
+  };
 
   useEffect(() => {
     if (open) {
@@ -134,6 +153,26 @@ export default function SettingsModal({ open, onClose }: Props) {
               className="h-4 w-4 disabled:opacity-30"
             />
           </div>
+
+          {!isDesktop && (
+            <div className={row}>
+              <div>
+                <p className={label}>Resetear caché web</p>
+                <p className={desc}>
+                  Borra LocalStorage, IndexedDB y Cache Storage del navegador (carátulas o
+                  metadatos rotos). Nunca afecta a la base de datos ni a la app de escritorio.
+                </p>
+              </div>
+              <button
+                onClick={resetWeb}
+                disabled={resetting}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-panel-3 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-red-500/50 hover:text-red-300 disabled:opacity-40"
+              >
+                {resetting ? <Loader2 size={12} className="animate-spin" /> : <Eraser size={12} />}
+                {resetting ? "Borrando…" : "Borrar caché"}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="mt-5 flex items-center gap-3">

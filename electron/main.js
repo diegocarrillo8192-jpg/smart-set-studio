@@ -11,6 +11,38 @@ const isDev = !app.isPackaged;
 let backendProc = null;
 let mainWindow = null;
 
+// Instancia única: si ya hay otra ventana abierta, enfocarla y salir.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  app.whenReady().then(async () => {
+    await startBackend();
+    createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+
+  app.on("before-quit", () => {
+    if (backendProc) {
+      backendProc.kill();
+      backendProc = null;
+    }
+  });
+}
+
 function waitForUrl(url, timeoutMs = 30000) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -146,23 +178,4 @@ ipcMain.handle("dialog:selectFolder", async (_event, purpose) => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
-});
-
-app.whenReady().then(async () => {
-  await startBackend();
-  createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
-
-app.on("before-quit", () => {
-  if (backendProc) {
-    backendProc.kill();
-    backendProc = null;
-  }
 });

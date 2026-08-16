@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { AnalysisBar, HotCue, TrackAnalysis } from "../types";
 
@@ -26,7 +26,9 @@ const HALF_WINDOW = 8;
 
 interface Sample {
   t: number;
-  v: number;
+  lo: number;
+  mid: number;
+  hi: number;
 }
 
 /** Caché de análisis por ruta (compartida entre todos los Waveform). */
@@ -47,6 +49,25 @@ function hexA(hex: string, a: number): string {
     return `rgba(${r},${g},${b},${a})`;
   }
   return hex;
+}
+
+/** Barra de pico con capuchón redondo (arriba) — evita rectángulos duros. */
+function peakBar(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius = 1.5
+): void {
+  const r = Math.min(radius, w / 2, h / 2);
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, [r, r, r, r]);
+    ctx.fill();
+  } else {
+    ctx.fillRect(x, y, w, h);
+  }
 }
 
 /** Colores de la onda RGB (estilo Rekordbox): graves / medios / agudos. */
@@ -97,6 +118,21 @@ export default function Waveform({
   const [analysis, setAnalysis] = useState<TrackAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
 
+  // Pico máximo de cada banda (graves/medios/agudos) del análisis completo:
+  // la envolvente se normaliza contra él para reflejar la AMPLITUD REAL del
+  // archivo (drops = altura máxima, breaks ≈ vacíos) en vez de una forma plana.
+  const bandMax = useMemo(() => {
+    const m: [number, number, number] = [1e-6, 1e-6, 1e-6];
+    if (analysis?.bars) {
+      for (const b of analysis.bars) {
+        if (b.lo > m[0]) m[0] = b.lo;
+        if (b.mid > m[1]) m[1] = b.mid;
+        if (b.hi > m[2]) m[2] = b.hi;
+      }
+    }
+    return m;
+  }, [analysis]);
+
   // Carga lazy del análisis estructural (con caché en memoria por pista)
   useEffect(() => {
     if (!analysisPath) {
@@ -137,7 +173,7 @@ export default function Waveform({
     if (!ctx) return;
 
     let raf = 0;
-    const data = new Uint8Array(analyser?.frequencyBinCount ?? 1024);
+    const freq = new Uint8Array(analyser?.frequencyBinCount ?? 1024);
 
     const draw = () => {
       raf = requestAnimationFrame(draw);
@@ -147,16 +183,28 @@ export default function Waveform({
       const rate = el?.playbackRate && el.playbackRate > 0 ? el.playbackRate : 1;
       const beat = bpm && bpm > 0 ? 60 / (bpm * rate) : null;
 
-      // Muestrear la señal en vivo al buffer de la ventana (solo sin análisis)
+      // Muestrear el espectro en vivo al buffer de la ventana (solo sin análisis):
+      // bandas graves/kick (rojo), medios (verde) y agudos/hi-hats (azul).
       if (!analysis && el && !el.paused && analyser) {
-        analyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += Math.abs((data[i] - 128) / 128);
-        const v = sum / data.length;
+        analyser.getByteFrequencyData(freq);
+        const n = freq.length;
+        const hiStart = Math.min(n - 1, Math.floor(n * 0.12));
+        const midStart = Math.min(hiStart - 1, Math.floor(n * 0.03));
+        let lo = 0, mid = 0, hi = 0;
+        for (let i = 1; i < midStart; i++) lo += freq[i];
+        for (let i = midStart; i < hiStart; i++) mid += freq[i];
+        for (let i = hiStart; i < n; i++) hi += freq[i];
+        const v = (t: number, c: number) => Math.min(1, (c / (t * 255)) * 1.6);
+        const sample = {
+          t: tCur,
+          lo: v(Math.max(1, midStart - 1), lo),
+          mid: v(hiStart - midStart, mid),
+          hi: v(n - hiStart, hi),
+        };
         if (lastTRef.current >= 0 && Math.abs(tCur - lastTRef.current) > 0.5) {
           samplesRef.current = []; // seek abrupto: descartar muestra obsoleta
         }
-        samplesRef.current.push({ t: tCur, v });
+        samplesRef.current.push(sample);
         lastTRef.current = tCur;
         const cut = tCur - HALF_WINDOW;
         while (samplesRef.current.length && samplesRef.current[0].t < cut) {
@@ -235,8 +283,10 @@ export default function Waveform({
           }
         }
 
-        // Barras RGB apiladas (graves rojo → medios verde → agudos azul)
-        const nCols = Math.min(Math.max(1, Math.floor(w / 3)), 320);
+        // Onzas RGB reales de las frecuencias del archivo: envolventes
+        // suaves (graves/medios/agudos con sus picos, caídas y zonas de
+        // volumen) en lugar de bloques rectangulares sólidos.
+        const nCols = Math.min(Math.max(1, Math.floor(w / 4)), 320);
         const dtCol = (t1 - t0) / nCols;
         const sumBars = (bars: AnalysisBar[], ta: number, tb: number) => {
           let lo = 0, mid = 0, hi = 0, n = 0;
@@ -264,33 +314,37 @@ export default function Waveform({
           }
           return { lo: lo / n, mid: mid / n, hi: hi / n };
         };
+        // Barras RGB apiladas estilo Rekordbox 7: graves (rojo/kick) en la base,
+        // medios (verde) encima y agudos (azul/hi-hats) en la punta. La altura
+        // de cada banda se escala contra su PICO REAL en el archivo → drops
+        // como columnas altas y breaks como vacíos pronunciados.
+        const maxHalf = h * 0.3;
+        const yc = h / 2;
+        const unit = maxHalf / 3;
         for (let i = 0; i < nCols; i++) {
           const ta = t0 + i * dtCol;
           const s = sumBars(analysis.bars, ta, ta + dtCol);
           if (!s) continue;
           const x = cx + (ta + dtCol / 2 - tCur) * pxPerSec;
           if (x < -3 || x > w + 3) continue;
-          const total = Math.min(1, s.lo + s.mid + s.hi);
-          if (total <= 0.01) continue;
-          const maxH = h * 0.42;
-          let acc = 0;
-          const bands = [
-            { v: s.lo, c: RGB_COLORS[0] },
-            { v: s.mid, c: RGB_COLORS[1] },
-            { v: s.hi, c: RGB_COLORS[2] },
+          const norm: [number, number, number] = [
+            s.lo / bandMax[0],
+            s.mid / bandMax[1],
+            s.hi / bandMax[2],
           ];
-          for (const band of bands) {
-            if (band.v <= 0.005) continue;
-            const frac = (band.v / Math.max(s.lo + s.mid + s.hi, 1e-9)) * total;
-            const hh = Math.max(1.2, frac * maxH);
-            const y0 = h / 2 - hh;
-            ctx.fillStyle = band.c;
-            ctx.globalAlpha = Math.min(1, 0.45 + band.v);
-            ctx.fillRect(x, y0, 2, hh * 2);
+          const energy = norm[0] + norm[1] + norm[2];
+          if (energy < 0.06) continue; // silencio/break → columna vacía
+          let cum = 0;
+          for (let b = 0; b < 3; b++) {
+            const n = Math.min(1, norm[b]);
+            if (n < 0.02) continue;
+            const seg = n * unit;
+            ctx.fillStyle = RGB_COLORS[b];
+            ctx.globalAlpha = 0.5 + 0.5 * n;
+            peakBar(ctx, x, yc - cum - seg, 2.5, seg * 2, 1);
             ctx.globalAlpha = 1;
-            acc += hh;
+            cum += seg;
           }
-          void acc;
         }
 
         // Hot cues automáticos del análisis (Intro, Drop, Break, Outro)
@@ -369,20 +423,30 @@ export default function Waveform({
         }
 
         const samples = samplesRef.current;
-        const barW = 2;
-        const neonGrad = ctx.createLinearGradient(0, 0, 0, h);
-        neonGrad.addColorStop(0, hexA(color, 1));
-        neonGrad.addColorStop(0.5, hexA(color, 0.8));
-        neonGrad.addColorStop(1, hexA(color, 0.35));
+        // Barras RGB en vivo: mismas 3 frecuencias (rojo bajos, verde medios,
+        // azul agudos) apiladas, con el pasado más brillante que el futuro.
+        const maxHalf = h * 0.3;
+        const yc = h / 2;
+        const unit = maxHalf / 3;
         for (const s of samples) {
           const x = xOf(s.t);
-          if (x < -barW || x > w) continue;
-          const bh = Math.max(2, s.v * h * 0.92);
-          ctx.globalAlpha = s.t < tCur ? 0.95 : 0.45;
-          ctx.fillStyle = neonGrad;
-          ctx.fillRect(x, (h - bh) / 2, barW, bh);
+          if (x < -3 || x > w + 3) continue;
+          const norm = [Math.min(1, s.lo), Math.min(1, s.mid), Math.min(1, s.hi)];
+          const energy = norm[0] + norm[1] + norm[2];
+          if (energy < 0.06) continue;
+          const past = s.t < tCur;
+          let cum = 0;
+          for (let b = 0; b < 3; b++) {
+            const n = norm[b];
+            if (n < 0.02) continue;
+            const seg = n * unit;
+            ctx.fillStyle = RGB_COLORS[b];
+            ctx.globalAlpha = (past ? 0.95 : 0.45) * (0.5 + 0.5 * n);
+            peakBar(ctx, x, yc - cum - seg, 2, seg * 2, 1);
+            ctx.globalAlpha = 1;
+            cum += seg;
+          }
         }
-        ctx.globalAlpha = 1;
 
         // Hot Cues del DJ (prop)
         for (const c of cues) {
@@ -468,7 +532,7 @@ export default function Waveform({
   const draggingRef = useRef(false);
 
   /** Clic o arrastre = salto instantáneo a esa posición exacta de la canción. */
-  const seekAt = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const seekAt = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!el || !onSeek) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -478,14 +542,14 @@ export default function Waveform({
     onSeek(Math.max(0, t));
   };
 
-  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!el || !onSeek) return;
     draggingRef.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
     seekAt(e);
   };
 
-  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (draggingRef.current) seekAt(e);
   };
 
@@ -494,16 +558,21 @@ export default function Waveform({
   };
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={520}
-      height={height}
-      className="w-full cursor-crosshair touch-none select-none"
-      style={{ height }}
+    <div
+      className="relative w-full cursor-crosshair touch-none select-none"
+      style={{ height: height + 8 }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
-    />
+    >
+      <canvas
+        ref={canvasRef}
+        width={520}
+        height={height}
+        className="absolute inset-x-0 top-1/2 w-full -translate-y-1/2"
+        style={{ height }}
+      />
+    </div>
   );
 }

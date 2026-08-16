@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
-import { api } from "../api";
+import { api, pickMusicFolder, registerLocalFiles } from "../api";
 
 interface Props {
   folders: Folder[];
@@ -37,11 +37,19 @@ function useFolderPicker(): {
     if (window.smartSet?.selectFolder) {
       return window.smartSet.selectFolder();
     }
+    // Versión web: File System Access API con permiso explícito del usuario
+    // (showDirectoryPicker). Solo Chromium; el resto cae al <input> local.
+    const root = await pickMusicFolder();
+    if (root) return root;
     return new Promise((resolve) => {
       if (!inputRef.current) return resolve(null);
       inputRef.current.onchange = () => {
-        const file = inputRef.current?.files?.[0];
-        if (!file) return resolve(null);
+        const files = inputRef.current?.files;
+        if (!files || files.length === 0) return resolve(null);
+        // Versión web: retener los File para reproducirlos vía Blob URLs
+        // (URL.createObjectURL) aunque no haya backend local en 127.0.0.1.
+        registerLocalFiles(Array.from(files));
+        const file = files[0];
         const webkit = file as unknown as { webkitRelativePath?: string };
         const relative = webkit.webkitRelativePath ?? "";
         resolve(relative ? relative.split("/")[0] : file.name);
@@ -303,7 +311,7 @@ export default function Sidebar({
                 </span>
                 <p className="text-[11px] font-semibold text-slate-400">No hay playlists creadas</p>
                 <p className="text-[10px] leading-relaxed text-slate-500">
-                  Usa <b className="font-semibold text-fuchsia-300/80">Smart Set Generator</b> para crear tu primer set
+                  Usa <b className="font-semibold text-cyan-300/80">Smart Set Generator</b> para crear tu primer set
                 </p>
               </div>
             </div>

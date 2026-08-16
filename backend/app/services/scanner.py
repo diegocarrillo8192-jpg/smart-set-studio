@@ -18,12 +18,26 @@ _jobs: dict[int, ScanJob] = {}
 
 
 def discover_audio_files(root: str) -> list[Path]:
-    """Lista recursivamente los archivos de audio bajo `root`."""
+    """Lista recursivamente los archivos de audio bajo `root`.
+
+    Nunca lanza: si un subdirectorio no es accesible (permisos, enlaces rotos,
+    disco removido) se salta y se registra en el log; una carpeta entera rota
+    no debe tumbar el escaneo ni la respuesta HTTP del endpoint."""
     files: list[Path] = []
     root_path = Path(root)
-    for dirpath, _dirnames, filenames in os.walk(root_path):
+    if not root_path.exists():
+        logger.warning("Carpeta raíz inexistente durante el escaneo: %s", root)
+        return files
+
+    def _on_error(exc: OSError) -> None:
+        logger.warning("Subdirectorio no legible durante el escaneo: %s", exc)
+
+    for dirpath, _dirnames, filenames in os.walk(root_path, onerror=_on_error):
         for name in filenames:
-            ext = Path(name).suffix.lower()
+            try:
+                ext = Path(name).suffix.lower()
+            except Exception:  # noqa: BLE001
+                continue  # nombre ilegible: omitir, jamás abortar
             if ext in AUDIO_EXTENSIONS:
                 files.append(Path(dirpath) / name)
     return files
@@ -117,7 +131,14 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
 
             job.processed_files = idx + 1
             if idx % 5 == 0:
-                db.commit()
+                try:
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    # Un commit intermedio no debe abortar el escaneo restante:
+                    # se descarta la transacción y se reintenta en el siguiente
+                    # lote (los tracks pendientes se re-insertan al re-procesar).
+                    db.rollback()
+                    logger.warning("Commit intermedio del escaneo fallido: %s", exc)
 
         db.commit()
         folder.last_scanned_at = job.started_at

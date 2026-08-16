@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AudioLines,
+  ChevronDown,
   Clock,
   Disc2,
   Disc3,
@@ -17,6 +19,7 @@ import type { DJSet, EnergyProfile, Folder, SetItem, Track } from "../types";
 import { ENERGY_PROFILES } from "../types";
 import { api } from "../api";
 import { fmtBpm } from "../lib/format";
+import { CoverThumb } from "./Artwork";
 
 interface Props {
   folders: Folder[];
@@ -29,6 +32,8 @@ interface Props {
   onLoadSetToDecks: (set: DJSet) => void;
   seedTrack: Track | null;
   onClearSeed: () => void;
+  /** IDs de los tracks que suenan ahora en Deck A/B (resaltado en la lista). */
+  playingTrackIds: number[];
 }
 
 const DURATIONS = [30, 60, 120, 180];
@@ -157,6 +162,7 @@ export default function SetGenerator({
   onLoadSetToDecks,
   seedTrack,
   onClearSeed,
+  playingTrackIds,
 }: Props) {
   const [duration, setDuration] = useState(60);
   const [customDuration, setCustomDuration] = useState("");
@@ -166,6 +172,26 @@ export default function SetGenerator({
   const [exporting, setExporting] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const sourcesRef = useRef<HTMLDivElement>(null);
+  const profileRef = useRef<HTMLDivElement>(null);
+
+  // Cierra los dropdowns (fuentes / perfil) al hacer clic fuera
+  useEffect(() => {
+    if (!sourcesOpen && !profileOpen) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (sourcesOpen && sourcesRef.current && !sourcesRef.current.contains(target)) {
+        setSourcesOpen(false);
+      }
+      if (profileOpen && profileRef.current && !profileRef.current.contains(target)) {
+        setProfileOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [sourcesOpen, profileOpen]);
 
   useEffect(() => {
     if (folders.length > 0 && selectedFolders.size === 0) {
@@ -265,15 +291,15 @@ export default function SetGenerator({
             <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
               <Clock size={12} /> Duración
             </h3>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex h-[42px] flex-wrap gap-1.5">
               {DURATIONS.map((d) => (
                 <button
                   key={d}
                   onClick={() => setDuration(d)}
-                  className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
+                  className={`h-full rounded-lg border px-2.5 text-xs font-semibold transition ${
                     duration === d
-                      ? "bg-violet-600 text-white"
-                      : "bg-panel-2 text-slate-300 hover:bg-panel-3"
+? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_12px_rgba(34,211,238,0.25)]"
+                      : "border-slate-800 bg-panel-2 text-slate-300 hover:border-cyan-400/30 hover:bg-panel-3 hover:text-cyan-100 hover:shadow-[0_0_10px_rgba(34,211,238,0.15)]"
                   }`}
                 >
                   {d < 60 ? `${d} min` : `${d / 60}h`}
@@ -281,8 +307,10 @@ export default function SetGenerator({
               ))}
               <button
                 onClick={() => setDuration(0)}
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
-                  duration === 0 ? "bg-violet-600 text-white" : "bg-panel-2 text-slate-300 hover:bg-panel-3"
+                className={`h-full rounded-lg border px-2.5 text-xs font-semibold transition ${
+                  duration === 0
+                    ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_12px_rgba(34,211,238,0.25)]"
+                    : "border-slate-800 bg-panel-2 text-slate-300 hover:border-cyan-400/30 hover:bg-panel-3 hover:text-cyan-100 hover:shadow-[0_0_10px_rgba(34,211,238,0.15)]"
                 }`}
               >
                 Custom
@@ -305,37 +333,75 @@ export default function SetGenerator({
             <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
               <FolderTree size={12} /> Fuentes
             </h3>
-            <div className="flex flex-wrap gap-2">
-              {folders.length === 0 && (
-                <p className="w-full rounded-lg border border-dashed border-slate-700 p-2.5 text-center text-[11px] text-slate-400">
+            <div ref={sourcesRef} className="relative h-[42px]">
+              {folders.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-slate-700 p-2.5 text-center text-[11px] text-slate-400">
                   No hay carpetas importadas. Agrega una carpeta en la barra lateral para poder generar sets.
                 </p>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setSourcesOpen((o) => !o)}
+                    className={`flex h-full w-full items-center gap-2 rounded-lg border px-2.5 text-xs font-semibold transition ${
+                      sourcesOpen
+                        ? "border-violet-500 bg-violet-500/15 text-violet-200"
+                        : "border-slate-700 bg-panel-2 text-slate-200 hover:border-slate-500"
+                    }`}
+                  >
+                    <FolderTree size={13} />
+                    <span className="min-w-0 flex-1 truncate text-left">
+                      {selectedFolders.size === 0
+                        ? "Ninguna carpeta"
+                        : selectedFolders.size === folders.length
+                          ? "Todas las carpetas"
+                          : `${selectedFolders.size} de ${folders.length} carpetas`}
+                    </span>
+                    <ChevronDown size={13} className={`shrink-0 transition-transform ${sourcesOpen ? "rotate-180" : ""}`} />
+                  </button>
+                  {sourcesOpen && (
+                    <div className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-lg border border-slate-700 bg-panel-2 shadow-xl shadow-black/50">
+                      <div className="max-h-48 overflow-y-auto p-1.5">
+                        {folders.map((f) => (
+                          <label
+                            key={f.id}
+                            className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-xs text-slate-300 transition hover:bg-panel-3"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedFolders.has(f.id)}
+                              onChange={() =>
+                                setSelectedFolders((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(f.id)) next.delete(f.id);
+                                  else next.add(f.id);
+                                  return next;
+                                })
+                              }
+                              className="h-3 w-3 accent-violet-500"
+                            />
+                            <span className="min-w-0 flex-1 truncate">{f.name}</span>
+                            <span className="text-[9px] text-slate-500">{f.track_count}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <div className="flex gap-2 border-t border-slate-700/70 p-1.5">
+                        <button
+                          onClick={() => setSelectedFolders(new Set(folders.map((f) => f.id)))}
+                          className="flex-1 rounded-md bg-panel-3 py-1 text-[10px] font-semibold text-slate-300 transition hover:text-white"
+                        >
+                          Todas
+                        </button>
+                        <button
+                          onClick={() => setSelectedFolders(new Set())}
+                          className="flex-1 rounded-md bg-panel-3 py-1 text-[10px] font-semibold text-slate-500 transition hover:text-rose-300"
+                        >
+                          Ninguna
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
-              {folders.map((f) => (
-                <label
-                  key={f.id}
-                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
-                    selectedFolders.has(f.id)
-                      ? "border-violet-500 bg-violet-500/15 text-violet-200"
-                      : "border-slate-700 text-slate-400 hover:text-white"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedFolders.has(f.id)}
-                    onChange={() =>
-                      setSelectedFolders((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(f.id)) next.delete(f.id);
-                        else next.add(f.id);
-                        return next;
-                      })
-                    }
-                    className="h-3 w-3"
-                  />
-                  {f.name} <span className="text-[9px] text-slate-500">{f.track_count}</span>
-                </label>
-              ))}
             </div>
             {seedTrack && (
               <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
@@ -350,26 +416,60 @@ export default function SetGenerator({
             <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
               <LayoutList size={12} /> Perfil de Curva de Energía
             </h3>
-            <div className="space-y-1.5">
-              {PROFILES.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setProfile(p)}
-                  className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${
-                    profile === p
-                      ? "border-violet-500 bg-violet-500/15"
-                      : "border-slate-700 bg-panel-2 hover:border-slate-500"
-                  }`}
-                >
-                  <span className={`h-6 w-1.5 shrink-0 rounded-full bg-gradient-to-b ${ENERGY_PROFILES[p].color}`} />
-                  <span>
-                    <span className={`block text-xs font-semibold ${profile === p ? "text-violet-200" : "text-slate-200"}`}>
-                      {ENERGY_PROFILES[p].label}
-                    </span>
-                    <span className="block text-[10px] text-slate-500">{ENERGY_PROFILES[p].description}</span>
-                  </span>
-                </button>
-              ))}
+            <div ref={profileRef} className="relative h-[42px]">
+              <button
+                onClick={() => setProfileOpen((o) => !o)}
+                className={`flex h-full w-full items-center gap-2 rounded-lg border px-2.5 text-left transition ${
+                  profileOpen
+                    ? "border-violet-500 bg-violet-500/15"
+                    : "border-slate-700 bg-panel-2 hover:border-slate-500"
+                }`}
+              >
+                <span
+                  className={`h-6 w-1.5 shrink-0 rounded-full bg-gradient-to-b ${ENERGY_PROFILES[profile].color}`}
+                  title={ENERGY_PROFILES[profile].label}
+                />
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-slate-100">
+                  {ENERGY_PROFILES[profile].label}
+                </span>
+                <ChevronDown
+                  size={13}
+                  className={`shrink-0 text-slate-400 transition-transform ${profileOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+              {profileOpen && (
+                <div className="absolute inset-x-0 top-full z-20 mt-1 overflow-hidden rounded-lg border border-slate-700 bg-panel-2 shadow-xl shadow-black/50">
+                  {PROFILES.map((p) => {
+                    const active = profile === p;
+                    return (
+                      <button
+                        key={p}
+                        onClick={() => {
+                          setProfile(p);
+                          setProfileOpen(false);
+                        }}
+                        className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition ${
+                          active ? "bg-violet-500/10" : "hover:bg-panel-3"
+                        }`}
+                      >
+                        <span
+                          className={`h-6 w-1.5 shrink-0 rounded-full bg-gradient-to-b ${ENERGY_PROFILES[p].color}`}
+                          title={ENERGY_PROFILES[p].label}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-xs">
+                          <span className={`font-semibold ${active ? "text-violet-200" : "text-slate-200"}`}>
+                            {ENERGY_PROFILES[p].label}
+                          </span>
+                          <span className="text-slate-500"> — {ENERGY_PROFILES[p].description}</span>
+                        </span>
+                        {active && (
+                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-400 shadow-[0_0_6px_rgba(167,139,250,0.9)]" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -377,7 +477,7 @@ export default function SetGenerator({
         <button
           onClick={generate}
           disabled={generating || folders.length === 0}
-          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 py-3 text-sm font-black uppercase tracking-widest text-white shadow-lg shadow-violet-900/40 transition hover:brightness-110 disabled:opacity-40"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-violet-300/30 bg-violet-400/[0.07] py-3 text-sm font-black uppercase tracking-widest text-violet-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_0_18px_rgba(139,92,246,0.18),0_10px_30px_rgba(0,0,0,0.35)] backdrop-blur-md transition hover:border-violet-300/55 hover:bg-violet-400/[0.13] hover:text-white hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_0_26px_rgba(139,92,246,0.35),0_12px_34px_rgba(0,0,0,0.45)] disabled:opacity-40"
           title={folders.length === 0 ? "Importa una carpeta primero" : undefined}
         >
           {generating ? <Loader2 size={18} className="animate-spin" /> : <Wand2 size={18} />}
@@ -429,7 +529,7 @@ export default function SetGenerator({
                 <button
                   onClick={exportXml}
                   disabled={exporting !== null}
-                  className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-500 disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-emerald-400/50 hover:bg-emerald-500/10 hover:text-emerald-300 hover:shadow-[0_0_10px_rgba(16,185,129,0.25)] disabled:opacity-40"
                 >
                   {exporting === "xml" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
                   XML Rekordbox / Serato
@@ -437,7 +537,7 @@ export default function SetGenerator({
                 <button
                   onClick={exportUsb}
                   disabled={exporting !== null}
-                  className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-2.5 py-1.5 text-xs font-bold text-white transition hover:bg-sky-500 disabled:opacity-40"
+                  className="flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs font-semibold text-slate-300 transition hover:border-cyan-400/50 hover:bg-cyan-500/10 hover:text-cyan-300 hover:shadow-[0_0_10px_rgba(34,211,238,0.25)] disabled:opacity-40"
                 >
                   {exporting === "usb" ? <Loader2 size={13} className="animate-spin" /> : <Usb size={13} />}
                   Copiar a USB
@@ -464,7 +564,11 @@ export default function SetGenerator({
                       </div>
                     )}
                     <div
-                      className="group flex items-center gap-2 rounded-lg bg-panel-2 px-2.5 py-1.5 transition hover:bg-panel-3"
+                      className={`group flex cursor-grab items-center gap-2 rounded-lg bg-panel-2 px-2.5 py-1.5 transition hover:bg-panel-3 active:cursor-grabbing ${
+                        playingTrackIds.includes(item.track.id)
+                          ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
+                          : ""
+                      }`}
                       draggable
                       onDragStart={(e) => {
                         e.dataTransfer.setData("application/json", JSON.stringify(item.track));
@@ -501,13 +605,21 @@ export default function SetGenerator({
                         <Disc2 size={12} />
                       </button>
                       <div className="min-w-0 flex-1 text-left">
-                        <p className="truncate text-xs font-medium text-slate-100">{item.track.title}</p>
-                        <p className="truncate text-[10px] text-slate-500">{item.track.artist}</p>
+                        <p className="flex items-center gap-2 text-xs font-medium text-slate-100">
+                          <CoverThumb track={item.track} size={20} />
+                          <span className="min-w-0 flex-1 truncate">{item.track.title}</span>
+                          {playingTrackIds.includes(item.track.id) && (
+                            <AudioLines size={11} className="shrink-0 animate-pulse text-emerald-400" />
+                          )}
+                        </p>
+                        <p className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</p>
                       </div>
                       <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${item.track.camelot_key?.endsWith("B") ? "bg-violet-500/20 text-violet-300" : "bg-cyan-500/20 text-cyan-300"}`}>
                         {item.track.camelot_key}
                       </span>
-                      <span className="w-10 text-right font-mono text-[10px] text-slate-400">{fmtBpm(item.track.bpm)}</span>
+                      <span className="w-20 text-right font-mono text-[10px] text-slate-400">
+                        {fmtBpm(item.track.bpm)} BPM
+                      </span>
                       <span className="w-8 text-right font-mono text-[10px] text-slate-500">E{item.track.energy}</span>
                     </div>
                   </div>

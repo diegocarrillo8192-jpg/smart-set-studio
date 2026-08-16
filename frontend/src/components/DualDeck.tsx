@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Radio } from "lucide-react";
 import type { Track } from "../types";
 import { audioEngine } from "../lib/audio";
-import { api } from "../api";
+import { api, markWebCacheUnhealthy } from "../api";
 import Deck from "./Deck";
 import Crossfader, { CrossfaderHeader } from "./Crossfader";
 
@@ -14,6 +14,8 @@ interface Props {
   onActivateDeck?: (name: "A" | "B") => void;
   /** Deck activo (destacado con glow neón suave). */
   activeDeck?: "A" | "B" | null;
+  /** Notifica si cada deck está reproduciendo (para resaltar en las tablas). */
+  onDeckPlayingChange?: (name: "A" | "B", playing: boolean) => void;
 }
 
 function parseTrack(json: string): Track | null {
@@ -43,7 +45,7 @@ function DropOverlay({ deck, accent }: { deck: string; accent: string }) {
  * Reproductor compacto (Dual Pre-listener): DECK A | CROSSFADER | DECK B.
  * Controles directos por plato (SYNC/FILTER) y crossfader con curva de mute.
  */
-export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActivateDeck, activeDeck }: Props) {
+export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActivateDeck, activeDeck, onDeckPlayingChange }: Props) {
   const audioARef = useRef<HTMLAudioElement>(null);
   const audioBRef = useRef<HTMLAudioElement>(null);
   const boundRef = useRef(false);
@@ -65,22 +67,50 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
   // Cargar tracks desde el backend (streaming por servidor, nunca rutas locales).
   // Al cambiar de track: pausar y rebobinar el deck anterior para liberar la
   // decodificación en curso y optimizar memoria con bibliotecas grandes.
+  // En web, si el stream por path falla (variación de ruta/viejo caché del
+  // navegador), se reintenta automáticamente con el stream por ID de track.
   useEffect(() => {
-    if (deckATrack && boundRef.current) {
-      const el = audioEngine.deckA!.el;
-      el.pause();
-      el.currentTime = 0;
+    if (!deckATrack || !boundRef.current) return;
+    const el = audioEngine.deckA!.el;
+    el.pause();
+    el.currentTime = 0;
+    const tryPath = () => {
+      el.onerror = () => {
+        el.onerror = null;
+        el.onerror = () => {
+          // El stream falla por ruta Y por ID: caché web rota. Se marca para
+          // que el próximo arranque en navegador haga el reseteo automático.
+          markWebCacheUnhealthy();
+        };
+        el.src = api.audioUrlById(deckATrack!.id);
+        el.load();
+      };
       el.src = api.audioUrl(deckATrack);
-    }
+      el.load();
+    };
+    tryPath();
   }, [deckATrack]);
 
   useEffect(() => {
-    if (deckBTrack && boundRef.current) {
-      const el = audioEngine.deckB!.el;
-      el.pause();
-      el.currentTime = 0;
+    if (!deckBTrack || !boundRef.current) return;
+    const el = audioEngine.deckB!.el;
+    el.pause();
+    el.currentTime = 0;
+    const tryPath = () => {
+      el.onerror = () => {
+        el.onerror = null;
+        el.onerror = () => {
+          // El stream falla por ruta Y por ID: caché web rota. Se marca para
+          // que el próximo arranque en navegador haga el reseteo automático.
+          markWebCacheUnhealthy();
+        };
+        el.src = api.audioUrlById(deckBTrack!.id);
+        el.load();
+      };
       el.src = api.audioUrl(deckBTrack);
-    }
+      el.load();
+    };
+    tryPath();
   }, [deckBTrack]);
 
   const dropZone = (name: "A" | "B") => ({
@@ -126,6 +156,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
             otherBpm={deckBTrack?.bpm ?? null}
             active={activeDeck === "A"}
             onActivate={() => onActivateDeck?.("A")}
+            onPlayingChange={(playing) => onDeckPlayingChange?.("A", playing)}
           />
           {dragOver === "A" && <DropOverlay deck="A" accent="#06b6d4" />}
         </div>
@@ -148,6 +179,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
             otherBpm={deckATrack?.bpm ?? null}
             active={activeDeck === "B"}
             onActivate={() => onActivateDeck?.("B")}
+            onPlayingChange={(playing) => onDeckPlayingChange?.("B", playing)}
           />
           {dragOver === "B" && <DropOverlay deck="B" accent="#8b5cf6" />}
         </div>

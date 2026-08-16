@@ -1,5 +1,6 @@
 """API de tracks: búsqueda, filtros, streaming y análisis de audio."""
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,60 @@ router = APIRouter(prefix="/api", tags=["tracks"])
 
 # Caché en memoria de carátulas embebidas: {file_path: (bytes, mime)}
 _artwork_cache: dict[str, tuple[bytes, str]] = {}
+
+
+def _cors_headers() -> dict[str, str]:
+    """Encabezados CORS explícitos para respuestas de media (reforzando el
+    middleware global): la UI web (localhost:5173) lee covers y stream desde
+    el navegador mediante fetch/<audio>/Web Audio y necesita ACAO siempre."""
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+
+
+def _resolve_existing_path(path: str) -> Path:
+    """Ruta real en disco desde la almacenada en BD, reparando el mojibake
+    heredado ('MÃºsica' → 'Música': el nombre UTF-8 fue leído como cp1252 al
+    indexar) y las variantes Unicode NFC/NFD. Devuelve la original si no hay
+    reparación posible (aguas abajo fallará con 404 y se usará el fallback)."""
+    import unicodedata
+
+    p = Path(path.strip()).expanduser()
+    if p.exists():
+        return p
+    try:
+        alt = path.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        alt = path
+    for candidate in (alt, path):
+        for form in (unicodedata.normalize("NFC", candidate), unicodedata.normalize("NFD", candidate)):
+            q = Path(form).expanduser()
+            if q != p and q.exists():
+                return q
+    return p
+
+
+def _is_indexed(db: Session, path: str) -> bool:
+    """¿La ruta pertenece a la biblioteca indexada? Tolerante a case y a la
+    forma de los separadores (web puede enviar 'd:/...' vs 'D:\\...')."""
+    if db.query(Track).filter(Track.file_path == path).first() is not None:
+        return True
+    if db.query(Folder).filter(Folder.path == path).first() is not None:
+        return True
+    from sqlalchemy import func
+
+    norm = os.path.normcase(os.path.normpath(path))
+    if (
+        db.query(Track).filter(func.lower(Track.file_path) == norm.lower()).first()
+        is not None
+    ):
+        return True
+    return (
+        db.query(Folder).filter(func.lower(Folder.path) == norm.lower()).first()
+        is not None
+    )
 
 
 def _read_embedded_artwork(path: str) -> tuple[bytes, str] | None:
@@ -254,14 +309,17 @@ def stream_audio_by_path(path: str, db: Session = Depends(get_db)):
     """
     if not path or not path.strip():
         raise HTTPException(400, "Falta el parámetro path")
-    p = Path(path.strip()).expanduser()
-    is_indexed = (
-        db.query(Track).filter(Track.file_path == str(p)).first() is not None
-        or db.query(Folder).filter(Folder.path == str(p)).first() is not None
-    )
-    if not is_indexed:
+    p = _resolve_existing_path(path)
+    if not _is_indexed(db, str(Path(path.strip()).expanduser())):
         raise HTTPException(403, "Ruta no autorizada")
     return _stream_file(str(p))
+
+
+@router.get("/audio")
+def stream_audio_alias(path: str, db: Session = Depends(get_db)):
+    """Alias de /api/audio/stream (/api/audio?path=...) para los reproductores
+    web: recibe el stream del archivo y lo entrega al <audio>/Web Audio API."""
+    return stream_audio_by_path(path, db)
 
 
 @router.get("/audio/artwork")
@@ -276,28 +334,39 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
     """
     if not path or not path.strip():
         raise HTTPException(400, "Falta el parámetro path")
-    p = Path(path.strip()).expanduser()
+    # La ruta indexada puede arrastrar mojibake heredado; resuélvela al disco.
+    p = _resolve_existing_path(path)
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "El archivo ya no existe en disco")
-    is_indexed = (
-        db.query(Track).filter(Track.file_path == str(p)).first() is not None
-        or db.query(Folder).filter(Folder.path == str(p)).first() is not None
-    )
-    if not is_indexed:
+    if not _is_indexed(db, str(Path(path.strip()).expanduser())):
         raise HTTPException(403, "Ruta no autorizada")
 
     # 1) Carátula embebida (ID3 Cover Picture) con caché en memoria
     cached = _artwork_cache.get(str(p))
     if cached is not None:
         data, mime = cached
-        return Response(content=data, media_type=mime)
+        return Response(
+            content=data,
+            media_type=mime,
+            headers={
+                **_cors_headers(),
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
     embedded = _read_embedded_artwork(str(p))
     if embedded is not None:
         data, mime = embedded
         if len(_artwork_cache) > 256:
             _artwork_cache.clear()
         _artwork_cache[str(p)] = (data, mime)
-        return Response(content=data, media_type=mime)
+        return Response(
+            content=data,
+            media_type=mime,
+            headers={
+                **_cors_headers(),
+                "Cache-Control": "public, max-age=86400",
+            },
+        )
 
     # 2-3) Carátulas adjuntas en disco
     candidates = [p.with_suffix(ext) for ext in (".jpg", ".jpeg", ".png")]
@@ -306,7 +375,13 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
         candidates += [folder / f"{name}.{ext}" for ext in ("jpg", "jpeg", "png")]
     for c in candidates:
         if c.exists():
-            return FileResponse(str(c))
+            return FileResponse(
+                str(c),
+                headers={
+                    **_cors_headers(),
+                    "Cache-Control": "public, max-age=86400",
+                },
+            )
     raise HTTPException(404, "Sin carátula")
 
 
@@ -325,11 +400,7 @@ def track_analysis(path: str, db: Session = Depends(get_db)):
     p = Path(path.strip()).expanduser()
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "El archivo ya no existe en disco")
-    is_indexed = (
-        db.query(Track).filter(Track.file_path == str(p)).first() is not None
-        or db.query(Folder).filter(Folder.path == str(p)).first() is not None
-    )
-    if not is_indexed:
+    if not _is_indexed(db, str(p)):
         raise HTTPException(403, "Ruta no autorizada")
     try:
         from ..services.analysis import analyze_structure
@@ -348,13 +419,17 @@ def _stream_file(path: str):
 
     if not path or not path.strip():
         raise HTTPException(400, "Falta el parámetro path")
-    p = Path(path.strip()).expanduser()
+    p = _resolve_existing_path(path)
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "El archivo de audio ya no existe en disco")
     ext = p.suffix.lower()
     if ext not in AUDIO_EXTENSIONS:
         raise HTTPException(400, f"Extensión no soportada: {ext}")
-    return FileResponse(str(p), media_type=_media_type(str(p)))
+    return FileResponse(
+        str(p),
+        media_type=_media_type(str(p)),
+        headers=_cors_headers(),
+    )
 
 
 def _media_type(path: str) -> str:

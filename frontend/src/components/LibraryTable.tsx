@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Disc2, Disc3, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
+import { AudioLines, Disc2, Disc3, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
 import type { Track } from "../types";
-import { api } from "../api";
+import { api, prefetchArtworks } from "../api";
 import { fmtBpm } from "../lib/format";
+import { CoverThumb } from "./Artwork";
 
 interface Props {
   folders: { id: number; name: string }[];
@@ -14,6 +15,8 @@ interface Props {
   onLoadToActiveDeck: (track: Track) => void;
   compatibleWith: Track | null;
   onSetCompatibleWith: (t: Track | null) => void;
+  /** IDs de los tracks que suenan ahora en Deck A/B (resaltado en la tabla). */
+  playingTrackIds: number[];
 }
 
 const CAMELOT_CODES = Array.from({ length: 12 }, (_, i) => [`${i + 1}A`, `${i + 1}B`]).flat();
@@ -52,6 +55,7 @@ export default function LibraryTable({
   onLoadToActiveDeck,
   compatibleWith,
   onSetCompatibleWith,
+  playingTrackIds,
 }: Props) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
@@ -96,6 +100,14 @@ export default function LibraryTable({
     return () => clearTimeout(t);
   }, [load]);
 
+  // Precarga lazy de covers al cargar el listado (clic en carpeta/filtros):
+  // los N primeros tracks piden su carátula por el endpoint CORS del backend
+  // y se insertan en el estado/UI sin bloquear el render del resto.
+  useEffect(() => {
+    if (tracks.length === 0) return;
+    prefetchArtworks(tracks, 24);
+  }, [tracks]);
+
   const filtersActive = useMemo(
     () => !!(folderId !== null || camelot || minBpm || maxBpm || minEnergy || maxEnergy || compatibleWith),
     [folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith]
@@ -128,7 +140,7 @@ export default function LibraryTable({
           onClick={() => setShowFilters((v) => !v)}
           className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
             filtersActive || showFilters
-              ? "border-violet-500 bg-violet-500/15 text-violet-300 shadow-lg shadow-violet-500/30"
+              ? "border-violet-400/50 bg-violet-500/20 text-violet-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_12px_rgba(139,92,246,0.2)]"
               : "border-slate-700 text-slate-400 hover:text-white hover:shadow-[0_0_10px_rgba(139,92,246,0.35)]"
           }`}
         >
@@ -251,6 +263,10 @@ export default function LibraryTable({
                 onDoubleClick={() => onLoadToActiveDeck(t)}
                 className={`group cursor-default border-t border-slate-800/60 transition hover:bg-panel-2 ${
                   compatibleWith?.id === t.id ? "bg-emerald-500/10" : ""
+                } ${
+                  playingTrackIds.includes(t.id)
+                    ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
+                    : ""
                 }`}
                 title="Doble clic: cargar en el deck activo · arrastra a un Deck"
               >
@@ -289,8 +305,16 @@ export default function LibraryTable({
                   </div>
                 </td>
                 <td className="max-w-56 truncate px-2 py-1.5 font-medium text-slate-100">
-                  {t.title}
-                  {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
+                  <div className="flex items-center gap-2">
+                    <CoverThumb track={t} size={26} />
+                    <span className="min-w-0 flex-1 truncate">
+                      {t.title}
+                      {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
+                    </span>
+                    {playingTrackIds.includes(t.id) && (
+                      <AudioLines size={12} className="shrink-0 animate-pulse text-emerald-400" />
+                    )}
+                  </div>
                 </td>
                 <td className="max-w-40 truncate px-2 py-1.5 text-slate-400">{t.artist}</td>
                 <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>

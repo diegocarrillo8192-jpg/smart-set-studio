@@ -18,6 +18,7 @@ export default function Crossfader({ position, onChange }: Props) {
   const dragRef = useRef(false);
   const rafRef = useRef(0);
   const [pos, setPos] = useState(position);
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     posRef.current = position;
@@ -45,8 +46,10 @@ export default function Crossfader({ position, onChange }: Props) {
   };
 
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = true;
+    setDragging(true);
     compute(e.clientX);
   };
 
@@ -57,6 +60,7 @@ export default function Crossfader({ position, onChange }: Props) {
   const onUp = () => {
     if (dragRef.current) {
       dragRef.current = false;
+      setDragging(false);
       onChange(posRef.current);
     }
   };
@@ -96,7 +100,9 @@ export default function Crossfader({ position, onChange }: Props) {
           {/* Capuchón (thumb) con glow según el lado */}
           <div
             ref={thumbRef}
-            className="absolute top-1/2 h-11 w-7 -translate-x-1/2 -translate-y-1/2 rounded-lg border-2 bg-gradient-to-b from-slate-100 via-slate-300 to-slate-500 transition-[border-color,box-shadow] duration-150 will-change-[left]"
+            className={`absolute top-1/2 h-11 w-7 -translate-x-1/2 -translate-y-1/2 rounded-lg border-2 bg-gradient-to-b from-slate-100 via-slate-300 to-slate-500 transition-[left,border-color,box-shadow] will-change-[left] ${
+              dragging ? "duration-0 ease-out" : "duration-300 ease-out"
+            }`}
             style={{
               left: `${pos * 100}%`,
               borderColor: nearA ? "#22d3ee" : "#a78bfa",

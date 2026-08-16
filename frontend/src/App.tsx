@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Library, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
-import { api } from "./api";
+import { api, isWeb, purgeStaleWebCache, resetWebCache, WEB_UNHEALTHY_KEY } from "./api";
+import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
 import SetGenerator from "./components/SetGenerator";
@@ -24,6 +25,29 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeDeck, setActiveDeck] = useState<"A" | "B">("A");
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [deckAPlaying, setDeckAPlaying] = useState(false);
+  const [deckBPlaying, setDeckBPlaying] = useState(false);
+
+  // Splash screen: logo animado ~1.6s, fade-out 500ms, luego desmonta.
+  // No bloquea la carga: la UI arranca detrás y la capa se desvanece sola.
+  const [splashLeaving, setSplashLeaving] = useState(false);
+  const [splashGone, setSplashGone] = useState(false);
+  useEffect(() => {
+    const t1 = window.setTimeout(() => setSplashLeaving(true), 1600);
+    const t2 = window.setTimeout(() => setSplashGone(true), 2100);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, []);
+
+  /** IDs de los tracks que suenan ahora mismo en A y/o B (resaltado en tablas). */
+  const playingTrackIds = useMemo(() => {
+    const ids: number[] = [];
+    if (deckAPlaying && deckATrack) ids.push(deckATrack.id);
+    if (deckBPlaying && deckBTrack) ids.push(deckBTrack.id);
+    return ids;
+  }, [deckAPlaying, deckBPlaying, deckATrack, deckBTrack]);
 
   const refresh = useCallback(async () => {
     // Reintento por si el backend aún está arrancando (carrera de inicio)
@@ -41,7 +65,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void refresh().catch(console.error);
+    if (!isWeb()) {
+      // Electron/escritorio: NO se toca ningún estado persistente del cliente.
+      void refresh().catch(console.error);
+      return;
+    }
+    // Web: si la sesión anterior detectó caché rota (covers o audio que no
+    // cargan por red), reseteo automático LocalStorage + IndexedDB + Cache
+    // Storage. Si no, purga versionada normal. # atom: nunca toca la BD.
+    const boot = async () => {
+      try {
+        if (localStorage.getItem(WEB_UNHEALTHY_KEY) === "1") {
+          localStorage.removeItem(WEB_UNHEALTHY_KEY);
+          await resetWebCache();
+        } else {
+          await purgeStaleWebCache();
+        }
+      } catch {
+        /* almacenamiento no disponible: continuar de todos modos */
+      }
+      void refresh().catch(console.error);
+    };
+    void boot();
   }, [refresh]);
 
   // Identificación de la app embebida en Electron: registra is_desktop=true
@@ -117,6 +162,9 @@ export default function App() {
           onDropTrack={(name, t) => loadToDeck(name, t)}
           onActivateDeck={setActiveDeck}
           activeDeck={activeDeck}
+          onDeckPlayingChange={(name, playing) =>
+            name === "A" ? setDeckAPlaying(playing) : setDeckBPlaying(playing)
+          }
         />
       </div>
 
@@ -151,7 +199,7 @@ export default function App() {
               onClick={() => setTab("generator")}
               className={`flex items-center gap-2 rounded-t-lg px-4 py-2 text-xs font-bold uppercase tracking-wider transition ${
                 tab === "generator"
-                  ? "border-b-2 border-fuchsia-500 bg-panel-2 text-fuchsia-300"
+                  ? "border-b-2 border-cyan-400 bg-panel-2 text-cyan-300"
                   : "text-slate-500 hover:text-slate-300"
               }`}
             >
@@ -176,6 +224,7 @@ export default function App() {
                   onLoadToActiveDeck={loadToActiveDeck}
                   compatibleWith={compatibleWith}
                   onSetCompatibleWith={setCompatibleWith}
+                  playingTrackIds={playingTrackIds}
                 />
               </>
             ) : (
@@ -195,6 +244,7 @@ export default function App() {
                 onLoadSetToDecks={loadSetToDecks}
                 seedTrack={seedTrack}
                 onClearSeed={() => setSeedTrack(null)}
+                playingTrackIds={playingTrackIds}
               />
             )}
           </div>
@@ -202,6 +252,8 @@ export default function App() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {!splashGone && <SplashScreen leaving={splashLeaving} />}
     </div>
   );
 }

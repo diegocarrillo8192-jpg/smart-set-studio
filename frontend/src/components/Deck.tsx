@@ -17,6 +17,8 @@ interface Props {
   active?: boolean;
   onActivate?: () => void;
   disabled?: boolean;
+  /** Notifica arriba (App) si este deck está reproduciendo o se pausó. */
+  onPlayingChange?: (playing: boolean) => void;
 }
 
 function fmtTime(sec: number): string {
@@ -41,6 +43,7 @@ export default function Deck({
   active,
   onActivate,
   disabled,
+  onPlayingChange,
 }: Props) {
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
@@ -48,14 +51,25 @@ export default function Deck({
   const [sync, setSync] = useState(false);
   const [lowKill, setLowKill] = useState(false);
   const cueHoldRef = useRef(false);
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  useEffect(() => {
+    onPlayingChangeRef.current = onPlayingChange;
+  });
 
   const el = handle?.el;
 
   // Estado play/pause vía eventos + tiempo muestreado a 60fps (rAF)
   useEffect(() => {
     if (!el) return;
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
+    const report = (playing: boolean) => onPlayingChangeRef.current?.(playing);
+    const onPlay = () => {
+      setPlaying(true);
+      report(true);
+    };
+    const onPause = () => {
+      setPlaying(false);
+      report(false);
+    };
     const onEnded = () => setPlaying(false);
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
@@ -71,6 +85,7 @@ export default function Deck({
       el.removeEventListener("play", onPlay);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("ended", onEnded);
+      report(false);
     };
   }, [el]);
 
@@ -85,6 +100,9 @@ export default function Deck({
   const toggle = () => {
     if (!el) return;
     onActivate?.();
+    // Reanudar el contexto en el gesto del usuario: en navegador el AudioContext
+    // nace suspendido (autoplay policy) y sin resume() el sonido no llega.
+    audioEngine.ensureContext();
     if (el.paused) void el.play().catch(() => {});
     else el.pause();
   };
@@ -113,6 +131,7 @@ export default function Deck({
   const onCueDown = () => {
     if (!el || !track) return;
     onActivate?.();
+    audioEngine.ensureContext();
     if (cue === null) setCue(el.currentTime);
     el.currentTime = cue ?? el.currentTime;
     cueHoldRef.current = true;
@@ -284,18 +303,18 @@ export default function Deck({
           }
           className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[10px] font-black tracking-widest transition active:scale-95 disabled:opacity-30 ${
             lowKill
-              ? "border-fuchsia-400/70 bg-fuchsia-500/15 text-fuchsia-300 shadow-[0_0_14px_rgba(217,70,239,0.4)]"
-              : "border-slate-700 text-slate-400 hover:border-fuchsia-400/40 hover:text-fuchsia-300 hover:shadow-[0_0_10px_rgba(217,70,239,0.2)]"
+              ? "border-violet-400/70 bg-violet-500/15 text-violet-300 shadow-[0_0_14px_rgba(167,139,250,0.4)]"
+              : "border-slate-700 text-slate-400 hover:border-violet-400/40 hover:text-violet-300 hover:shadow-[0_0_10px_rgba(167,139,250,0.2)]"
           }`}
         >
           <span
             className={`h-1.5 w-1.5 rounded-full transition ${
               lowKill
-                ? "bg-fuchsia-400 shadow-[0_0_7px_rgba(217,70,239,0.95)]"
+                ? "bg-violet-400 shadow-[0_0_7px_rgba(167,139,250,0.95)]"
                 : "bg-slate-700"
             }`}
           />
-          <Filter size={12} className={lowKill ? "text-fuchsia-400 drop-shadow-[0_0_4px_rgba(217,70,239,0.9)]" : ""} />
+          <Filter size={12} className={lowKill ? "text-violet-400 drop-shadow-[0_0_4px_rgba(167,139,250,0.9)]" : ""} />
           FILTER
         </button>
 

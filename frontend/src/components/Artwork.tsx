@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { Disc3 } from "lucide-react";
 import type { Track } from "../types";
-import { api } from "../api";
+import { cachedTrackArtwork, getTrackArtwork, subscribeArtwork } from "../api";
+
+/** Logo oficial de la marca como fallback limpio cuando el track no tiene
+ *  portada (ID3 sin APIC) o mientras la extracción aún carga. */
+const LOGO_URL = "logo.png";
 
 interface Props {
   track: Track | null;
@@ -23,24 +26,48 @@ export function hexRgba(hex: string, a: number): string {
 }
 
 /**
+ * Data URL de la carátula vía caché en memoria (Base64):
+ * undefined = aún cargando · null = sin portada (placeholder permanente) ·
+ * string  = imagen lista. Un único request por track por sesión.
+ */
+function useArtworkDataUrl(track: Track | null): string | null | undefined {
+  const [art, setArt] = useState<string | null | undefined>(() =>
+    track ? cachedTrackArtwork(track) : null
+  );
+  useEffect(() => {
+    if (!track) {
+      setArt(null);
+      return;
+    }
+    // Suscripción al caché: cuando la extracción web (ID3) de esta pista
+    // termine, la portada aparece aquí de inmediato sin recargar la vista.
+    const apply = () => setArt(cachedTrackArtwork(track));
+    apply();
+    let cancelled = false;
+    // getTrackArtwork es barato: devuelve al instante el hit de caché, dedupe
+    // las peticiones concurrentes y consulta el servidor solo cuando falta.
+    void getTrackArtwork(track).then((a) => {
+      if (!cancelled) setArt(a);
+    });
+    const unsubscribe = subscribeArtwork(apply);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [track?.id]);
+  return art;
+}
+
+/**
  * Carátula de alta fidelidad "premium": la extrae el backend de los metadatos
- * del propio archivo (ID3 APIC / FLAC PICTURE / M4A covr) o de la carpeta.
- * Fallback elegante profesional: disco de vinilo girando sobre gradiente neón
- * con el logo del app (nunca cuadro vacío ni letra plana).
+ * del propio archivo (ID3 APIC / FLAC PICTURE / M4A covr) o de la carpeta, y
+ * viaja como Data URL cacheada en memoria. Fallback elegante profesional:
+ * disco de vinilo girando sobre gradiente neón con el logo del app (nunca
+ * cuadro vacío ni letra plana).
  */
 export default function Artwork({ track, accent, size = 56, remountKey }: Props) {
-  const [loaded, setLoaded] = useState(false);
-  // failed arranca en FALSE: la carátula real (ID3 APIC) debe intentarse
-  // siempre; el vinilo es SOLO el fallback si el backend responde sin portada.
-  const [failed, setFailed] = useState(false);
-
-  // Al cambiar de track: reiniciar el intento de carga de la carátula
-  useEffect(() => {
-    setLoaded(false);
-    setFailed(false);
-  }, [remountKey]);
-
-  const src = track ? api.artworkUrl(track) : null;
+  const art = useArtworkDataUrl(track);
 
   return (
     <div className="shrink-0 animate-artwork-in" style={{ width: size, height: size }}>
@@ -58,20 +85,15 @@ export default function Artwork({ track, accent, size = 56, remountKey }: Props)
           key={remountKey}
           className="animate-fade-in relative h-full w-full overflow-hidden rounded-[9px] bg-slate-950"
         >
-          {src && !failed && (
+          {art ? (
             <img
-              src={src}
+              src={art}
               alt={track?.title ?? "carátula"}
               draggable={false}
-              onLoad={() => setLoaded(true)}
-              onError={() => setFailed(true)}
-              className={`h-full w-full object-cover transition-opacity duration-700 ease-out ${
-                loaded ? "opacity-100" : "opacity-0"
-              }`}
+              className="h-full w-full object-cover"
             />
-          )}
-          {(!src || failed) && (
-            <VinylFallback accent={accent} />
+          ) : (
+            <LogoFallback accent={accent} />
           )}
         </div>
       </div>
@@ -79,8 +101,47 @@ export default function Artwork({ track, accent, size = 56, remountKey }: Props)
   );
 }
 
-/** Disco de vinilo en rotación sobre gradiente neón (fallback sin portada). */
-function VinylFallback({ accent }: { accent: string }) {
+/**
+ * Miniatura cuadrada de carátula para tablas (biblioteca y sets): 24-32px,
+ * con carga diferida (lazy + async) y placeholder elegante si no hay imagen.
+ * Ligera pensando en cientos de filas: sin glow ni animaciones.
+ */
+export function CoverThumb({ track, size = 28, className }: { track: Track; size?: number; className?: string }) {
+  const art = useArtworkDataUrl(track);
+  return (
+    <span
+      className={`relative inline-block shrink-0 overflow-hidden rounded-md border border-slate-700/60 bg-gradient-to-br from-slate-800 to-slate-950 ${className ?? ""}`}
+      style={{ width: size, height: size }}
+    >
+      {art ? (
+        <img
+          src={art}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className="h-full w-full object-cover"
+        />
+      ) : (
+        <img
+          src={LOGO_URL}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          draggable={false}
+          className="absolute inset-0 m-auto h-[62%] w-[62%] rounded object-cover opacity-80"
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * Fallback de marca: logo oficial de Smart Set Architect sobre el gradiente
+ * de acento del deck (nunca cuadro negro ni letra plana). Se muestra solo
+ * cuando el track realmente no tiene portada o aún está extrayéndose.
+ */
+function LogoFallback({ accent }: { accent: string }) {
   return (
     <div className="absolute inset-0">
       <div
@@ -92,38 +153,15 @@ function VinylFallback({ accent }: { accent: string }) {
           )} 40%, #0a0d14 100%)`,
         }}
       />
-      {/* Disco girando */}
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-        <div className="animate-spin-slow relative h-[88%] w-[88%]">
-          <div
-            className="absolute inset-0 rounded-full"
-            style={{
-              background:
-                "repeating-radial-gradient(circle at center, #05060a 0px, #05060a 1px, #151b28 2px, #05060a 3px)",
-              boxShadow: `0 0 12px ${hexRgba(accent, 0.35)}, inset 0 0 10px rgba(0,0,0,0.9)`,
-            }}
-          />
-          {/* Etiqueta central */}
-          <div
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full"
-            style={{
-              width: "34%",
-              height: "34%",
-              background: `radial-gradient(circle, ${hexRgba(accent, 0.85)} 0%, ${hexRgba(
-                accent,
-                0.4
-              )} 100%)`,
-              boxShadow: `0 0 10px ${hexRgba(accent, 0.8)}`,
-            }}
-          >
-            <Disc3
-              size={999}
-              className="absolute left-1/2 top-1/2 h-[70%] w-[70%] -translate-x-1/2 -translate-y-1/2 text-black/80"
-            />
-          </div>
-        </div>
-      </div>
-      {/* Brillo de gramófono */}
+      <img
+        src={LOGO_URL}
+        alt="Smart Set Architect"
+        draggable={false}
+        className="absolute inset-0 m-auto h-[70%] w-[70%] rounded-[18%] object-cover"
+        style={{
+          boxShadow: `0 0 16px ${hexRgba(accent, 0.35)}`,
+        }}
+      />
       <div
         className="pointer-events-none absolute inset-0 rounded-[9px]"
         style={{
