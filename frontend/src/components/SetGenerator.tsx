@@ -4,6 +4,7 @@ import {
   Disc2,
   Disc3,
   Download,
+  Eraser,
   FolderTree,
   LayoutList,
   Loader2,
@@ -412,6 +413,17 @@ export default function SetGenerator({
                 className="rounded-lg border border-cyan-500/50 bg-cyan-500/10 px-2.5 py-1 text-xs font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
               >
                 Cargar en Dual Deck
+              </button>
+              <button
+                onClick={() => {
+                  if (window.confirm("¿Limpiar y empezar un nuevo set? La lista actual se vaciará.")) {
+                    onResult(null);
+                  }
+                }}
+                title="Limpiar / Nuevo Set"
+                className="flex items-center gap-1.5 rounded-lg border border-slate-600 px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:border-rose-400 hover:text-rose-300"
+              >
+                <Eraser size={13} /> Limpiar / Nuevo Set
               </button>
               <div className="ml-auto flex gap-2">
                 <button

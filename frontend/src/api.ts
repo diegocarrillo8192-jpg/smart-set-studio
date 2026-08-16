@@ -38,6 +38,8 @@ export const api = {
     request<Folder>("/folders", { method: "POST", body: JSON.stringify({ path }) }),
   removeFolder: (id: number) =>
     request<{ ok: boolean }>(`/folders/${id}`, { method: "DELETE" }),
+  renameFolder: (id: number, name: string) =>
+    request<Folder>(`/folders/${id}`, { method: "PUT", body: JSON.stringify({ name }) }),
   scanFolder: (id: number, force = false) =>
     request<ScanJob>(`/folders/${id}/scan${force ? "?force=true" : ""}`, { method: "POST" }),
   scanStatus: (id: number) => request<ScanJob | null>(`/folders/${id}/scan/status`),
@@ -73,6 +75,8 @@ export const api = {
   }) => request<DJSet>("/sets/generate", { method: "POST", body: JSON.stringify(payload) }),
   listSets: () => request<DJSet[]>("/sets"),
   deleteSet: (id: number) => request<{ ok: boolean }>(`/sets/${id}`, { method: "DELETE" }),
+  renameSet: (id: number, name: string) =>
+    request<DJSet>(`/sets/${id}`, { method: "PUT", body: JSON.stringify({ name }) }),
   exportUsb: (id: number, destination: string) =>
     request<{ copied: number; total: number; destination: string }>(`/sets/${id}/export/usb`, {
       method: "POST",

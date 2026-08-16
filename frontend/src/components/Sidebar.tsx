@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from "react";
 import {
   Disc3,
   FolderPlus,
   FolderSearch,
   Library,
   ListMusic,
+  MoreVertical,
+  Pencil,
   RefreshCw,
   Settings,
   Trash2,
-  X,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
 import { api } from "../api";
@@ -17,8 +18,12 @@ interface Props {
   folders: Folder[];
   sets: DJSet[];
   activeSetId: number | null;
+  selectedFolderId: number | null;
   onFoldersChanged: () => void;
+  onSelectFolder: (id: number | null) => void;
   onSelectSet: (set: DJSet) => void;
+  onDeleteSet: (set: DJSet) => void;
+  onRemoveFolder: (id: number) => void;
   onOpenSettings: () => void;
 }
 
@@ -58,11 +63,26 @@ function useFolderPicker(): {
   return { pickFolder, hiddenInput };
 }
 
-export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, onSelectSet, onOpenSettings }: Props) {
+type MenuTarget = { kind: "folder" | "set"; id: number; x: number; y: number } | null;
+
+export default function Sidebar({
+  folders,
+  sets,
+  activeSetId,
+  selectedFolderId,
+  onFoldersChanged,
+  onSelectFolder,
+  onSelectSet,
+  onDeleteSet,
+  onRemoveFolder,
+  onOpenSettings,
+}: Props) {
   const [adding, setAdding] = useState(false);
   const [scanningIds, setScanningIds] = useState<Set<number>>(new Set());
   const [progress, setProgress] = useState<Record<number, ScanJob>>({});
   const [error, setError] = useState("");
+  const [menu, setMenu] = useState<MenuTarget>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const { pickFolder, hiddenInput } = useFolderPicker();
   const pollRef = useRef<Record<number, number>>({});
 
@@ -71,6 +91,18 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
       Object.values(pollRef.current).forEach(clearInterval);
     };
   }, []);
+
+  // Cierra el menú contextual al hacer clic fuera
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [menu]);
+
+  const totalTracks = folders.reduce((acc, f) => acc + f.track_count, 0);
 
   const addFolder = async () => {
     setAdding(true);
@@ -113,13 +145,45 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
     }, 1500);
   };
 
-  const removeFolder = async (id: number) => {
-    await api.removeFolder(id);
-    onFoldersChanged();
+  const renameItem = async (kind: "folder" | "set", id: number, currentName: string) => {
+    const name = window.prompt(kind === "folder" ? "Nuevo nombre de la carpeta:" : "Nuevo nombre del set:", currentName);
+    if (!name || !name.trim()) return;
+    try {
+      if (kind === "folder") await api.renameFolder(id, name.trim());
+      else await api.renameSet(id, name.trim());
+      onFoldersChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const confirmRemove = async (kind: "folder" | "set", id: number, name: string) => {
+    const message =
+      kind === "folder"
+        ? `¿Quitar la carpeta "${name}" y sus tracks de la biblioteca?`
+        : `¿Eliminar el set "${name}"?`;
+    if (!window.confirm(message)) return;
+    try {
+      if (kind === "folder") await onRemoveFolder(id);
+      else {
+        const set = sets.find((s) => s.id === id);
+        if (set) await onDeleteSet(set);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const isScanning = (id: number) => scanningIds.has(id);
   const jobFor = (id: number) => progress[id];
+
+  const folderRowActive = (id: number) => selectedFolderId === id;
+
+  /** Abre el menú de opciones junto al botón que lo dispara (posición fija). */
+  const openMenu = (kind: "folder" | "set", id: number, e: ReactMouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu((m) => (m?.kind === kind && m.id === id ? null : { kind, id, x: r.right - 176, y: r.bottom + 4 }));
+  };
 
   return (
     <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-panel">
@@ -146,6 +210,23 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
         </button>
 
         <div className="space-y-1.5">
+          {/* Vista global: colección completa */}
+          <button
+            onClick={() => onSelectFolder(null)}
+            className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
+              selectedFolderId === null
+                ? "bg-violet-500/20 ring-1 ring-violet-500/40"
+                : "bg-panel-2 hover:bg-panel-3"
+            }`}
+            title="Ver todos los tracks de la biblioteca"
+          >
+            <Library size={13} className="shrink-0 text-violet-400" />
+            <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${selectedFolderId === null ? "text-white" : "text-slate-200"}`}>
+              Todos los tracks
+            </span>
+            <span className="rounded bg-panel-3 px-1.5 py-0.5 text-[9px] text-slate-400">{totalTracks}</span>
+          </button>
+
           {folders.length === 0 && (
             <div className="rounded-lg border border-dashed border-slate-700 p-3 text-center">
               <p className="text-[11px] leading-relaxed text-slate-400">
@@ -158,12 +239,20 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
           {folders.map((folder) => {
             const scanning = isScanning(folder.id);
             const job = jobFor(folder.id);
+            const active = folderRowActive(folder.id);
             return (
-              <div key={folder.id} className="group rounded-lg bg-panel-2 p-2">
+              <div
+                key={folder.id}
+                onClick={() => onSelectFolder(folder.id)}
+                className={`group relative cursor-pointer rounded-lg p-2 transition ${
+                  active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
+                }`}
+                title="Clic para filtrar la biblioteca por esta carpeta"
+              >
                 <div className="flex items-center gap-1.5">
-                  <FolderSearch size={13} className="shrink-0 text-slate-400" />
+                  <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-medium text-slate-200">{folder.name}</p>
+                    <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
                     <p className="text-[10px] text-slate-500">
                       {scanning && job
                         ? `${job.processed_files}/${job.total_files} analizando...`
@@ -171,18 +260,24 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
                     </p>
                   </div>
                   <button
-                    onClick={() => scanFolder(folder)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void scanFolder(folder);
+                    }}
                     title="Escanear / Re-analizar"
                     className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
                   >
                     <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
                   </button>
                   <button
-                    onClick={() => removeFolder(folder.id)}
-                    title="Quitar carpeta"
-                    className="rounded p-1 text-slate-500 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openMenu("folder", folder.id, e);
+                    }}
+                    title="Opciones"
+                    className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
                   >
-                    <X size={13} />
+                    <MoreVertical size={13} />
                   </button>
                 </div>
                 {job && job.status === "error" && (
@@ -217,26 +312,21 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
             <div
               key={set.id}
               onClick={() => onSelectSet(set)}
-              className={`group cursor-pointer rounded-lg px-2.5 py-1.5 transition ${
+              className={`group relative cursor-pointer rounded-lg px-2.5 py-1.5 transition ${
                 activeSetId === set.id ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
               }`}
             >
               <div className="flex items-center gap-1">
                 <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-200">{set.name}</p>
                 <button
-                  onClick={async (e) => {
+                  onClick={(e) => {
                     e.stopPropagation();
-                    try {
-                      await api.deleteSet(set.id);
-                      onFoldersChanged();
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : String(err));
-                    }
+                    openMenu("set", set.id, e);
                   }}
-                  title={`Eliminar "${set.name}"`}
-                  className="rounded p-1 text-slate-500 opacity-0 transition hover:text-red-400 group-hover:opacity-100"
+                  title="Opciones del set"
+                  className={`rounded p-1 transition ${menu && menu.kind === "set" && menu.id === set.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
                 >
-                  <X size={13} />
+                  <MoreVertical size={13} />
                 </button>
               </div>
               <p className="text-[10px] text-slate-500">
@@ -261,6 +351,45 @@ export default function Sidebar({ folders, sets, activeSetId, onFoldersChanged, 
           </p>
         )}
       </section>
+
+      {/* Menú contextual (renombrar / eliminar) */}
+      {menu && (
+        <div
+          ref={menuRef}
+          className="fixed z-50 w-44 overflow-hidden rounded-lg border border-slate-700 bg-[#141a2b] py-1 shadow-2xl shadow-black/60"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+            {menu.kind === "folder" ? "Carpeta" : "Set"}
+          </div>
+          <button
+            onClick={() => {
+              const target =
+                menu.kind === "folder"
+                  ? folders.find((f) => f.id === menu.id)
+                  : sets.find((s) => s.id === menu.id);
+              setMenu(null);
+              if (target) void renameItem(menu.kind, target.id, target.name);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 transition hover:bg-violet-500/15 hover:text-violet-200"
+          >
+            <Pencil size={12} /> Renombrar
+          </button>
+          <button
+            onClick={() => {
+              const target =
+                menu.kind === "folder"
+                  ? folders.find((f) => f.id === menu.id)
+                  : sets.find((s) => s.id === menu.id);
+              setMenu(null);
+              if (target) void confirmRemove(menu.kind, target.id, target.name);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 transition hover:bg-red-500/15"
+          >
+            <Trash2 size={12} /> Eliminar
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

@@ -23,6 +23,7 @@ export default function App() {
   const [seedTrack, setSeedTrack] = useState<Track | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeDeck, setActiveDeck] = useState<"A" | "B">("A");
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     // Reintento por si el backend aún está arrancando (carrera de inicio)
@@ -89,6 +90,23 @@ export default function App() {
     setGeneratedSet(set);
   };
 
+  /** Elimina un set y, si era el que estaba desplegado, limpia la vista. */
+  const deleteSet = async (set: DJSet) => {
+    await api.deleteSet(set.id);
+    await refresh().catch(console.error);
+    if (set.id === activeSetId) {
+      setActiveSetId(null);
+      setGeneratedSet(null);
+    }
+  };
+
+  /** Quita una carpeta y deselecciona el filtro si apuntaba a ella. */
+  const removeFolder = async (id: number) => {
+    await api.removeFolder(id);
+    await refresh().catch(console.error);
+    if (selectedFolderId === id) setSelectedFolderId(null);
+  };
+
   return (
     <div className="flex h-full flex-col bg-panel text-slate-200">
       {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda */}
@@ -108,8 +126,12 @@ export default function App() {
           folders={folders}
           sets={sets}
           activeSetId={activeSetId}
+          selectedFolderId={selectedFolderId}
           onFoldersChanged={refresh}
+          onSelectFolder={setSelectedFolderId}
           onSelectSet={selectSet}
+          onDeleteSet={deleteSet}
+          onRemoveFolder={removeFolder}
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <main className="flex min-w-0 flex-1 flex-col">
@@ -146,6 +168,8 @@ export default function App() {
                 />
                 <LibraryTable
                   folders={folders}
+                  folderId={selectedFolderId}
+                  onFolderIdChange={setSelectedFolderId}
                   onPlayPreview={playPreview}
                   onLoadToDeckA={(t) => loadToDeck("A", t)}
                   onLoadToDeckB={(t) => loadToDeck("B", t)}
@@ -161,6 +185,7 @@ export default function App() {
                 onResult={(s) => {
                   setGeneratedSet(s);
                   if (s) setActiveSetId(s.id);
+                  else setActiveSetId(null);
                   void refresh();
                 }}
                 onPlayPreview={playPreview}

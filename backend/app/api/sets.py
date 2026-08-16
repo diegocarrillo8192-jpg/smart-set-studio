@@ -62,6 +62,19 @@ def get_set(set_id: int, db: Session = Depends(get_db)):
     return _load_set(db, set_id)
 
 
+@router.put("/{set_id}", response_model=SetOut)
+def update_set(set_id: int, payload: SetUpdateRequest, db: Session = Depends(get_db)):
+    if payload.name is None or not payload.name.strip():
+        raise HTTPException(400, "Se requiere un nombre")
+    name = payload.name.strip()
+    dj_set = db.get(Set, set_id)
+    if not dj_set:
+        raise HTTPException(404, "Set no encontrado")
+    dj_set.name = name
+    db.commit()
+    return _load_set(db, set_id)
+
+
 @router.delete("/{set_id}")
 def delete_set(set_id: int, db: Session = Depends(get_db)):
     dj_set = db.get(Set, set_id)

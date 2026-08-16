@@ -19,6 +19,10 @@ class FolderCreate(BaseModel):
     path: str = Field(min_length=1)
 
 
+class FolderRenameRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+
+
 class TrackOut(BaseModel):
     id: int
     file_path: str

@@ -6,6 +6,8 @@ import { fmtBpm } from "../lib/format";
 
 interface Props {
   folders: { id: number; name: string }[];
+  folderId: number | null;
+  onFolderIdChange: (id: number | null) => void;
   onPlayPreview: (track: Track) => void;
   onLoadToDeckA: (track: Track) => void;
   onLoadToDeckB: (track: Track) => void;
@@ -42,6 +44,8 @@ function EnergyDots({ value }: { value: number | null }) {
 
 export default function LibraryTable({
   folders,
+  folderId,
+  onFolderIdChange,
   onPlayPreview,
   onLoadToDeckA,
   onLoadToDeckB,
@@ -52,7 +56,6 @@ export default function LibraryTable({
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
-  const [folderId, setFolderId] = useState<number | "">("");
   const [camelot, setCamelot] = useState("");
   const [minBpm, setMinBpm] = useState("");
   const [maxBpm, setMaxBpm] = useState("");
@@ -65,7 +68,7 @@ export default function LibraryTable({
     try {
       const result = await api.listTracks({
         q: q || undefined,
-        folder_id: folderId || undefined,
+        folder_id: folderId ?? undefined,
         camelot: camelot || undefined,
         min_bpm: minBpm || undefined,
         max_bpm: maxBpm || undefined,
@@ -94,12 +97,12 @@ export default function LibraryTable({
   }, [load]);
 
   const filtersActive = useMemo(
-    () => !!(folderId || camelot || minBpm || maxBpm || minEnergy || maxEnergy || compatibleWith),
+    () => !!(folderId !== null || camelot || minBpm || maxBpm || minEnergy || maxEnergy || compatibleWith),
     [folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith]
   );
 
   const resetFilters = () => {
-    setFolderId("");
+    onFolderIdChange(null);
     setCamelot("");
     setMinBpm("");
     setMaxBpm("");
@@ -139,11 +142,11 @@ export default function LibraryTable({
           <label className="flex flex-col gap-1">
             <span className="text-[10px] uppercase text-slate-500">Carpeta</span>
             <select
-              value={folderId}
-              onChange={(e) => setFolderId(e.target.value ? Number(e.target.value) : "")}
+              value={folderId ?? ""}
+              onChange={(e) => onFolderIdChange(e.target.value ? Number(e.target.value) : null)}
               className="rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
             >
-              <option value="">Todas</option>
+              <option value="">Todos los tracks</option>
               {folders.map((f) => (
                 <option key={f.id} value={f.id}>{f.name}</option>
               ))}

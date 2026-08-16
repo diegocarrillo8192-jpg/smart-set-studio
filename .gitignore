@@ -8,6 +8,7 @@ electron/node_modules/
 dist/
 release/
 frontend/dist/
+build/ssa-backend/
 build/ssa-backend.spec
 *.spec
 

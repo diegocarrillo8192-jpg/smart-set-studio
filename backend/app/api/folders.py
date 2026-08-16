@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Folder, ScanJob, SetItem, Track
-from ..schemas import FolderCreate, FolderOut, ScanJobOut
+from ..schemas import FolderCreate, FolderOut, FolderRenameRequest, ScanJobOut
 from ..services.scanner import start_scan
 
 router = APIRouter(prefix="/api/folders", tags=["folders"])
@@ -48,6 +48,21 @@ def add_folder(payload: FolderCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(folder)
     return _serialize_folder(folder, 0)
+
+
+@router.put("/{folder_id}", response_model=FolderOut)
+def rename_folder(folder_id: int, payload: FolderRenameRequest, db: Session = Depends(get_db)):
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(400, "Se requiere un nombre")
+    folder = db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "Carpeta no encontrada")
+    folder.name = name
+    db.commit()
+    db.refresh(folder)
+    count = db.query(Track).filter(Track.folder_id == folder_id).count()
+    return _serialize_folder(folder, count)
 
 
 @router.delete("/{folder_id}")
