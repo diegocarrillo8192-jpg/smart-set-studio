@@ -618,7 +618,7 @@ export default function SetGenerator({
                         <p className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</p>
                       </div>
                       <span className="rounded px-1.5 py-0.5 text-[9px] text-slate-400 rounded-md border border-slate-700/50">
-                        {item.track.genre ?? item.track.folder_name ?? "-"}
+                        {item.track.genre || item.track.folder_name || "-"}
                       </span>
                       <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${item.track.camelot_key?.endsWith("B") ? "bg-violet-500/20 text-violet-300" : "bg-cyan-500/20 text-cyan-300"}`}>
                         {item.track.camelot_key}

@@ -268,7 +268,7 @@ export default function Sidebar({
             const job = jobFor(folder.id);
             const active = folderRowActive(folder.id);
             return (
-              <div className="flex flex-col py-2.5 px-2 max-h-96 overflow-y-auto">
+              <div className="flex flex-col py-2.5 px-2 border-r border-slate-800/60 border-solid min-h-[36px]">
                 <div
                   key={folder.id}
                   onClick={() => onSelectFolder(folder.id)}
@@ -277,7 +277,7 @@ export default function Sidebar({
                   }`}
                   title="Clic para filtrar la biblioteca por esta carpeta"
                 >
-<div className="flex items-center gap-1.5">
+<div className="flex w-full items-center justify-between">
                     <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
                     <div className="min-w-0 flex-1">
                       <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
