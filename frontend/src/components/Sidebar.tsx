@@ -268,7 +268,7 @@ export default function Sidebar({
             const job = jobFor(folder.id);
             const active = folderRowActive(folder.id);
             return (
-              <div className="max-h-96 overflow-y-auto">
+              <div className="flex flex-col py-2.5 px-2 max-h-96 overflow-y-auto">
                 <div
                   key={folder.id}
                   onClick={() => onSelectFolder(folder.id)}
@@ -277,7 +277,7 @@ export default function Sidebar({
                   }`}
                   title="Clic para filtrar la biblioteca por esta carpeta"
                 >
-                  <div className="flex items-center gap-1.5">
+<div className="flex items-center gap-1.5">
                     <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
                     <div className="min-w-0 flex-1">
                       <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
@@ -288,26 +288,28 @@ export default function Sidebar({
                       </p>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void scanFolder(folder);
-                    }}
-                    title="Escanear / Re-analizar"
-                    className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
-                  >
-                    <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openMenu("folder", folder.id, e);
-                    }}
-                    title="Opciones"
-                    className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
-                  >
-                    <MoreVertical size={13} />
-                  </button>
+                  <div className="flex w-full items-center justify-between">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void scanFolder(folder);
+                      }}
+                      title="Escanear / Re-analizar"
+                      className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
+                      >
+                      <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openMenu("folder", folder.id, e);
+                      }}
+                      title="Opciones"
+                      className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
+                    >
+                      <MoreVertical size={13} />
+                    </button>
+                  </div>
                 </div>
                 {job && job.status === "error" && (
                   <p className="mt-1 text-[10px] text-red-400">{job.message}</p>
