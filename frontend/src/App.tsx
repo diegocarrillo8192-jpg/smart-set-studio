@@ -28,6 +28,7 @@ export default function App() {
   const [deckAPlaying, setDeckAPlaying] = useState(false);
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
+  const [backendDown, setBackendDown] = useState(false);
   const bootRef = useRef(false);
 
   // Splash screen: logo animado ~1.6s, fade-out 500ms, luego desmonta.
@@ -57,6 +58,7 @@ export default function App() {
       setFolders(f);
       setSets(s);
       setLibraryVersion((v) => v + 1);
+      setBackendDown(false);
       return f;
     } catch (err) {
       // Si el error viene con status 409 (carpeta ya importada), igual lo
@@ -64,6 +66,7 @@ export default function App() {
       // refresco); si es timeout/error genérico, lo consola.
       if ((err as Error & { status?: number }).status !== 409) {
         console.error("[App] error refrescando carpetas y sets:", err);
+        setBackendDown(true);
       }
       throw err;
     }
@@ -190,6 +193,14 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <main className="flex min-w-0 flex-1 flex-col">
+          {/* Aviso si el backend local (Electron) no responde */}
+          {backendDown && (
+            <div className="flex shrink-0 items-center gap-2 border-b border-red-900/60 bg-red-950/40 px-4 py-2 text-[11px] font-semibold text-red-300">
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+              Servidor backend no responde. Reintentando conexión… Verifica que el servicio
+              Python (ssa-backend) esté corriendo en 127.0.0.1:8765.
+            </div>
+          )}
           {/* Tabs */}
           <div className="flex shrink-0 items-center gap-1 border-b border-slate-800 bg-panel px-3 pt-2">
             <button

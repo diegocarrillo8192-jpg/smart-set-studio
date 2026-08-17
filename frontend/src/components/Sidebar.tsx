@@ -13,7 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
-import { api, pickMusicFolder, registerLocalFiles } from "../api";
+import { api, registerLocalFiles } from "../api";
 
 interface Props {
   folders: Folder[];
@@ -35,20 +35,18 @@ function useFolderPicker(): {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const pickFolder = async (): Promise<string | null> => {
+    // Escritorio (Electron): diálogo nativo de carpeta vía preload.
     if (window.smartSet?.selectFolder) {
       return window.smartSet.selectFolder();
     }
-    // Versión web: File System Access API con permiso explícito del usuario
-    // (showDirectoryPicker). Solo Chromium; el resto cae al <input> local.
-    const root = await pickMusicFolder();
-    if (root) return root;
+    // Versión web: el <input type="file" webkitdirectory> permite explorar y
+    // subir una carpeta completa desde el navegador; los File resultantes se
+    // registran para reproducirlos vía Blob URLs (sin backend local).
     return new Promise((resolve) => {
       if (!inputRef.current) return resolve(null);
       inputRef.current.onchange = () => {
         const files = inputRef.current?.files;
         if (!files || files.length === 0) return resolve(null);
-        // Versión web: retener los File para reproducirlos vía Blob URLs
-        // (URL.createObjectURL) aunque no haya backend local en 127.0.0.1.
         registerLocalFiles(Array.from(files));
         const file = files[0];
         const webkit = file as unknown as { webkitRelativePath?: string };
@@ -61,11 +59,12 @@ function useFolderPicker(): {
 
   const hiddenInput = (
     <input
+      id="web-folder-input"
       ref={inputRef}
       type="file"
       className="hidden"
       accept=".mp3,.wav,.aiff,.aif,.flac,.m4a,.aac,.ogg,.opus,audio/*"
-      {...({ webkitdirectory: "", multiple: true } as Record<string, unknown>)}
+      {...({ webkitdirectory: "", directory: "", multiple: true } as Record<string, unknown>)}
     />
   );
 
@@ -95,7 +94,7 @@ export default function Sidebar({
   const { pickFolder, hiddenInput } = useFolderPicker();
   const pollRef = useRef<Record<number, number>>({});
   const [libraryOpen, setLibraryOpen] = useState(true);
-  const [setsOpen, setSetsOpen] = useState(true);
+  const [setsOpen, setSetsOpen] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -268,16 +267,15 @@ export default function Sidebar({
             const job = jobFor(folder.id);
             const active = folderRowActive(folder.id);
             return (
-              <div className="flex flex-col py-2.5 px-2 border-r border-slate-800/60 border-solid min-h-[36px]">
+              <div key={folder.id} className="space-y-1">
                 <div
-                  key={folder.id}
                   onClick={() => onSelectFolder(folder.id)}
-                  className={`group relative cursor-pointer rounded-lg p-2 transition ${
+                  className={`group flex h-11 w-full cursor-pointer flex-row items-center justify-between gap-2 rounded-lg p-2.5 transition ${
                     active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
                   }`}
                   title="Clic para filtrar la biblioteca por esta carpeta"
                 >
-<div className="flex w-full items-center justify-between">
+                  <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                     <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
                     <div className="min-w-0 flex-1">
                       <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
@@ -288,7 +286,7 @@ export default function Sidebar({
                       </p>
                     </div>
                   </div>
-                  <div className="flex w-full items-center justify-between">
+                  <div className="flex shrink-0 items-center gap-1">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -296,7 +294,7 @@ export default function Sidebar({
                       }}
                       title="Escanear / Re-analizar"
                       className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
-                      >
+                    >
                       <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
                     </button>
                     <button
@@ -312,7 +310,7 @@ export default function Sidebar({
                   </div>
                 </div>
                 {job && job.status === "error" && (
-                  <p className="mt-1 text-[10px] text-red-400">{job.message}</p>
+                  <p className="text-[10px] text-red-400">{job.message}</p>
                 )}
               </div>
             );
