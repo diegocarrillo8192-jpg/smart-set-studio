@@ -95,6 +95,7 @@ export default function Sidebar({
   const { pickFolder, hiddenInput } = useFolderPicker();
   const pollRef = useRef<Record<number, number>>({});
   const [libraryOpen, setLibraryOpen] = useState(true);
+  const [setsOpen, setSetsOpen] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -319,8 +320,15 @@ export default function Sidebar({
 
       {/* Playlists & Sets */}
       <section className="border-t border-slate-800 px-3 py-3">
-        <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
-          <ListMusic size={12} /> Playlists &amp; Sets
+<h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+          <ListMusic size={12} /> Playlists & Sets
+          <button
+            onClick={() => setSetsOpen((o) => !o)}
+            className="rounded-full p-1 text-xs font-semibold text-slate-400 transition hover:text-violet-300"
+            title={setsOpen ? "Colapsar sección" : "Expandir sección"}
+          >
+            <ChevronDown size={12} className="shrink-0" />
+          </button>
         </h2>
         <div className="space-y-1">
           {sets.length === 0 && (
@@ -336,7 +344,7 @@ export default function Sidebar({
               </div>
             </div>
           )}
-          {sets.map((set) => (
+          {setsOpen && sets.map((set) => (
             <div
               key={set.id}
               onClick={() => onSelectSet(set)}

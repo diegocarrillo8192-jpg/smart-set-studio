@@ -59,6 +59,7 @@ class Track(Base):
     file_modified_at: Mapped[float | None] = mapped_column(Float)
     analyzed_at: Mapped[datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
+    genre: Mapped[str | None] = mapped_column(String(128), default=None)  # nuevo: género del archivo
 
     folder: Mapped[Folder | None] = relationship(back_populates="tracks")
 

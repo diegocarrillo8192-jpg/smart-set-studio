@@ -75,6 +75,8 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
             duration_sec=meta.duration_sec,
             embedded_bpm=meta.embedded_bpm,
             embedded_key=meta.embedded_key,
+            # Nuevo: guardar género leído (fallback a nombre de carpeta si está vacío)
+            genre=meta.genre or folder.name,
             file_modified_at=mtime,
         )
         db.add(track)
@@ -91,6 +93,11 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
         track.duration_sec = meta.duration_sec
         track.embedded_bpm = meta.embedded_bpm
         track.embedded_key = meta.embedded_key
+        # Actualizar género solo si viene con contenido (sino mantener el existente o el de la carpeta)
+        if meta.genre:
+            track.genre = meta.genre
+        else:
+            track.genre = folder.name  # fallback a nombre de carpeta
         track.file_modified_at = mtime
         track.analyzed = False
         track.has_error = False
