@@ -17,6 +17,9 @@ interface Props {
   onSetCompatibleWith: (t: Track | null) => void;
   /** IDs de los tracks que suenan ahora en Deck A/B (resaltado en la tabla). */
   playingTrackIds: number[];
+  /** Cada vez que cambia este número (desde App.tsx via libraryVersion),
+   *  la tabla recarga la lista de canciones automáticamente. */
+  refreshKey: number;
 }
 
 const CAMELOT_CODES = Array.from({ length: 12 }, (_, i) => [`${i + 1}A`, `${i + 1}B`]).flat();
@@ -56,6 +59,7 @@ export default function LibraryTable({
   compatibleWith,
   onSetCompatibleWith,
   playingTrackIds,
+  refreshKey,
 }: Props) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
@@ -94,7 +98,7 @@ export default function LibraryTable({
     } finally {
       setLoading(false);
     }
-  }, [q, folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith]);
+  }, [q, folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith, refreshKey]);
 
   useEffect(() => {
     const t = setTimeout(load, 250);

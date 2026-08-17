@@ -425,7 +425,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(detail);
+    // El status HTTP queda accesible para decisiones de UI (p. ej. 409 →
+    // "carpeta ya importada" dispara el refresco inmediato de la biblioteca).
+    const err = new Error(detail) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return res.json() as Promise<T>;
 }

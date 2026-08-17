@@ -122,7 +122,16 @@ export default function Sidebar({
         onFoldersChanged();
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // Si el backend respondió 409 ("La carpeta ya está importada"), forzar
+      // refresco inmediato de carpetas + lista de canciones para que la UI se
+      // actualice sin necesidad de volver a hacer clic.
+      const err = e as Error & { status?: number };
+      if (err.status === 409) {
+        setError(err.message);
+        onFoldersChanged();
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setAdding(false);
     }

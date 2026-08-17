@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Library, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
-import { api, isWeb, purgeStaleWebCache, resetWebCache, WEB_UNHEALTHY_KEY } from "./api";
+import { api } from "./api";
 import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
@@ -27,6 +27,8 @@ export default function App() {
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
   const [deckAPlaying, setDeckAPlaying] = useState(false);
   const [deckBPlaying, setDeckBPlaying] = useState(false);
+  const [libraryVersion, setLibraryVersion] = useState(0);
+  const bootRef = useRef(false);
 
   // Splash screen: logo animado ~1.6s, fade-out 500ms, luego desmonta.
   // No bloquea la carga: la UI arranca detrás y la capa se desvanece sola.
@@ -50,44 +52,48 @@ export default function App() {
   }, [deckAPlaying, deckBPlaying, deckATrack, deckBTrack]);
 
   const refresh = useCallback(async () => {
-    // Reintento por si el backend aún está arrancando (la ventana se abre al
-    // instante y ssa-backend.exe inicializa en paralelo: puede tardar segundos)
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
-        const [f, s] = await Promise.all([api.listFolders(), api.listSets()]);
-        setFolders(f);
-        setSets(s);
-        return;
-      } catch (err) {
-        if (attempt === 9) throw err;
-        await new Promise((r) => setTimeout(r, 1200));
+    try {
+      const [f, s] = await Promise.all([api.listFolders(), api.listSets()]);
+      setFolders(f);
+      setSets(s);
+      setLibraryVersion((v) => v + 1);
+      return f;
+    } catch (err) {
+      // Si el error viene con status 409 (carpeta ya importada), igual lo
+      // propagamos: quien lo llama decide (Sidebar muestra mensaje y fuerza
+      // refresco); si es timeout/error genérico, lo consola.
+      if ((err as Error & { status?: number }).status !== 409) {
+        console.error("[App] error refrescando carpetas y sets:", err);
       }
+      throw err;
     }
   }, []);
 
+  // Carga inicial robusta: intenta varias veces al arrancar para que la UI
+  // no quede vacía si el backend necesita unos segundos (PyInstaller + numpy,
+  // librosa, etc.). Máx. 90s desde el inicio.
   useEffect(() => {
-    if (!isWeb()) {
-      // Electron/escritorio: NO se toca ningún estado persistente del cliente.
-      void refresh().catch(console.error);
-      return;
-    }
-    // Web: si la sesión anterior detectó caché rota (covers o audio que no
-    // cargan por red), reseteo automático LocalStorage + IndexedDB + Cache
-    // Storage. Si no, purga versionada normal. # atom: nunca toca la BD.
+    if (bootRef.current) return;
+    bootRef.current = true;
+    const deadline = Date.now() + 90000;
     const boot = async () => {
-      try {
-        if (localStorage.getItem(WEB_UNHEALTHY_KEY) === "1") {
-          localStorage.removeItem(WEB_UNHEALTHY_KEY);
-          await resetWebCache();
-        } else {
-          await purgeStaleWebCache();
+      for (;;) {
+        try {
+          await refresh();
+          return; // éxito: carpetas y sets cargados
+        } catch (err) {
+          if (Date.now() > deadline) {
+            console.error("[App] No se pudieron cargar carpetas tras 90s:", err);
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 2500));
         }
-      } catch {
-        /* almacenamiento no disponible: continuar de todos modos */
       }
-      void refresh().catch(console.error);
     };
     void boot();
+    return () => {
+      // limpieza opcional si la app se cierra mientras boot
+    };
   }, [refresh]);
 
   // Identificación de la app embebida en Electron: registra is_desktop=true
@@ -226,6 +232,7 @@ export default function App() {
                   compatibleWith={compatibleWith}
                   onSetCompatibleWith={setCompatibleWith}
                   playingTrackIds={playingTrackIds}
+                  refreshKey={libraryVersion}
                 />
               </>
             ) : (
