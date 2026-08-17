@@ -66,18 +66,22 @@ export default function App() {
       // refresco); si es timeout/error genérico, lo consola.
       if ((err as Error & { status?: number }).status !== 409) {
         console.error("[App] error refrescando carpetas y sets:", err);
-        setBackendDown(true);
+        // El banner de backend caído solo aplica en escritorio: en la web no
+        // existe un backend local en 127.0.0.1 y la app opera en modo offline.
+        if (window.smartSet?.isDesktop) setBackendDown(true);
       }
       throw err;
     }
   }, []);
 
-  // Carga inicial robusta: intenta varias veces al arrancar para que la UI
-  // no quede vacía si el backend necesita unos segundos (PyInstaller + numpy,
-  // librosa, etc.). Máx. 90s desde el inicio.
+  // Carga inicial: en escritorio reintenta varias veces al arrancar para que
+  // la UI no quede vacía si el backend tarda unos segundos (PyInstaller +
+  // numpy, librosa, etc.). Máx. 90s. En la web NO hay backend local: se hace
+  // un único intento y se opera en modo offline/browser sin reintentos.
   useEffect(() => {
     if (bootRef.current) return;
     bootRef.current = true;
+    const isDesktop = !!window.smartSet?.isDesktop;
     const deadline = Date.now() + 90000;
     const boot = async () => {
       for (;;) {
@@ -85,8 +89,9 @@ export default function App() {
           await refresh();
           return; // éxito: carpetas y sets cargados
         } catch (err) {
-          if (Date.now() > deadline) {
-            console.error("[App] No se pudieron cargar carpetas tras 90s:", err);
+          if (!isDesktop || Date.now() > deadline) {
+            if (!isDesktop) console.debug("[App] web: sin backend local, modo offline");
+            else console.error("[App] No se pudieron cargar carpetas tras 90s:", err);
             return;
           }
           await new Promise((r) => setTimeout(r, 2500));
@@ -193,14 +198,6 @@ export default function App() {
           onOpenSettings={() => setSettingsOpen(true)}
         />
         <main className="flex min-w-0 flex-1 flex-col">
-          {/* Aviso si el backend local (Electron) no responde */}
-          {backendDown && (
-            <div className="flex shrink-0 items-center gap-2 border-b border-red-900/60 bg-red-950/40 px-4 py-2 text-[11px] font-semibold text-red-300">
-              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
-              Servidor backend no responde. Reintentando conexión… Verifica que el servicio
-              Python (ssa-backend) esté corriendo en 127.0.0.1:8765.
-            </div>
-          )}
           {/* Tabs */}
           <div className="flex shrink-0 items-center gap-1 border-b border-slate-800 bg-panel px-3 pt-2">
             <button
@@ -271,6 +268,18 @@ export default function App() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Aviso de backend caído (SOLO escritorio): capa fija debajo del
+          reproductor, con z-index alto para no quedar oculta tras las tabs. */}
+      {backendDown && window.smartSet?.isDesktop && (
+        <div className="pointer-events-none fixed inset-x-0 top-[calc(20%+10px)] z-50 flex justify-center px-4">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/90 px-4 py-2 text-[11px] font-semibold text-red-300 shadow-2xl shadow-black/60">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+            Servidor backend no responde. Reintentando conexión… Verifica que el servicio
+            Python (ssa-backend) esté corriendo en 127.0.0.1:8765.
+          </div>
+        </div>
+      )}
 
       {!splashGone && <SplashScreen leaving={splashLeaving} />}
     </div>
