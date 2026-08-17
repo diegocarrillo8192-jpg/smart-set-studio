@@ -222,6 +222,19 @@ export default function App() {
             </button>
           </div>
 
+          {/* Aviso de backend caído (SOLO escritorio): contenedor independiente
+              en flujo normal, justo encima de la barra de búsqueda y debajo de
+              las tabs, con margin-bottom — nunca tapa la pestañas. */}
+          {backendDown && window.smartSet?.isDesktop && (
+            <div className="mb-2 mt-1 shrink-0 px-3">
+              <div className="flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] font-semibold text-red-300">
+                <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+                Servidor backend no responde. Reintentando conexión… Verifica que el servicio
+                Python (ssa-backend) esté corriendo en 127.0.0.1:8765.
+              </div>
+            </div>
+          )}
+
           <div className="flex min-h-0 flex-1 flex-col">
             {tab === "library" ? (
               <>
@@ -268,18 +281,6 @@ export default function App() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-
-      {/* Aviso de backend caído (SOLO escritorio): capa fija debajo del
-          reproductor, con z-index alto para no quedar oculta tras las tabs. */}
-      {backendDown && window.smartSet?.isDesktop && (
-        <div className="pointer-events-none fixed inset-x-0 top-[calc(20%+10px)] z-50 flex justify-center px-4">
-          <div className="pointer-events-auto flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/90 px-4 py-2 text-[11px] font-semibold text-red-300 shadow-2xl shadow-black/60">
-            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
-            Servidor backend no responde. Reintentando conexión… Verifica que el servicio
-            Python (ssa-backend) esté corriendo en 127.0.0.1:8765.
-          </div>
-        </div>
-      )}
 
       {!splashGone && <SplashScreen leaving={splashLeaving} />}
     </div>

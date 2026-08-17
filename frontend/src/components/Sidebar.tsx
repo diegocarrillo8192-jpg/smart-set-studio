@@ -13,7 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
-import { api, registerLocalFiles } from "../api";
+import { api, webRegisterFolder } from "../api";
 
 interface Props {
   folders: Folder[];
@@ -40,20 +40,23 @@ function useFolderPicker(): {
       return window.smartSet.selectFolder();
     }
     // Versión web: el <input type="file" webkitdirectory> permite explorar y
-    // subir una carpeta completa desde el navegador; los File resultantes se
-    // registran para reproducirlos vía Blob URLs (sin backend local).
+    // subir una carpeta completa desde el navegador. Se limpia su valor en
+    // cada intento para que el diálogo pueda reabrirse tantas veces como sea
+    // necesario (si no, re-seleccionar la misma carpeta no dispara onChange).
     return new Promise((resolve) => {
-      if (!inputRef.current) return resolve(null);
-      inputRef.current.onchange = () => {
-        const files = inputRef.current?.files;
-        if (!files || files.length === 0) return resolve(null);
-        registerLocalFiles(Array.from(files));
-        const file = files[0];
-        const webkit = file as unknown as { webkitRelativePath?: string };
-        const relative = webkit.webkitRelativePath ?? "";
-        resolve(relative ? relative.split("/")[0] : file.name);
+      const input = inputRef.current;
+      if (!input) return resolve(null);
+      input.value = "";
+      input.onchange = () => {
+        const files = input.files ? Array.from(input.files) : [];
+        input.value = "";
+        if (files.length === 0) return resolve(null);
+        // Registra todos los archivos de audio (nombre/ruta/Blob URL/formato)
+        // en el almacén del navegador: listTracks los devuelve al instante.
+        const root = webRegisterFolder(files);
+        resolve(root);
       };
-      inputRef.current.click();
+      input.click();
     });
   };
 
@@ -64,6 +67,10 @@ function useFolderPicker(): {
       type="file"
       className="hidden"
       accept=".mp3,.wav,.aiff,.aif,.flac,.m4a,.aac,.ogg,.opus,audio/*"
+      onClick={(e) => {
+        // Limpieza previa a CADA apertura del diálogo (fiable en repetición).
+        e.currentTarget.value = "";
+      }}
       {...({ webkitdirectory: "", directory: "", multiple: true } as Record<string, unknown>)}
     />
   );
@@ -120,7 +127,12 @@ export default function Sidebar({
     try {
       const path = await pickFolder();
       if (path) {
-        await api.addFolder(path);
+        if (window.smartSet?.selectFolder) {
+          // Escritorio: el backend importa la carpeta del disco.
+          await api.addFolder(path);
+        }
+        // Web: la carpeta ya quedó registrada en el almacén del navegador
+        // (dentro de pickFolder); refrescar hace que aparezca al instante.
         onFoldersChanged();
       }
     } catch (e) {

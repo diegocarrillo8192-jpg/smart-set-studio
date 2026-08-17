@@ -84,14 +84,23 @@ async function startBackend() {
   let args;
   let cwd;
   if (app.isPackaged) {
-    // Runtime embebido (PyInstaller onedir dentro de extraResources)
-    cmd = path.join(process.resourcesPath, "backend", "ssa-backend.exe");
-    args = [];
-    cwd = path.join(process.resourcesPath, "backend");
-    if (!fs.existsSync(cmd)) {
-      console.error(`[smart-set] Backend empaquetado no encontrado: ${cmd}`);
+    // Runtime embebido (PyInstaller onedir copiado por extraResources).
+    // La ruta real puede variar entre builds: probamos candidatos dentro de
+    // process.resourcesPath (backend/ → resources/bin/ → raíz de resources).
+    const resources = process.resourcesPath;
+    const candidates = [
+      path.join(resources, "backend", "ssa-backend.exe"),
+      path.join(resources, "bin", "ssa-backend.exe"),
+      path.join(resources, "ssa-backend", "ssa-backend.exe"),
+      path.join(resources, "ssa-backend.exe"),
+    ];
+    cmd = candidates.find((c) => fs.existsSync(c)) ?? null;
+    if (!cmd) {
+      console.error(`[smart-set] Backend empaquetado no encontrado. Buscado en:\n  ${candidates.join("\n  ")}`);
       return;
     }
+    args = [];
+    cwd = path.dirname(cmd);
   } else {
     const root = path.join(__dirname, "..");
     const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
@@ -99,6 +108,9 @@ async function startBackend() {
     args = ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT)];
     cwd = path.join(root, "backend");
   }
+  // Pequeño retardo de arranque: deja que la ventana y el splash pinten antes
+  // de lanzar el proceso pesado (PyInstaller + numpy/librosa tardan en cargar).
+  await new Promise((r) => setTimeout(r, 600));
   backendProc = spawn(cmd, args, {
     cwd,
     windowsHide: true,
@@ -106,6 +118,9 @@ async function startBackend() {
   });
   backendProc.stdout.on("data", (d) => process.stdout.write(`[backend] ${d}`));
   backendProc.stderr.on("data", (d) => process.stderr.write(`[backend] ${d}`));
+  backendProc.on("error", (err) =>
+    console.error(`[smart-set] No se pudo iniciar el backend: ${err.message}`)
+  );
   backendProc.on("exit", (code) => console.log(`[smart-set] Backend terminó (${code})`));
   const ok = await waitForBackend();
   console.log(ok ? "[smart-set] Backend listo" : "[smart-set] No se pudo iniciar el backend");

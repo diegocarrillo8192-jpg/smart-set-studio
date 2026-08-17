@@ -412,6 +412,92 @@ export async function resetWebCache(): Promise<void> {
 // carátulas ignoran el caché HTTP del navegador (cache: "reload").
 let webCacheReset = false;
 
+// --- Almacén de biblioteca en el navegador (modo web offline) ---------------
+// Sin backend local, los archivos elegidos con <input webkitdirectory> se
+// registran como una "carpeta" virtual con tracks sintéticos. listFolders y
+// listTracks devuelven este almacén cuando corre en web, de modo que las
+// canciones aparecen al instante en la tabla "Todos los tracks".
+let webFolderSeq = 0;
+let webTrackSeq = 0;
+let webFolders: Folder[] = [];
+let webTracks: Track[] = [];
+
+const AUDIO_EXT_RE = /\.(mp3|wav|aiff?|flac|m4a|aac|ogg|opus)$/i;
+
+/** Registra los archivos de una carpeta web; devuelve el nombre raíz o null. */
+export function webRegisterFolder(files: File[]): string | null {
+  const audio = files.filter((f) => {
+    const rel = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? "";
+    return AUDIO_EXT_RE.test(rel);
+  });
+  if (audio.length === 0) return null;
+  registerLocalFiles(audio);
+
+  const firstRel = (audio[0] as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? "";
+  const root = (firstRel.split(/[\\/]/)[0] || "Mi Música").trim();
+  let folder = webFolders.find((f) => f.name === root);
+  if (!folder) {
+    folder = {
+      id: --webFolderSeq,
+      path: root,
+      name: root,
+      last_scanned_at: new Date().toISOString(),
+      track_count: 0,
+    };
+    webFolders.push(folder);
+  }
+
+  const seen = new Set(webTracks.map((t) => t.file_path.toLowerCase()));
+  const added: Track[] = [];
+  for (const f of audio) {
+    const rel =
+      ((f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? f.name).replace(/\\/g, "/") ?? f.name;
+    if (seen.has(rel.toLowerCase())) continue;
+    seen.add(rel.toLowerCase());
+    const base = f.name.replace(/\.[^.]+$/, "");
+    added.push({
+      id: --webTrackSeq,
+      file_path: rel,
+      folder_id: folder.id,
+      folder_name: root,
+      title: base,
+      artist: root,
+      album: root,
+      duration_sec: null,
+      bpm: null,
+      embedded_bpm: null,
+      musical_key: null,
+      camelot_key: null,
+      embedded_key: null,
+      energy: null,
+      loudness_db: null,
+      spectral_centroid: null,
+      analyzed: false,
+      has_error: false,
+      error_message: null,
+    });
+  }
+  if (added.length > 0) {
+    webTracks.push(...added);
+    folder.track_count = webTracks.filter((t) => t.folder_id === folder.id).length;
+  }
+  return root;
+}
+
+function webListTracks(params: Record<string, string | number | boolean | undefined>): Track[] {
+  let rows = webTracks.filter((t) => {
+    const fid = params.folder_id;
+    if (fid !== undefined && fid !== null && fid !== "" && t.folder_id !== fid) return false;
+    const q = String(params.q ?? "").toLowerCase();
+    if (q) {
+      const hay = `${t.title} ${t.artist} ${t.album} ${t.folder_name ?? ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  return rows.slice(0, 1000);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -611,7 +697,8 @@ export const api = {
   health: () => request<{ status: string }>("/health"),
 
   // Folders
-  listFolders: () => request<Folder[]>("/folders"),
+  listFolders: () =>
+    isWeb() ? Promise.resolve([...webFolders]) : request<Folder[]>("/folders"),
   addFolder: (path: string) =>
     request<Folder>("/folders", { method: "POST", body: JSON.stringify({ path }) }),
   removeFolder: (id: number) =>
@@ -624,6 +711,7 @@ export const api = {
 
   // Tracks
   listTracks: (params: Record<string, string | number | boolean | undefined>) => {
+    if (isWeb()) return Promise.resolve(webListTracks(params));
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
