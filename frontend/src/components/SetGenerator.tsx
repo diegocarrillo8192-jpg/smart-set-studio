@@ -83,7 +83,7 @@ function buildRekordboxXml(set: DJSet): string {
       Name: t.title ?? "",
       Artist: t.artist ?? "",
       Album: t.album ?? "",
-      Genre: "",
+      Genre: t.genre ?? "",
       Year: "",
       Comment: "",
       Label: "",
@@ -108,6 +108,8 @@ function buildRekordboxXml(set: DJSet): string {
       DateAdded: "2024-01-01",
       ModificationTime: "2024-01-01",
       Mix: "",
+      // Location formateada como requiere Rekordbox: file://localhost/RUTA_ABSOLUTA
+      Location: `file://localhost/${t.file_path || ""}`,
     };
     const attrStr = Object.entries(attrs)
       .map(([k, v]) => `${k}="${xmlEscape(v)}"`)
@@ -122,7 +124,8 @@ function buildRekordboxXml(set: DJSet): string {
   lines.push('    <NODE Name="Root" Type="0">');
   lines.push(`      <NODE Name="${xmlEscape(set.name)}" Type="1">`);
   for (const item of items) {
-    lines.push(`        <TRACK Num="${item.position}" Key="${xmlEscape(item.track.camelot_key ?? "")}"/>`);
+        // Key debe ser el ID exacto asignado en la COLLECTION (usamos item.track.id)
+        lines.push(`        <TRACK Num="${item.position}" Key="${xmlEscape(String(item.track.id ?? item.position))}"/>`);
   }
   lines.push("      </NODE>");
   lines.push("    </NODE>");
@@ -614,6 +617,9 @@ export default function SetGenerator({
                         </p>
                         <p className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</p>
                       </div>
+                      <span className="rounded px-1.5 py-0.5 text-[9px] text-slate-400 rounded-md border border-slate-700/50">
+                        {item.track.genre ?? "-"}
+                      </span>
                       <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${item.track.camelot_key?.endsWith("B") ? "bg-violet-500/20 text-violet-300" : "bg-cyan-500/20 text-cyan-300"}`}>
                         {item.track.camelot_key}
                       </span>

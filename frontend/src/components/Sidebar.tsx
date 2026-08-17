@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from "react";
 import {
+  ChevronDown,
   Disc3,
   FolderPlus,
   FolderSearch,
@@ -93,6 +94,7 @@ export default function Sidebar({
   const menuRef = useRef<HTMLDivElement>(null);
   const { pickFolder, hiddenInput } = useFolderPicker();
   const pollRef = useRef<Record<number, number>>({});
+  const [libraryOpen, setLibraryOpen] = useState(true);
 
   useEffect(() => {
     return () => {
@@ -217,6 +219,13 @@ export default function Sidebar({
       <section className="px-3 py-3">
         <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
           <Library size={12} /> Mi Biblioteca
+          <button
+            onClick={() => setLibraryOpen((o) => !o)}
+            className="rounded-full p-1 text-xs font-semibold text-slate-400 transition hover:text-violet-300"
+            title={libraryOpen ? "Colapsar sección" : "Expandir sección"}
+          >
+            <ChevronDown size={12} className="shrink-0" />
+          </button>
         </h2>
         <button
           onClick={addFolder}
@@ -253,28 +262,30 @@ export default function Sidebar({
               </p>
             </div>
           )}
-          {folders.map((folder) => {
+          {libraryOpen && folders.map((folder) => {
             const scanning = isScanning(folder.id);
             const job = jobFor(folder.id);
             const active = folderRowActive(folder.id);
             return (
-              <div
-                key={folder.id}
-                onClick={() => onSelectFolder(folder.id)}
-                className={`group relative cursor-pointer rounded-lg p-2 transition ${
-                  active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
-                }`}
-                title="Clic para filtrar la biblioteca por esta carpeta"
-              >
-                <div className="flex items-center gap-1.5">
-                  <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
-                  <div className="min-w-0 flex-1">
-                    <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
-                    <p className="text-[10px] text-slate-500">
-                      {scanning && job
-                        ? `${job.processed_files}/${job.total_files} analizando...`
-                        : `${folder.track_count} tracks`}
-                    </p>
+              <div className="max-h-96 overflow-y-auto">
+                <div
+                  key={folder.id}
+                  onClick={() => onSelectFolder(folder.id)}
+                  className={`group relative cursor-pointer rounded-lg p-2 transition ${
+                    active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
+                  }`}
+                  title="Clic para filtrar la biblioteca por esta carpeta"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
+                    <div className="min-w-0 flex-1">
+                      <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
+                      <p className="text-[10px] text-slate-500">
+                        {scanning && job
+                          ? `${job.processed_files}/${job.total_files} analizando...`
+                          : `${folder.track_count} tracks`}
+                      </p>
+                    </div>
                   </div>
                   <button
                     onClick={(e) => {

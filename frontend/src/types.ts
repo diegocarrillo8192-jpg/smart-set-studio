@@ -26,6 +26,7 @@ export interface Track {
   analyzed: boolean;
   has_error: boolean;
   error_message: string | null;
+  genre?: string;
 }
 
 export interface ScanJob {

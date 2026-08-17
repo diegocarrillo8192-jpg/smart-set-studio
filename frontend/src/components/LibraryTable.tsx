@@ -249,6 +249,7 @@ export default function LibraryTable({
               <th className="w-24 px-2 py-2"></th>
               <th className="px-2 py-2">Título</th>
               <th className="px-2 py-2">Artista</th>
+              <th className="px-2 py-2">Género</th>
               <th className="px-2 py-2 text-right">BPM</th>
               <th className="px-2 py-2 text-center">Key</th>
               <th className="px-2 py-2">Energía</th>
@@ -321,8 +322,9 @@ export default function LibraryTable({
                     )}
                   </div>
                 </td>
-                <td className="max-w-40 truncate px-2 py-1.5 text-slate-400">{t.artist}</td>
-                <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
+<td className="max-w-40 truncate px-2 py-1.5 text-slate-400">{t.artist}</td>
+              <td className="px-2 py-1.5 text-slate-500">{t.genre ?? "-"}</td>
+              <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
                 <td className="px-2 py-1.5 text-center">
                   <span
                     className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm ${
