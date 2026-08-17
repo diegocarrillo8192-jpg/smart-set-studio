@@ -23,8 +23,10 @@ const blobUrlCache = new Map<string, string>();
 export function registerLocalFiles(files: File[]): void {
   const audioRe = /\.(mp3|flac|m4a|aac|aiff?|wav|ogg|opus)$/i;
   for (const f of files) {
+    // Guard: entradas no-File (nunca asumir propiedades de File).
+    if (!f || typeof f !== "object") continue;
     const rel = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath;
-    if (!rel) continue;
+    if (!rel || !f.name) continue;
     const key = rel.replace(/\\/g, "/");
     // Carpeta re-elegida: reciclar (revocar) la URL anterior del mismo archivo.
     if (localFiles.has(key)) {
@@ -417,30 +419,75 @@ let webCacheReset = false;
 // registran como una "carpeta" virtual con tracks sintéticos. listFolders y
 // listTracks devuelven este almacén cuando corre en web, de modo que las
 // canciones aparecen al instante en la tabla "Todos los tracks".
+// PERSISTENCIA: el almacén se serializa en localStorage y se hidrata al
+// arrancar para que carpetas y tracks vuelvan a mostrarse al reabrir la app.
 let webFolderSeq = 0;
 let webTrackSeq = 0;
 let webFolders: Folder[] = [];
 let webTracks: Track[] = [];
+let webStoreLoaded = false;
+
+const WEB_LIBRARY_KEY = "smartset.web_library_v1";
+
+function ensureWebStoreLoaded(): void {
+  if (webStoreLoaded) return;
+  webStoreLoaded = true;
+  try {
+    const raw = localStorage.getItem(WEB_LIBRARY_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as {
+      folders?: Folder[];
+      tracks?: Track[];
+      folderSeq?: number;
+      trackSeq?: number;
+    };
+    if (Array.isArray(parsed.folders)) webFolders = parsed.folders;
+    if (Array.isArray(parsed.tracks)) webTracks = parsed.tracks;
+    webFolderSeq = typeof parsed.folderSeq === "number" ? parsed.folderSeq : 0;
+    webTrackSeq = typeof parsed.trackSeq === "number" ? parsed.trackSeq : 0;
+  } catch {
+    // Almacén corrupto (versión anterior): empezar de cero sin crashar.
+    webFolders = [];
+    webTracks = [];
+  }
+}
+
+function saveWebStore(): void {
+  if (!isWeb()) return;
+  try {
+    localStorage.setItem(
+      WEB_LIBRARY_KEY,
+      JSON.stringify({ folders: webFolders, tracks: webTracks, folderSeq: webFolderSeq, trackSeq: webTrackSeq })
+    );
+  } catch {
+    // Cuota superada o almacenamiento no disponible: la sesión sigue en memoria.
+  }
+}
 
 const AUDIO_EXT_RE = /\.(mp3|wav|aiff?|flac|m4a|aac|ogg|opus)$/i;
 
+/** Nombre/ruta relativa segura de un File: nunca undefined. */
+function safeRelPath(f: File): string {
+  const rel = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath;
+  return (rel ?? f.name ?? "track").replace(/\\/g, "/");
+}
+
 /** Registra los archivos de una carpeta web; devuelve el nombre raíz o null. */
 export function webRegisterFolder(files: File[]): string | null {
+  ensureWebStoreLoaded();
   const audio = files.filter((f) => {
-    const rel = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? "";
-    return AUDIO_EXT_RE.test(rel);
+    if (!f || typeof f !== "object") return false;
+    const rel = safeRelPath(f);
+    const name = f.name ?? "";
+    return !!name && AUDIO_EXT_RE.test(rel || name);
   });
   if (audio.length === 0) return null;
   registerLocalFiles(audio);
   // Conversión INMEDIATA a Blob URLs estables (una por archivo): la UI puede
   // reproducir y mostrar los archivos sin depender de la API REST de escritorio.
-  for (const f of audio) {
-    const rel = ((f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? f.name).replace(/\\/g, "/");
-    localUrlFor(rel);
-  }
+  for (const f of audio) localUrlFor(safeRelPath(f));
 
-  const firstRel = (audio[0] as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? "";
-  const root = (firstRel.split(/[\\/]/)[0] || "Mi Música").trim();
+  const root = (safeRelPath(audio[0]).split(/[\\/]/)[0] || "Mi Música").trim();
   let folder = webFolders.find((f) => f.name === root);
   if (!folder) {
     folder = {
@@ -456,11 +503,12 @@ export function webRegisterFolder(files: File[]): string | null {
   const seen = new Set(webTracks.map((t) => t.file_path.toLowerCase()));
   const added: Track[] = [];
   for (const f of audio) {
-    const rel =
-      ((f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? f.name).replace(/\\/g, "/") ?? f.name;
+    const name = f.name ?? "";
+    if (!name) continue;
+    const rel = safeRelPath(f);
     if (seen.has(rel.toLowerCase())) continue;
     seen.add(rel.toLowerCase());
-    const base = f.name.replace(/\.[^.]+$/, "");
+    const base = name.replace(/\.[^.]+$/, "");
     added.push({
       id: --webTrackSeq,
       file_path: rel,
@@ -487,16 +535,18 @@ export function webRegisterFolder(files: File[]): string | null {
     webTracks.push(...added);
     folder.track_count = webTracks.filter((t) => t.folder_id === folder.id).length;
   }
+  saveWebStore();
   return root;
 }
 
 function webListTracks(params: Record<string, string | number | boolean | undefined>): Track[] {
+  ensureWebStoreLoaded();
   let rows = webTracks.filter((t) => {
     const fid = params.folder_id;
     if (fid !== undefined && fid !== null && fid !== "" && t.folder_id !== fid) return false;
     const q = String(params.q ?? "").toLowerCase();
     if (q) {
-      const hay = `${t.title} ${t.artist} ${t.album} ${t.folder_name ?? ""}`.toLowerCase();
+      const hay = `${t.title ?? ""} ${t.artist ?? ""} ${t.album ?? ""} ${t.folder_name ?? ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
@@ -703,8 +753,13 @@ export const api = {
   health: () => request<{ status: string }>("/health"),
 
   // Folders
-  listFolders: () =>
-    isWeb() ? Promise.resolve([...webFolders]) : request<Folder[]>("/folders"),
+  listFolders: () => {
+    if (isWeb()) {
+      ensureWebStoreLoaded();
+      return Promise.resolve([...webFolders]);
+    }
+    return request<Folder[]>("/folders");
+  },
   addFolder: (path: string) =>
     request<Folder>("/folders", { method: "POST", body: JSON.stringify({ path }) }),
   removeFolder: (id: number) =>

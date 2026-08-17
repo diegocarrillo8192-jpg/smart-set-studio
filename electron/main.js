@@ -66,8 +66,11 @@ function waitForUrl(url, timeoutMs = 30000) {
     const check = () => {
       const req = http.get(url, (res) => {
         res.resume();
-        if (res.statusCode >= 200 && res.statusCode < 500) resolve(true);
-        else retry();
+        // Solo un 2xx (el /health devuelve 200 OK) cuenta como backend listo.
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          console.log(`[smart-set] Healthcheck OK: ${url} -> ${res.statusCode}`);
+          resolve(true);
+        } else retry();
       });
       req.on("error", retry);
       req.setTimeout(2000, () => {
@@ -153,6 +156,10 @@ async function startBackend() {
     logBackendOutput(`\n=== intento: ${attempt.kind} (${attempt.cmd} ${attempt.args.join(" ")}) ===\n`);
     backendProc = spawn(attempt.cmd, attempt.args, {
       cwd: attempt.cwd,
+      // shell:false → NUNCA pasamos comandos a cmd.exe: las rutas con espacios
+      // (p. ej. "Smart Set Architect") se pasan como argumentos directos,
+      // correctamente citados por Node sin usar comillas en la línea.
+      shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
