@@ -432,6 +432,12 @@ export function webRegisterFolder(files: File[]): string | null {
   });
   if (audio.length === 0) return null;
   registerLocalFiles(audio);
+  // Conversión INMEDIATA a Blob URLs estables (una por archivo): la UI puede
+  // reproducir y mostrar los archivos sin depender de la API REST de escritorio.
+  for (const f of audio) {
+    const rel = ((f as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? f.name).replace(/\\/g, "/");
+    localUrlFor(rel);
+  }
 
   const firstRel = (audio[0] as unknown as { webkitRelativePath?: string }).webkitRelativePath ?? "";
   const root = (firstRel.split(/[\\/]/)[0] || "Mi Música").trim();

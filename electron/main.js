@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
+const fs = require("fs");
 
 const BACKEND_PORT = 8765;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
@@ -10,6 +11,16 @@ const isDev = !app.isPackaged;
 
 let backendProc = null;
 let mainWindow = null;
+
+/** Volcado de stdout/stderr del backend a un archivo local (diagnóstico). */
+function logBackendOutput(chunk) {
+  try {
+    const logPath = path.join(app.getPath("userData"), "backend-error.log");
+    fs.appendFileSync(logPath, chunk);
+  } catch (err) {
+    console.error("[smart-set] No se pudo escribir el log del backend:", err);
+  }
+}
 
 // Instancia única: si ya hay otra ventana abierta, enfocarla y salir.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -79,51 +90,111 @@ async function startBackend() {
     console.log("[smart-set] Backend ya estaba corriendo");
     return;
   }
-  const fs = require("fs");
-  let cmd;
-  let args;
-  let cwd;
+
+  // Cola de intentos: primero los binarios preferidos, luego fallbacks con
+  // python/python3. Cada intento espera su propio healthcheck; si ninguno
+  // responde se muestra un diálogo con la ruta del log de diagnóstico.
+  const attempts = [];
+
   if (app.isPackaged) {
     // Runtime embebido (PyInstaller onedir copiado por extraResources).
     // La ruta real puede variar entre builds: probamos candidatos dentro de
-    // process.resourcesPath (backend/ → resources/bin/ → raíz de resources).
+    // process.resourcesPath (backend/ → bin/ → raíz de resources).
     const resources = process.resourcesPath;
-    const candidates = [
-      path.join(resources, "backend", "ssa-backend.exe"),
-      path.join(resources, "bin", "ssa-backend.exe"),
-      path.join(resources, "ssa-backend", "ssa-backend.exe"),
-      path.join(resources, "ssa-backend.exe"),
-    ];
-    cmd = candidates.find((c) => fs.existsSync(c)) ?? null;
-    if (!cmd) {
-      console.error(`[smart-set] Backend empaquetado no encontrado. Buscado en:\n  ${candidates.join("\n  ")}`);
-      return;
+    for (const sub of ["backend", "bin", ""]) {
+      const dir = sub ? path.join(resources, sub) : resources;
+      const exe = path.join(dir, "ssa-backend.exe");
+      if (fs.existsSync(exe)) {
+        attempts.push({
+          kind: `ssa-backend.exe (resources${sub ? `/${sub}` : ""})`,
+          cmd: exe,
+          args: [],
+          cwd: dir,
+          timeout: 30000,
+        });
+      }
     }
-    args = [];
-    cwd = path.dirname(cmd);
   } else {
     const root = path.join(__dirname, "..");
     const venvPython = path.join(root, ".venv", "Scripts", "python.exe");
-    cmd = fs.existsSync(venvPython) ? venvPython : "python";
-    args = ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT)];
-    cwd = path.join(root, "backend");
+    attempts.push({
+      kind: "venv python + uvicorn",
+      cmd: fs.existsSync(venvPython) ? venvPython : "python",
+      args: ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT)],
+      cwd: path.join(root, "backend"),
+      timeout: 30000,
+    });
   }
-  // Pequeño retardo de arranque: deja que la ventana y el splash pinten antes
-  // de lanzar el proceso pesado (PyInstaller + numpy/librosa tardan en cargar).
-  await new Promise((r) => setTimeout(r, 600));
-  backendProc = spawn(cmd, args, {
-    cwd,
-    windowsHide: true,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  backendProc.stdout.on("data", (d) => process.stdout.write(`[backend] ${d}`));
-  backendProc.stderr.on("data", (d) => process.stderr.write(`[backend] ${d}`));
-  backendProc.on("error", (err) =>
-    console.error(`[smart-set] No se pudo iniciar el backend: ${err.message}`)
-  );
-  backendProc.on("exit", (code) => console.log(`[smart-set] Backend terminó (${code})`));
-  const ok = await waitForBackend();
-  console.log(ok ? "[smart-set] Backend listo" : "[smart-set] No se pudo iniciar el backend");
+
+  // Fallback: python / python3 corriendo run_server.py directamente (dev) o
+  // uvicorn con un Python del sistema (packaged: solo si existe en PATH).
+  const root = path.join(__dirname, "..");
+  const runServerPy = path.join(root, "backend", "run_server.py");
+  if (fs.existsSync(runServerPy)) {
+    for (const py of ["python", "python3"]) {
+      attempts.push({
+        kind: `fallback ${py} run_server.py`,
+        cmd: py,
+        args: [runServerPy],
+        cwd: path.dirname(runServerPy),
+        timeout: 20000,
+      });
+    }
+  }
+
+  fs.writeFileSync(path.join(app.getPath("userData"), "backend-error.log"), ""); // limpiar log previo
+
+  let started = false;
+  for (const attempt of attempts) {
+    // Pequeño retardo de arranque: deja que la ventana y el splash pinten antes
+    // de lanzar el proceso pesado (PyInstaller + numpy/librosa tardan en cargar).
+    await new Promise((r) => setTimeout(r, 600));
+    console.log(`[smart-set] Iniciando backend: ${attempt.kind}`);
+    logBackendOutput(`\n=== intento: ${attempt.kind} (${attempt.cmd} ${attempt.args.join(" ")}) ===\n`);
+    backendProc = spawn(attempt.cmd, attempt.args, {
+      cwd: attempt.cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    backendProc.stdout.on("data", (d) => {
+      process.stdout.write(`[backend] ${d}`);
+      logBackendOutput(d);
+    });
+    backendProc.stderr.on("data", (d) => {
+      process.stderr.write(`[backend] ${d}`);
+      logBackendOutput(d);
+    });
+    backendProc.on("error", (err) => {
+      const msg = `[smart-set] No se pudo iniciar '${attempt.kind}': ${err.message}\n`;
+      console.error(msg);
+      logBackendOutput(msg);
+    });
+    backendProc.on("exit", (code) => {
+      const msg = `[smart-set] Backend terminó (${attempt.kind}, exit=${code})\n`;
+      console.log(msg);
+      logBackendOutput(msg);
+    });
+
+    const ok = await waitForBackend(attempt.timeout);
+    if (ok) {
+      started = true;
+      console.log(`[smart-set] Backend listo (${attempt.kind})`);
+      break;
+    }
+    console.log(`[smart-set] Healthcheck sin respuesta para: ${attempt.kind}`);
+    if (backendProc && !backendProc.killed) {
+      backendProc.kill();
+      backendProc = null;
+    }
+  }
+
+  if (!started) {
+    const msg =
+      "No se pudo iniciar el servidor Python del backend (ssa-backend.exe o python). " +
+      `Revisa el log de diagnóstico en: ${path.join(app.getPath("userData"), "backend-error.log")}`;
+    console.error(`[smart-set] ${msg}`);
+    dialog.showErrorBox("Backend no iniciado", msg);
+  }
 }
 
 function createWindow() {
