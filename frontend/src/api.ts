@@ -436,6 +436,9 @@ let webCacheReset = false;
 // arranca limpia: demo de sesión temporal, sin base de datos ni motor local.
 let webFolderSeq = 0;
 let webTrackSeq = 0;
+/** Sets generados en la sesión volátil (lista del panel lateral en vivo). */
+let webSetSeq = 0;
+let webSets: DJSet[] = [];
 let webFolders: Folder[] = [];
 let webTracks: Track[] = [];
 let webStoreLoaded = false;
@@ -897,8 +900,23 @@ export const api = {
     }
     return request<Folder>(`/folders/${id}`, { method: "PUT", body: JSON.stringify({ name }) });
   },
-  scanFolder: (id: number, force = false) =>
-    request<ScanJob>(`/folders/${id}/scan${force ? "?force=true" : ""}`, { method: "POST" }),
+  scanFolder: (id: number, force = false) => {
+    if (isWeb()) {
+      // Demo volátil: el análisis de etiquetas ya corrió en el navegador al
+      // registrar la carpeta; el escaneo "completa" al instante sin backend.
+      const now = new Date().toISOString();
+      return Promise.resolve({
+        id,
+        status: "done",
+        total_files: 0,
+        processed_files: 0,
+        message: "Análisis en navegador (demo)",
+        started_at: now,
+        finished_at: now,
+      } as ScanJob);
+    }
+    return request<ScanJob>(`/folders/${id}/scan${force ? "?force=true" : ""}`, { method: "POST" });
+  },
   scanStatus: (id: number) => request<ScanJob | null>(`/folders/${id}/scan/status`),
 
   // Tracks
@@ -944,14 +962,34 @@ export const api = {
           seed_track_id: payload.seed_track_id ?? null,
           name: payload.name ?? null,
         })
-      );
+      ).then((set) => {
+        set.id = --webSetSeq; // id único negativo (persistencia de sesión demo)
+        webSets = [set, ...webSets];
+        return set;
+      });
     }
     return request<DJSet>("/sets/generate", { method: "POST", body: JSON.stringify(payload) });
   },
-  listSets: () => request<DJSet[]>("/sets"),
-  deleteSet: (id: number) => request<{ ok: boolean }>(`/sets/${id}`, { method: "DELETE" }),
-  renameSet: (id: number, name: string) =>
-    request<DJSet>(`/sets/${id}`, { method: "PUT", body: JSON.stringify({ name }) }),
+  listSets: () => {
+    if (isWeb()) return Promise.resolve([...webSets]);
+    return request<DJSet[]>("/sets");
+  },
+  deleteSet: (id: number) => {
+    if (isWeb()) {
+      webSets = webSets.filter((s) => s.id !== id);
+      return Promise.resolve({ ok: true } as { ok: boolean });
+    }
+    return request<{ ok: boolean }>(`/sets/${id}`, { method: "DELETE" });
+  },
+  renameSet: (id: number, name: string) => {
+    if (isWeb()) {
+      const s = webSets.find((x) => x.id === id);
+      if (!s) return Promise.reject(new Error("Set no encontrado"));
+      s.name = name;
+      return Promise.resolve(s);
+    }
+    return request<DJSet>(`/sets/${id}`, { method: "PUT", body: JSON.stringify({ name }) });
+  },
   exportUsb: (id: number, destination: string) =>
     request<{ copied: number; total: number; destination: string }>(`/sets/${id}/export/usb`, {
       method: "POST",
@@ -959,9 +997,25 @@ export const api = {
     }),
 
   // Settings
-  getSettings: () => request<Settings>("/settings"),
-  updateSettings: (payload: Settings) =>
-    request<Settings>("/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  getSettings: () => {
+    if (isWeb()) {
+      // Valores por defecto en demo: el motor no existe en el navegador,
+      // pero los componentes piden los ajustes sin romper el flujo.
+      return Promise.resolve<Settings>({
+        max_bpm_variation_pct: 2.5,
+        energy_boost_jump: 2,
+        harmonic_radius: 1,
+        allow_mode_change: true,
+        write_id3_keys: false,
+        is_desktop: false,
+      });
+    }
+    return request<Settings>("/settings");
+  },
+  updateSettings: (payload: Settings) => {
+    if (isWeb()) return Promise.resolve(payload);
+    return request<Settings>("/settings", { method: "PUT", body: JSON.stringify(payload) });
+  },
 };
 
 declare global {
