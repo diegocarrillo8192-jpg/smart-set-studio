@@ -68,6 +68,23 @@ function fileTypeOf(path: string): string {
   return FILE_TYPES[ext] ?? ext.toUpperCase();
 }
 
+/** Convierte la ruta local en el URI estricto de Rekordbox:
+ *  `file://localhost/C:/Users/.../Track.mp3` — barras invertidas → diagonales
+ *  y codificación percent (RFC 3986, UTF-8) de espacios y caracteres
+ *  reservados (`%20`, `%23`, `%26`...). Rutas web (blob:/http) sin tocar. */
+function rekordboxLocation(path: string): string {
+  if (!path) return "";
+  if (/^(blob:|https?:|file:)/i.test(path)) return path;
+  const norm = path.replace(/\\/g, "/");
+  if (!/^[A-Za-z]:\//.test(norm)) return norm;
+  // encodeURIComponent codifica todo menos A-Za-z0-9-_.!~*'() → cada segmento
+  // de la ruta se codifica y se rearma con "/" (y "C:" de la unidad se deja).
+  return "file://localhost/" + norm
+    .split("/")
+    .map((seg, i) => (i === 0 ? seg : encodeURIComponent(seg)))
+    .join("/");
+}
+
 /** Construye el string XML Rekordbox 1.0.0 directamente en el cliente:
  *  cabecera XML + <COLLECTION> + <PLAYLISTS>, sin peticiones al backend. */
 function buildRekordboxXml(set: DJSet): string {
@@ -77,8 +94,13 @@ function buildRekordboxXml(set: DJSet): string {
   lines.push('<DJ_PLAYLISTS Version="1.0.0">');
   lines.push('  <PRODUCT Name="rekordbox" Version="6.0.0" Company="Pioneer DJ"/>');
   lines.push(`  <COLLECTION Entries="${items.length}">`);
-  for (const item of items) {
+  items.forEach((item, index) => {
     const t = item.track;
+    const fileType = fileTypeOf(t.file_path);
+    const location = rekordboxLocation(t.file_path);
+    // TrackID = posición dentro de la COLLECTION (1..N); la playlist cuelga
+    // de él con <TRACK Key="ID"/> — la referencia que Rekordbox necesita.
+    const trackId = index + 1;
     const attrs: Record<string, string> = {
       Name: t.title ?? "",
       Artist: t.artist ?? "",
@@ -104,29 +126,30 @@ function buildRekordboxXml(set: DJSet): string {
       Volume: "0",
       TrackNumber: "0",
       DiscNumber: "0",
-      FileType: fileTypeOf(t.file_path),
+      FileType: fileType,
+      Kind: `${fileType} File`,
+      Rate: "0",
       DateAdded: "2024-01-01",
       ModificationTime: "2024-01-01",
       Mix: "",
-      // Location formateada como requiere Rekordbox: file://localhost/RUTA_ABSOLUTA
-      Location: `file://localhost/${t.file_path || ""}`,
+      Location: location,
+      TrackID: String(trackId),
     };
     const attrStr = Object.entries(attrs)
       .map(([k, v]) => `${k}="${xmlEscape(v)}"`)
       .join(" ");
     lines.push(`    <TRACK ${attrStr}>`);
-    lines.push(`      <LOCATION><PATH>${xmlEscape(t.file_path || t.title || "")}</PATH></LOCATION>`);
+    lines.push(`      <LOCATION><PATH>${xmlEscape(location)}</PATH></LOCATION>`);
     lines.push("      <TEMPO/>");
     lines.push("    </TRACK>");
-  }
+  });
   lines.push("  </COLLECTION>");
   lines.push("  <PLAYLISTS>");
   lines.push('    <NODE Name="Root" Type="0">');
-  lines.push(`      <NODE Name="${xmlEscape(set.name)}" Type="1">`);
-  for (const item of items) {
-        // Key debe ser el ID exacto asignado en la COLLECTION (usamos item.track.id)
-        lines.push(`        <TRACK Num="${item.position}" Key="${xmlEscape(String(item.track.id ?? item.position))}"/>`);
-  }
+  lines.push(`      <NODE Entries="${items.length}" KeyType="0" Name="${xmlEscape(set.name)}" Type="1">`);
+  items.forEach((item, index) => {
+    lines.push(`        <TRACK Num="${item.position}" Key="${String(index + 1)}"/>`);
+  });
   lines.push("      </NODE>");
   lines.push("    </NODE>");
   lines.push("  </PLAYLISTS>");
@@ -264,7 +287,7 @@ export default function SetGenerator({
       // XML generado 100% en el cliente: sin navegación, sin HTML.
       const xmlString = buildRekordboxXml(result);
       const filename = `${safeFileName(result.name)}.xml`;
-      const blob = new Blob([xmlString], { type: "text/xml;charset=utf-8" });
+      const blob = new Blob([xmlString], { type: "application/xml;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -618,7 +641,7 @@ export default function SetGenerator({
                         <p className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</p>
                       </div>
                       <span className="rounded px-1.5 py-0.5 text-[9px] text-slate-400 rounded-md border border-slate-700/50">
-                        {item.track.genre || item.track.folder_name || "-"}
+                        {item.track.genre ?? item.track.folder_name ?? "Desconocido"}
                       </span>
                       <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${item.track.camelot_key?.endsWith("B") ? "bg-violet-500/20 text-violet-300" : "bg-cyan-500/20 text-cyan-300"}`}>
                         {item.track.camelot_key}

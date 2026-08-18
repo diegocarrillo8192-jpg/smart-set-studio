@@ -80,6 +80,10 @@ function useFolderPicker(): {
 
 type MenuTarget = { kind: "folder" | "set"; id: number; x: number; y: number } | null;
 
+type RenameTarget = { kind: "folder" | "set"; id: number } | null;
+
+type DeleteTarget = { kind: "folder" | "set"; id: number; name: string } | null;
+
 export default function Sidebar({
   folders,
   sets,
@@ -98,6 +102,10 @@ export default function Sidebar({
   const [error, setError] = useState("");
   const [menu, setMenu] = useState<MenuTarget>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const [renameTarget, setRenameTarget] = useState<RenameTarget>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   const { pickFolder, hiddenInput } = useFolderPicker();
   const pollRef = useRef<Record<number, number>>({});
   const [libraryOpen, setLibraryOpen] = useState(true);
@@ -176,34 +184,57 @@ export default function Sidebar({
     }, 1500);
   };
 
-  const renameItem = async (kind: "folder" | "set", id: number, currentName: string) => {
-    const name = window.prompt(kind === "folder" ? "Nuevo nombre de la carpeta:" : "Nuevo nombre del set:", currentName);
-    if (!name || !name.trim()) return;
+  /** Abre el renombrado EN LÍNEA: input enfocado con el nombre actual
+   *  seleccionado; Enter guarda (backend o almacén web) y Escape/blur cancela. */
+  const openRename = (kind: "folder" | "set", id: number, currentName: string) => {
+    setRenameTarget({ kind, id });
+    setRenameValue(currentName);
+    window.requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+  };
+
+  const saveRename = async () => {
+    const target = renameTarget;
+    if (!target) return;
+    const name = renameValue.trim();
+    setRenameTarget(null);
+    if (!name) return;
     try {
-      if (kind === "folder") await api.renameFolder(id, name.trim());
-      else await api.renameSet(id, name.trim());
-      onFoldersChanged();
+      if (target.kind === "folder") await api.renameFolder(target.id, name);
+      else await api.renameSet(target.id, name);
+      // Refresco global (App.refresh): carpetas + sets quedan actualizados en
+      // estado y persistencia (backend o localStorage web) al instante.
+      await onFoldersChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const confirmRemove = async (kind: "folder" | "set", id: number, name: string) => {
-    const message =
-      kind === "folder"
-        ? `¿Quitar la carpeta "${name}" y sus tracks de la biblioteca?`
-        : `¿Eliminar el set "${name}"?`;
-    if (!window.confirm(message)) return;
+  const cancelRename = () => setRenameTarget(null);
+
+  /** Abre el diálogo sutil de confirmación (sin window.confirm). */
+  const requestDelete = (kind: "folder" | "set", id: number, name: string) => {
+    setDeleteTarget({ kind, id, name });
+  };
+
+  const confirmDelete = async () => {
+    const target = deleteTarget;
+    if (!target) return;
+    setDeleteTarget(null);
     try {
-      if (kind === "folder") await onRemoveFolder(id);
+      if (target.kind === "folder") await onRemoveFolder(target.id);
       else {
-        const set = sets.find((s) => s.id === id);
+        const set = sets.find((s) => s.id === target.id);
         if (set) await onDeleteSet(set);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
+
+  const cancelDelete = () => setDeleteTarget(null);
 
   const isScanning = (id: number) => scanningIds.has(id);
   const jobFor = (id: number) => progress[id];
@@ -290,7 +321,23 @@ export default function Sidebar({
                   <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
                     <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
                     <div className="min-w-0 flex-1">
-                      <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
+                      {renameTarget?.kind === "folder" && renameTarget.id === folder.id ? (
+                        <input
+                          ref={renameInputRef}
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter") void saveRename();
+                            else if (e.key === "Escape") cancelRename();
+                          }}
+                          onBlur={() => setRenameTarget(null)}
+                          className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
+                          placeholder="Nombre de la carpeta"
+                        />
+                      ) : (
+                        <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
+                      )}
                       <p className="text-[10px] text-slate-500">
                         {scanning && job
                           ? `${job.processed_files}/${job.total_files} analizando...`
@@ -365,7 +412,23 @@ export default function Sidebar({
               }`}
             >
               <div className="flex items-center gap-1">
-                <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-200">{set.name}</p>
+                {renameTarget?.kind === "set" && renameTarget.id === set.id ? (
+                  <input
+                    ref={renameInputRef}
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") void saveRename();
+                      else if (e.key === "Escape") cancelRename();
+                    }}
+                    onBlur={() => setRenameTarget(null)}
+                    className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
+                    placeholder="Nombre del set"
+                  />
+                ) : (
+                  <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-200">{set.name}</p>
+                )}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -411,31 +474,79 @@ export default function Sidebar({
             {menu.kind === "folder" ? "Carpeta" : "Set"}
           </div>
           <button
-            onClick={() => {
+            onClick={(e) => {
+              e.stopPropagation();
               const target =
                 menu.kind === "folder"
                   ? folders.find((f) => f.id === menu.id)
                   : sets.find((s) => s.id === menu.id);
-              setMenu(null);
-              if (target) void renameItem(menu.kind, target.id, target.name);
+              const kind = menu.kind;
+              const id = menu.id;
+              setMenu(null); // cierra el menú al elegir acción
+              if (target) openRename(kind, id, target.name);
             }}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 transition hover:bg-violet-500/15 hover:text-violet-200"
           >
             <Pencil size={12} /> Renombrar
           </button>
           <button
-            onClick={() => {
+            onClick={(e) => {
+              e.stopPropagation();
               const target =
                 menu.kind === "folder"
                   ? folders.find((f) => f.id === menu.id)
                   : sets.find((s) => s.id === menu.id);
-              setMenu(null);
-              if (target) void confirmRemove(menu.kind, target.id, target.name);
+              const kind = menu.kind;
+              const id = menu.id;
+              setMenu(null); // cierra el menú al elegir acción
+              if (target) requestDelete(kind, id, target.name);
             }}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 transition hover:bg-red-500/15"
           >
             <Trash2 size={12} /> Eliminar
           </button>
+        </div>
+      )}
+
+      {/* Diálogo sutil de confirmación de eliminación */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onMouseDown={cancelDelete}
+        >
+          <div
+            className="w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-bold text-slate-100">
+              {deleteTarget.kind === "folder" ? "Quitar carpeta" : "Eliminar set"}
+            </h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+              {deleteTarget.kind === "folder"
+                ? `¿Quitar la carpeta "${deleteTarget.name}" y sus tracks de la biblioteca?`
+                : `¿Eliminar el set "${deleteTarget.name}"? Esta acción no se puede deshacer.`}
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  cancelDelete();
+                }}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void confirmDelete();
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
+              >
+                <Trash2 size={12} /> Eliminar
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </aside>

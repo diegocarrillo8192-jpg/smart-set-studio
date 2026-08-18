@@ -37,6 +37,7 @@ class TrackOut(BaseModel):
     musical_key: str | None = None
     camelot_key: str | None = None
     embedded_key: str | None = None  # tonalidad original leída de las etiquetas
+    genre: str | None = None  # género real (ID3/FLAC/M4A/APE) o carpeta contenedora
     energy: int | None = None
     loudness_db: float | None = None
     spectral_centroid: float | None = None

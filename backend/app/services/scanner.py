@@ -44,14 +44,17 @@ def discover_audio_files(root: str) -> list[Path]:
     return files
 
 
-def _cache_artwork_once(path: str) -> None:
+def _cache_artwork_once(path: str, force: bool = False) -> None:
     """Precache en el primer escaneo: la carátula embebida se extrae UNA vez
     y se persiste (disco sha1 + SQLite). Así, al abrir una carpeta ya
     escaneada, el endpoint sirve el 100% de las portadas desde la caché en
     <1 ms cada una. SOLO guarda positivos: el negativo (sin arte) lo decide
-    el endpoint, porque la carpeta puede tener una portada adjunta."""
+    el endpoint, porque la carpeta puede tener una portada adjunta.
+
+    `force=True` (re-escaneo manual): re-extrae la carátula embebida aunque
+    ya exista fila en caché, y regenera la miniatura si el arte cambió."""
     try:
-        if get_cached(path) is not None:
+        if not force and get_cached(path) is not None:
             return
         embedded = extract_embedded(path)
         if embedded is not None:
@@ -61,8 +64,16 @@ def _cache_artwork_once(path: str) -> None:
         logger.warning("Arte de %s no precacheable: %s", path, exc)
 
 
-def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track | None:
-    """Inserta o actualiza un track (solo si el archivo cambió o no fue analizado)."""
+def _upsert_track(
+    db: Session, folder: Folder, path: str, mtime: float, force_meta: bool = False
+) -> Track | None:
+    """Inserta o actualiza un track (solo si el archivo cambió o fue no analizado).
+
+    `force_meta=True` (re-escaneo manual): re-lee SIEMPRE las etiquetas
+    (mutagen) para repoblar género/artista/tonalidad de la pista sin depender
+    del mtime — los 1049 tracks indexados antes de la columna `genre` quedan
+    NULL y este re-escaneo los rellena. No re-analiza BPM (los datos de
+    análisis del archivo intacto se conservan)."""
     track = db.query(Track).filter_by(file_path=path).one_or_none()
     if track is None:
         meta = read_metadata(path)
@@ -84,8 +95,8 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
         _cache_artwork_once(path)
         return track
 
-    # Actualizar metadatos si el archivo cambió
-    if track.file_modified_at != mtime:
+    # Actualizar metadatos si el archivo cambió o el usuario pidió re-escaneo
+    if track.file_modified_at != mtime or force_meta:
         meta = read_metadata(path)
         track.title = meta.title
         track.artist = meta.artist
@@ -93,16 +104,17 @@ def _upsert_track(db: Session, folder: Folder, path: str, mtime: float) -> Track
         track.duration_sec = meta.duration_sec
         track.embedded_bpm = meta.embedded_bpm
         track.embedded_key = meta.embedded_key
-        # Actualizar género solo si viene con contenido (sino mantener el existente o el de la carpeta)
+        track.file_modified_at = mtime
+        # Género real de las etiquetas; si el archivo no define uno, se usa el
+        # nombre de la carpeta contenedora (nunca "Desconocido").
         if meta.genre:
             track.genre = meta.genre
-        else:
+        elif not track.genre:
             track.genre = folder.name  # fallback a nombre de carpeta
-        track.file_modified_at = mtime
-        track.analyzed = False
+        track.analyzed = False if not force_meta else track.analyzed
         track.has_error = False
         track.error_message = None
-        _cache_artwork_once(path)
+        _cache_artwork_once(path, force=force_meta)
 
     return track
 
@@ -118,9 +130,9 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
         db.commit()
 
         if force:
-            db.query(Track).filter(Track.folder_id == folder.id).update(
-                {"analyzed": False, "has_error": False, "error_message": None}
-            )
+            # Re-escaneo manual: NO se re-analiza BPM de archivos intactos (los
+            # resultados existentes se conservan); el worker re-lee las etiquetas
+            # (mutagen) y re-extrae las carátulas vía force_meta en _upsert_track.
             db.commit()
 
         for idx, file_path in enumerate(files):
@@ -128,7 +140,7 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
                 break
             try:
                 mtime = os.path.getmtime(file_path)
-                track = _upsert_track(db, folder, str(file_path), mtime)
+                track = _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
                 if track is not None and not track.analyzed:
                     result = analyze_file(str(file_path), embedded_bpm=track.embedded_bpm)
                     if result.error:

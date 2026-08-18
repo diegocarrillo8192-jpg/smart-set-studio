@@ -696,13 +696,109 @@ export function prefetchArtworks(tracks: Track[], count = 24): void {
  * navegador, así que SIEMPRE se pide al servidor local (/api/audio/artwork),
  * que extrae el ID3 en el backend y entrega la imagen como Blob image/jpeg.
  */
+// Negativos confirmados por el servidor que YA fueron reintentados con force
+// en esta sesión (evita re-extraer la misma pista sin carátula en cada mount).
+const artworkForceRetried = new Set<string>();
+
+// --- Persistencia de carátulas entre sesiones (IndexedDB, versión web) -------
+// El backend sirve miniaturas de 1-6 KB (`&thumb=1`); se guardan aquí como
+// Data URLs reutilizables: al recargar la app las listas/decks/recomendados
+// salen instantáneos SIN ninguna petición de red. Solo Data URLs pequeñas
+// (los originales de cientos de KB no entran en la cuota). En Electron el
+// navegador ya hace 304s con el ETag del backend, así que aquí persiste igual.
+const IDB_NAME = "smart-set-studio";
+const IDB_STORE = "artwork-thumbs";
+let idbInit: Promise<IDBDatabase | null> | null = null;
+
+async function doIdbOpen(): Promise<IDBDatabase | null> {
+  try {
+    return await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return null; // IndexedDB no disponible (modo privado): la sesión sigue OK
+  }
+}
+
+function idb(): Promise<IDBDatabase | null> {
+  return (idbInit ??= doIdbOpen());
+}
+
+/** Hidrata la caché en memoria con las miniaturas guardadas en sesiones
+ *  previas. Idempotente y tolerante a fallos (nunca bloquea la app). */
+export function initArtworkPersistence(): Promise<void> {
+  return idb().then(async (db) => {
+    if (!db) return;
+    try {
+      const all = await new Promise<Map<string, string>>((resolve, reject) => {
+        const out = new Map<string, string>();
+        const tx = db.transaction(IDB_STORE, "readonly");
+        const cur = tx.objectStore(IDB_STORE).openCursor();
+        cur.onsuccess = () => {
+          const c = cur.result;
+          if (c) {
+            out.set(String(c.key), String(c.value));
+            c.continue();
+          } else {
+            resolve(out);
+          }
+        };
+        cur.onerror = () => reject(cur.error);
+      });
+      let changed = false;
+      for (const [k, v] of all) {
+        if (v && !artworkCache.has(k)) {
+          artworkCache.set(k, v);
+          changed = true;
+        }
+      }
+      if (changed) notifyArtworkChanged();
+    } catch {
+      // sin persistencia: la sesión sigue funcionando con caché de memoria
+    }
+  });
+}
+
+/** Escribe-through: guarda la miniatura para la próxima sesión (Data URLs
+ *  grandes se descartan para no agotar la cuota del navegador). */
+async function idbPersistArtwork(key: string, value: string): Promise<void> {
+  if (value.length > 30000) return;
+  const db = await idb();
+  if (!db) return;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // cuota llena u otro error: no crítico, la sesión sigue cacheando en RAM
+  }
+}
+
 export async function getTrackArtwork(track: Track): Promise<string | null | undefined> {
+  // Minituras de sesiones anteriores: la primera llamada las trae de IndexedDB
+  // y la UI se actualiza en tiempo real vía notifyArtworkChanged().
+  void initArtworkPersistence();
   const key = track.file_path;
   const matched = artworkKeyFor(key);
   const matchedHit = matched !== null ? artworkCache.get(matched) : undefined;
+  // force = re-extracción (embebida + cover.jpg/folder.jpg): se usa cuando el
+  // track tiene un negativo confirmado (null) que aún no se ha reintentado en
+  // esta sesión, para recuperar portadas que aparecieron después del escaneo.
+  const force = matchedHit === null && matched === key && !artworkForceRetried.has(key);
   if (matchedHit !== undefined) {
     if (matchedHit !== null) return matchedHit; // portada lista (no la re-pides)
-    if (matched === key) return null; // 404 ya confirmado por el servidor
+    if (!force && matched === key) return null; // 404 confirmado y ya reintentado
     // null local = sin carátula EMBEBIDA, pero el servidor aún puede servir
     // la imagen adyacente (track.jpg / cover.jpg) de la ruta absoluta.
   }
@@ -715,7 +811,7 @@ export async function getTrackArtwork(track: Track): Promise<string | null | und
       let result: string | null | undefined = undefined;
       try {
         const res = await fetch(
-          `${BASE}/audio/artwork?path=${encodeURIComponent(key)}`,
+          `${BASE}/audio/artwork?path=${encodeURIComponent(key)}&thumb=1${force ? "&force=1" : ""}`,
           { signal: controller.signal, cache: webCacheReset ? "reload" : "force-cache" }
         );
         if (res.ok) {
@@ -740,8 +836,14 @@ export async function getTrackArtwork(track: Track): Promise<string | null | und
       if (result === undefined) {
         return undefined;
       }
-      if (result !== null) artworkCache.set(key, result);
-      else if (!artworkCache.has(key)) artworkCache.set(key, null);
+      if (result !== null) {
+        artworkCache.set(key, result);
+        void idbPersistArtwork(key, result);
+        artworkForceRetried.delete(key);
+      } else {
+        if (!artworkCache.has(key)) artworkCache.set(key, null);
+        if (force) artworkForceRetried.add(key);
+      }
       notifyArtworkChanged();
       return result;
     }).finally(() => artworkInFlight.delete(key));
@@ -762,10 +864,29 @@ export const api = {
   },
   addFolder: (path: string) =>
     request<Folder>("/folders", { method: "POST", body: JSON.stringify({ path }) }),
-  removeFolder: (id: number) =>
-    request<{ ok: boolean }>(`/folders/${id}`, { method: "DELETE" }),
-  renameFolder: (id: number, name: string) =>
-    request<Folder>(`/folders/${id}`, { method: "PUT", body: JSON.stringify({ name }) }),
+  removeFolder: (id: number) => {
+    if (isWeb()) {
+      ensureWebStoreLoaded();
+      webFolders = webFolders.filter((f) => f.id !== id);
+      webTracks = webTracks.filter((t) => t.folder_id !== id);
+      saveWebStore();
+      return Promise.resolve({ ok: true } as { ok: boolean });
+    }
+    return request<{ ok: boolean }>(`/folders/${id}`, { method: "DELETE" });
+  },
+  renameFolder: (id: number, name: string) => {
+    if (isWeb()) {
+      ensureWebStoreLoaded();
+      const folder = webFolders.find((f) => f.id === id);
+      if (!folder) return Promise.reject(new Error("Carpeta no encontrada"));
+      folder.name = name;
+      folder.path = name;
+      for (const t of webTracks) if (t.folder_id === id) t.folder_name = name;
+      saveWebStore();
+      return Promise.resolve(folder);
+    }
+    return request<Folder>(`/folders/${id}`, { method: "PUT", body: JSON.stringify({ name }) });
+  },
   scanFolder: (id: number, force = false) =>
     request<ScanJob>(`/folders/${id}/scan${force ? "?force=true" : ""}`, { method: "POST" }),
   scanStatus: (id: number) => request<ScanJob | null>(`/folders/${id}/scan/status`),

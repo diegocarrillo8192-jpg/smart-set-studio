@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Track } from "../types";
 import { cachedTrackArtwork, getTrackArtwork, subscribeArtwork } from "../api";
 
@@ -104,17 +104,62 @@ export default function Artwork({ track, accent, size = 56, remountKey }: Props)
 }
 
 /**
+ * Carga diferida con IntersectionObserver: el elemento NO se monta (ni se
+ * decodifica ni se pide su carátula al backend) hasta que se acerca a la
+ * viewport (rootMargin 250px). Así las tablas con cientos de filas solo
+ * resuelven las miniaturas de las filas visibles al hacer scroll.
+ */
+function useInView(ref: React.RefObject<HTMLElement | null>, rootMargin = "250px"): boolean {
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setInView(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setInView(true);
+            obs.disconnect(); // una vez visto, se queda visto
+          }
+        }
+      },
+      { rootMargin }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return inView;
+}
+
+/**
  * Miniatura cuadrada de carátula para tablas (biblioteca y sets): 24-32px,
  * con carga diferida (lazy + async) y placeholder elegante si no hay imagen.
- * Ligera pensando en cientos de filas: sin glow ni animaciones.
+ * Ligera pensando en cientos de filas: sin glow ni animaciones. Fuera de la
+ * viewport NO se monta el <img> → cero decodificación y cero requests.
  */
 export function CoverThumb({ track, size = 28, className }: { track: Track; size?: number; className?: string }) {
-  const art = useArtworkDataUrl(track);
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const inView = useInView(ref);
   return (
     <span
+      ref={ref}
       className={`relative inline-block shrink-0 overflow-hidden rounded-md border border-slate-700/60 bg-gradient-to-br from-slate-800 to-slate-950 ${className ?? ""}`}
       style={{ width: size, height: size }}
     >
+      {inView ? <ThumbInner track={track} /> : <span className="absolute inset-0" />}
+    </span>
+  );
+}
+
+function ThumbInner({ track }: { track: Track }) {
+  const art = useArtworkDataUrl(track);
+  return (
+    <>
       {art === null ? (
         <img
           src={LOGO_URL}
@@ -134,9 +179,9 @@ export function CoverThumb({ track, size = 28, className }: { track: Track; size
           className="h-full w-full object-cover"
         />
       ) : (
-        <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-slate-800/50" />
+        <span className="absolute inset-0 animate-pulse bg-slate-800/50" />
       )}
-    </span>
+    </>
   );
 }
 

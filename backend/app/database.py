@@ -41,6 +41,22 @@ def init_db() -> None:
 
     # Migraciones incrementales: columnas añadidas a modelos existentes
     _ensure_column("tracks", "embedded_key", "VARCHAR(16)")
+    _ensure_column("tracks", "genre", "VARCHAR(255)")
+    _ensure_column("tracks", "file_modified_at", "DATETIME")
+    _ensure_column("tracks", "analyzed_at", "DATETIME")
+
+    # Backfill de géneros: los tracks indexados antes de existir la columna
+    # `genre` quedaron NULL; se rellenan con el nombre de la carpeta contenedora.
+    # El re-escaneo manual (force) sobreescribe con el género real de las
+    # etiquetas (TCON/Genre/GENRE) cuando el archivo lo define.
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            UPDATE tracks
+               SET genre = (SELECT f.name FROM folders f WHERE f.id = tracks.folder_id)
+             WHERE genre IS NULL OR TRIM(genre) = ''
+            """
+        )
 
     # Caché persistente de carátulas (RAW, sin ORM): path → imagen procesada
     # en disco (file) o negativo confirmado (file NULL → sin carátula).

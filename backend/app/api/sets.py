@@ -94,7 +94,7 @@ def export_xml(set_id: int, db: Session = Depends(get_db)):
     filename = f"{_safe_name(dj_set.name)}.xml"
     return Response(
         content=xml,
-        media_type="text/xml; charset=utf-8",
+        media_type="application/xml; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

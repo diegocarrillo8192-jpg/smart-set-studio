@@ -102,6 +102,7 @@ def _serialize(track: Track, folder_name: str | None = None) -> TrackOut:
         musical_key=track.musical_key,
         camelot_key=track.camelot_key,
         embedded_key=track.embedded_key,
+        genre=track.genre,
         energy=track.energy,
         loudness_db=track.loudness_db,
         spectral_centroid=track.spectral_centroid,
@@ -292,8 +293,8 @@ def stream_audio_alias(path: str, db: Session = Depends(get_db)):
 
 
 @router.get("/audio/artwork")
-def track_artwork(path: str, db: Session = Depends(get_db)):
-    """Carátula (album art) del track: /api/audio/artwork?path=...
+def track_artwork(path: str, force: bool = False, thumb: bool = False, db: Session = Depends(get_db)):
+    """Carátula (album art) del track: /api/audio/artwork?path=...&force=1
 
     Prioridad de fuentes (primera que exista gana):
     1) CACHÉ PERSISTENTE (SQLite `artwork_cache` + imagen sha1 en disco):
@@ -306,6 +307,17 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
     Solo cuando TODOS fallan se confirma el "negativo" (fetch → 404), que
     también se persiste: la pista nunca se vuelve a probar. Misma validación
     de biblioteca indexada que el streaming (Path Traversal).
+
+    `force=1`: omite los negativos (memoria y SQLite) y vuelve a extraer la
+    carátula embebida y las imágenes adyacentes (cover.jpg/folder.jpg) — útil
+    para re-verificar pistas que antes respondieron 404 o para recuperar
+    portadas añadidas a la carpeta después del escaneo.
+
+    `thumb=1`: sirve la MINIATURA optimizada (256px JPEG q82 de 1-6 KB) en vez
+    de la imagen original (decenas/cientos de KB). La usan las listas, los
+    decks y las recomendaciones: carga casi instantánea incluso con 1000+
+    filas. La miniatura se genera una sola vez por carátula (archivo
+    `artwork_cache/<sha1>-thumb.jpg`, ETag estable → 304s del navegador).
     """
     if not path or not path.strip():
         raise HTTPException(400, "Falta el parámetro path")
@@ -317,12 +329,16 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
         raise HTTPException(403, "Ruta no autorizada")
     key = str(p)
 
-    # 0) Caché caliente en memoria (misma sesión)
+    # 0) Caché caliente en memoria (misma sesión); force solo salta negativos.
     cached = _artwork_cache.get(key)
     if cached is not None:
         data, mime = cached
+        if thumb:
+            t = art.ensure_thumbnail(data)
+            if t is not None:
+                return _artwork_file(str(t), "image/jpeg", "thumb")
         return _artwork_bytes(data, mime, "memory")
-    if key in _no_artwork:
+    if not force and key in _no_artwork:
         raise HTTPException(404, "Sin carátula")
 
     # 1) Caché persistente SQLite → imagen sha1 en disco (fuente principal)
@@ -330,9 +346,15 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
     if cached_hit is not None:
         cache_file, mime = cached_hit
         if cache_file is None:
-            _no_artwork.add(key)
-            raise HTTPException(404, "Sin carátula")
-        return _artwork_file(cache_file, mime, "db")
+            if not force:
+                _no_artwork.add(key)
+                raise HTTPException(404, "Sin carátula")
+        else:
+            if thumb:
+                t = art.thumbnail_for_file(cache_file)
+                if t is not None:
+                    return _artwork_file(str(t), "image/jpeg", "thumb")
+            return _artwork_file(cache_file, mime, "db")
 
     # 2) Carátula embebida (primera extracción → se persiste para siempre)
     embedded = art.extract_embedded(key)
@@ -342,6 +364,10 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
         if len(_artwork_cache) > 512:
             _artwork_cache.clear()
         _artwork_cache[key] = (data, mime)
+        if thumb:
+            t = art.ensure_thumbnail(data)
+            if t is not None:
+                return _artwork_file(str(t), "image/jpeg", "thumb")
         return _artwork_bytes(data, mime, "embedded")
 
     # 3) Carátulas adjuntas en disco (gemelas + nombres estándar de la carpeta)
@@ -351,6 +377,10 @@ def track_artwork(path: str, db: Session = Depends(get_db)):
         candidates += [folder / f"{name}.{ext}" for ext in ("jpg", "jpeg", "png")]
     for c in candidates:
         if c.exists():
+            if thumb:
+                t = art.thumbnail_for_file(str(c))
+                if t is not None:
+                    return _artwork_file(str(t), "image/jpeg", "thumb")
             return FileResponse(
                 str(c),
                 headers={

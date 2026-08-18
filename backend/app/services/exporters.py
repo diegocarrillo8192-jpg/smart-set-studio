@@ -22,7 +22,27 @@ def _date_str(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
 
 
-def _track_xml(track, include_location: bool) -> ET.Element:
+def _rekordbox_location(path: str) -> str:
+    """Convierte la ruta local del archivo en el URI estricto que Rekordbox
+    necesita para reproducir el track al importar el XML:
+    `file://localhost/C:/Users/.../Track.mp3` — barras invertidas → diagonales
+    y codificación percent (RFC 3986) de espacios y caracteres reservados.
+    Las rutas web (blob:/http) y las ya-URI se devuelven sin tocar."""
+    from urllib.parse import quote
+
+    if not path:
+        return ""
+    if path.startswith(("blob:", "http://", "https://", "file://")):
+        return path
+    norm = path.replace("\\", "/")
+    # Solo convertimos rutas absolutas con unidad (C:/...); las relativas/UNC
+    # se dejan tal cual: Rekordbox las reconstruye contra su biblioteca.
+    if not (len(norm) >= 2 and norm[1] == ":"):
+        return norm
+    return "file://localhost/" + quote(norm, safe="/:")
+
+
+def _track_xml(track, include_location: bool, track_id: int) -> ET.Element:
     size = 0
     mtime = None
     file_exists = False
@@ -34,11 +54,13 @@ def _track_xml(track, include_location: bool) -> ET.Element:
         pass
 
     ext = Path(track.file_path).suffix.lower()
+    file_type = _FILE_TYPE.get(ext, ext.lstrip(".").upper())
+    location = _rekordbox_location(track.file_path)
     attrs = {
         "Name": track.title,
         "Artist": track.artist,
         "Album": track.album,
-        "Genre": "",
+        "Genre": track.genre or "",
         "Year": "",
         "Comment": "",
         "Label": "",
@@ -59,19 +81,24 @@ def _track_xml(track, include_location: bool) -> ET.Element:
         "Volume": "0",
         "TrackNumber": "0",
         "DiscNumber": "0",
-        "FileType": _FILE_TYPE.get(ext, ext.lstrip(".").upper()),
+        "FileType": file_type,
+        "Kind": f"{file_type} File",
+        "Rate": "0",
         "DateAdded": _date_str(mtime),
         "ModificationTime": _date_str(mtime),
         "Mix": "",
+        # Ubicación como URI estricto: indispensable para que Rekordbox
+        # reproduzca/arrastre el track sin re-localizarlo manualmente.
+        "Location": location,
+        # ID del track dentro de esta COLLECTION; la playlist lo referencia
+        # con <TRACK Key="ID"/>.
+        "TrackID": str(track_id),
     }
     el = ET.Element("TRACK", attrs)
     if include_location:
         loc = ET.SubElement(el, "LOCATION")
-        # Si la ruta absoluta no existe (ej. unidad no montada), usar el nombre
-        # del archivo como ruta relativa para que Rekordbox/Serato puedan
-        # reconstruir la ubicación al importar.
-        path = track.file_path if file_exists else Path(track.file_path).name
-        ET.SubElement(loc, "PATH").text = path
+        # El mismo URI en el nodo PATH (Rekordbox + Serato lo aceptan igual).
+        ET.SubElement(loc, "PATH").text = location
     # Curva de tempo (vacía; Rekordbox/Serato la reconstruyen al importar)
     ET.SubElement(el, "TEMPO")
     return el
@@ -94,14 +121,24 @@ def build_rekordbox_xml(dj_set: Set) -> ET.ElementTree:
     )
 
     collection = ET.SubElement(root, "COLLECTION", {"Entries": str(len(tracks))})
-    for track in tracks:
-        collection.append(_track_xml(track, include_location=True))
+    for idx, track in enumerate(tracks, start=1):
+        collection.append(_track_xml(track, include_location=True, track_id=idx))
 
     playlists = ET.SubElement(root, "PLAYLISTS")
     node_root = ET.SubElement(playlists, "NODE", {"Name": "Root", "Type": "0"})
-    node_set = ET.SubElement(node_root, "NODE", {"Name": _safe_name(dj_set.name), "Type": "1"})
-    for item in items:
-        ET.SubElement(node_set, "TRACK", {"Num": str(item.position), "Key": item.track.camelot_key or ""})
+    node_set = ET.SubElement(
+        node_root, "NODE",
+        {
+            "Name": _safe_name(dj_set.name),
+            "Type": "1",
+            "Entries": str(len(items)),
+            "KeyType": "0",
+        },
+    )
+    for idx, item in enumerate(items, start=1):
+        # Key = TrackID del TRACK en la COLLECTION (referencia cruzada que
+        # Rekordbox usa para mapear la playlist con los archivos).
+        ET.SubElement(node_set, "TRACK", {"Num": str(item.position), "Key": str(idx)})
 
     return ET.ElementTree(root)
 

@@ -135,9 +135,57 @@ def store_embedded(path: str, data: bytes, mime: str) -> str:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Escritura de carátula en disco fallida para %s: %s", path, exc)
     set_artwork_cache(path, str(target), mime)
+    ensure_thumbnail(data)  # la miniatura queda lista desde el primer escaneo
     return str(target)
 
 
 def store_negative(path: str) -> None:
     """Confirma en BD que `path` no tiene carátula (evita re-probar siempre)."""
     set_artwork_cache(path, None, None)
+
+
+# --- Miniaturas optimizadas (256 px) ------------------------------------------
+# Generadas una sola vez por imagen (nombre derivado del sha1 de la ORIGINAL:
+# hay una única miniatura por carátula y su ETag es estable → 304s de
+# Chromium/browser tras la primera visita). Las listas, decks y recomendados
+# piden `&thumb=1`: 1-6 KB en vez de las decenas/hundreds KB del original.
+
+def ensure_thumbnail(data: bytes) -> Path | None:
+    """Crea (si no existe) la miniatura JPEG 256px q82 de una portada.
+
+    Devuelve la ruta del archivo persistido, o None si Pillow no está o la
+    imagen no decodifica — en ese caso el endpoint sirve la original.
+    Jamás lanza: el precache/scan no debe tumbar por una miniatura.
+    """
+    import io as _io
+
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        img = Image.open(_io.BytesIO(data))
+        img.load()
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        img.thumbnail((256, 256), Image.LANCZOS)
+        target = ARTWORK_CACHE_DIR / f"{hashlib.sha1(data).hexdigest()}-thumb.jpg"
+        if not target.exists():
+            tmp = target.with_suffix(".jpg.tmp")
+            img.save(tmp, "JPEG", quality=82, optimize=True)
+            tmp.replace(target)
+        return target
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Miniatura no generable (%d bytes): %s", len(data), exc)
+        return None
+
+
+def thumbnail_for_file(cache_file: str) -> Path | None:
+    """Miniatura persistida (o generada en caliente) para una imagen ya
+    cacheada en disco — portadas extraídas antes de este cambio o imágenes
+    adyacentes (cover.jpg/folder.jpg) servidas directamente del disco."""
+    try:
+        return ensure_thumbnail(Path(cache_file).read_bytes())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Miniatura desde archivo fallida %s: %s", cache_file, exc)
+        return None
