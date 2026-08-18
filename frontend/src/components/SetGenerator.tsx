@@ -200,6 +200,7 @@ export default function SetGenerator({
   const [notice, setNotice] = useState("");
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
   const sourcesRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
 
@@ -541,11 +542,7 @@ export default function SetGenerator({
                 Cargar en Dual Deck
               </button>
               <button
-                onClick={() => {
-                  if (window.confirm("¿Limpiar y empezar un nuevo set? La lista actual se vaciará.")) {
-                    onResult(null);
-                  }
-                }}
+                onClick={() => setConfirmClear(true)}
                 title="Limpiar / Nuevo Set"
                 className="flex items-center gap-1.5 rounded-lg border border-slate-600 px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:border-rose-400 hover:text-rose-300"
               >
@@ -658,6 +655,48 @@ export default function SetGenerator({
           </div>
         )}
       </div>
+
+      {/* Diálogo sutil de confirmación: limpiar set (sin window.confirm) */}
+      {confirmClear && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            setConfirmClear(false);
+          }}
+        >
+          <div
+            className="w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-bold text-slate-100">Limpiar set</h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+              ¿Limpiar y empezar un nuevo set? La lista actual se vaciará.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmClear(false);
+                }}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmClear(false);
+                  onResult(null);
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
+              >
+                <Eraser size={12} /> Limpiar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

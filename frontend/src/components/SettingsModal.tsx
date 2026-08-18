@@ -13,17 +13,12 @@ export default function SettingsModal({ open, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
   /** En la app de escritorio (Electron) el preload expone smartSet.isDesktop. */
   const isDesktop = typeof window !== "undefined" && !!window.smartSet?.isDesktop;
 
   const resetWeb = async () => {
-    if (
-      !window.confirm(
-        "Se borrarán las cachés locales del NAVEGADOR (carátulas, metadatos y almacenamiento web). La biblioteca de la base de datos y la app de escritorio NO se ven afectadas. ¿Continuar?"
-      )
-    ) {
-      return;
-    }
+    setConfirmReset(false);
     setResetting(true);
     try {
       await resetWebCache();
@@ -164,7 +159,7 @@ export default function SettingsModal({ open, onClose }: Props) {
                 </p>
               </div>
               <button
-                onClick={resetWeb}
+                onClick={() => setConfirmReset(true)}
                 disabled={resetting}
                 className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-panel-3 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-red-500/50 hover:text-red-300 disabled:opacity-40"
               >
@@ -187,6 +182,49 @@ export default function SettingsModal({ open, onClose }: Props) {
           {saved && <span className="text-xs text-emerald-400">Guardado ✓</span>}
         </div>
       </div>
+
+      {/* Diálogo sutil de confirmación: reset de caché (sin window.confirm) */}
+      {confirmReset && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            setConfirmReset(false);
+          }}
+        >
+          <div
+            className="w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-bold text-slate-100">Resetear caché web</h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+              Se borrarán las cachés locales del NAVEGADOR (carátulas, metadatos y almacenamiento
+              web). La biblioteca de la base de datos y la app de escritorio NO se ven afectadas.
+              ¿Continuar?
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmReset(false);
+                }}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void resetWeb();
+                }}
+                className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
+              >
+                <Eraser size={12} /> Borrar caché
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
