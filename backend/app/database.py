@@ -6,7 +6,11 @@ from .config import DB_PATH
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}",
-    connect_args={"check_same_thread": False},
+    # timeout=30: evita "database is locked" cuando OTRO proceso (p. ej. el
+    # backend dev o una segunda instancia de la app instalada) mantiene una
+    # escritura breve: SQLite espera hasta 30s antes de fallar en vez de
+    # abortar a los 5s por defecto. Crítico en el arranque empaquetado.
+    connect_args={"check_same_thread": False, "timeout": 30},
     echo=False,
 )
 

@@ -58,6 +58,12 @@ if (!gotSingleInstanceLock) {
       backendProc = null;
     }
   });
+
+  // Doble seguro de cierre limpio: asegura que el binario Python (ssa-backend)
+  // no quede huérfano si el usuario sale con la app (will-quit es lo último).
+  process.on("exit", () => {
+    if (backendProc) backendProc.kill();
+  });
 }
 
 function waitForUrl(url, timeoutMs = 30000) {
@@ -88,6 +94,12 @@ function waitForUrl(url, timeoutMs = 30000) {
 
 const waitForBackend = () => waitForUrl(`${BACKEND_URL}/api/health`);
 
+// Estado del backend para saber si una salida del proceso es una caída real
+// (reiniciar) o un apagado normal de la app (no reiniciar).
+let backendReady = false;
+let backendRestarts = 0;
+const MAX_BACKEND_RESTARTS = 2;
+
 async function startBackend() {
   if (await waitForBackend(1500)) {
     console.log("[smart-set] Backend ya estaba corriendo");
@@ -113,7 +125,8 @@ async function startBackend() {
           cmd: exe,
           args: [],
           cwd: dir,
-          timeout: 30000,
+          // Arranque en frío de PyInstaller (numpy/librosa): hasta 45s.
+          timeout: 45000,
         });
       }
     }
@@ -180,11 +193,27 @@ async function startBackend() {
       const msg = `[smart-set] Backend terminó (${attempt.kind}, exit=${code})\n`;
       console.log(msg);
       logBackendOutput(msg);
+      // Caída real del backend mientras la app sigue abierta → reintento una
+      // vez (máx. 2 veces totales): el healthcheck lo confirma antes de usar.
+      // Si la app está saliendo (before-quit ya mató el proceso), no se
+      // reinicia nada.
+      if (backendReady && backendRestarts < MAX_BACKEND_RESTARTS) {
+        backendReady = false;
+        backendRestarts += 1;
+        const proc = backendProc;
+        backendProc = null;
+        setTimeout(() => {
+          if (proc && proc.killed) return;
+          console.log(`[smart-set] Reintentando backend (restart ${backendRestarts}/${MAX_BACKEND_RESTARTS})`);
+          void startBackend();
+        }, 800);
+      }
     });
 
     const ok = await waitForBackend(attempt.timeout);
     if (ok) {
       started = true;
+      backendReady = true; // el backend está vivo: si cae, se reintenta
       console.log(`[smart-set] Backend listo (${attempt.kind})`);
       break;
     }
