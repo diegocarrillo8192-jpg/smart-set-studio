@@ -12,7 +12,7 @@ import {
   estimateEnergy,
   generateDemoSet,
   musicalKeyToCamelot,
-  parseAudioTags,
+  parseAudioFile,
 } from "./lib/demoEngine";
 
 const BASE = "http://127.0.0.1:8765/api";
@@ -509,8 +509,7 @@ export async function webRegisterFolder(
   }
 
   const seen = new Set(webTracks.map((t) => t.file_path.toLowerCase()));
-  // Parseo de etiquetas en lote (slices de 128 KB por archivo, rápido).
-  const tagResults = await Promise.all(audio.map((f) => parseAudioTags(f)));
+  const audioResults = await Promise.all(audio.map((f) => parseAudioFile(f)));
   const added: Track[] = [];
   audio.forEach((f, idx) => {
     const name = f.name ?? "";
@@ -518,10 +517,12 @@ export async function webRegisterFolder(
     const rel = safeRelPath(f);
     if (seen.has(rel.toLowerCase())) return;
     seen.add(rel.toLowerCase());
-    const tags = tagResults[idx] ?? null;
+    const res = audioResults[idx] ?? null;
+    const tags = res?.tags ?? null;
     const base = name.replace(/\.[^.]+$/, "");
     const title = tags?.title ?? base;
     const artist = tags?.artist ?? root;
+    if (res?.coverUrl) artworkCache.set(rel.replace(/\\/g, "/").toLowerCase(), res.coverUrl);
     added.push({
       id: --webTrackSeq,
       file_path: rel,
@@ -530,7 +531,7 @@ export async function webRegisterFolder(
       title,
       artist,
       album: tags?.album ?? root,
-      duration_sec: null,
+      duration_sec: res?.duration_sec ?? null,
       bpm: tags?.bpm ?? null,
       embedded_bpm: tags?.bpm ?? null,
       musical_key: tags?.musicalKey ?? null,

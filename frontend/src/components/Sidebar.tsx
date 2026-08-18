@@ -313,19 +313,17 @@ export default function Sidebar({
       {audioInput}
       <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
         <Disc3 size={18} className="text-violet-400" />
-        <div>
+        <div className="min-w-0">
           <h1 className="text-sm font-black tracking-tight text-white">Smart Set Studio</h1>
-          <p className="flex items-center gap-1.5 text-[10px] text-slate-500">
-            AI Set Architect &amp; DJ Library
-            {isWeb() && (
-              <span
-                className="rounded-full border border-cyan-700/60 bg-cyan-500/10 px-1.5 py-px text-[8px] font-bold uppercase tracking-widest text-cyan-300"
-                title="Demo web: sesión volátil en memoria del navegador, sin base de datos ni motor local"
-              >
-                Demo web · volátil
-              </span>
-            )}
-          </p>
+          <p className="text-[10px] leading-tight text-slate-500">AI Set Architect &amp; DJ Library</p>
+          {isWeb() && (
+            <span
+              className="mt-1.5 block w-full rounded-md border border-cyan-700/60 bg-cyan-500/10 px-2 py-1 text-center text-[9px] font-bold uppercase tracking-widest text-cyan-300"
+              title="Demo web: sesión volátil en memoria del navegador, sin base de datos ni motor local"
+            >
+              Demo web · volátil
+            </span>
+          )}
         </div>
       </div>
 
