@@ -248,13 +248,13 @@ export default function LibraryTable({
             <tr>
               <th className="w-24 px-2 py-2"></th>
               <th className="px-2 py-2">Título</th>
-              <th className="px-2 py-2">Artista</th>
-              <th className="px-2 py-2">Género</th>
+              <th className="hidden px-2 py-2 md:table-cell">Artista</th>
+              <th className="hidden px-2 py-2 sm:table-cell">Género</th>
               <th className="px-2 py-2 text-right">BPM</th>
               <th className="px-2 py-2 text-center">Key</th>
               <th className="px-2 py-2">Energía</th>
-              <th className="px-2 py-2">Carpeta</th>
-              <th className="px-2 py-2 text-right">Duración</th>
+              <th className="hidden px-2 py-2 lg:table-cell">Carpeta</th>
+              <th className="hidden px-2 py-2 text-right sm:table-cell">Duración</th>
             </tr>
           </thead>
           <tbody>
@@ -277,7 +277,7 @@ export default function LibraryTable({
                 title="Doble clic: cargar en el deck activo · arrastra a un Deck"
               >
                 <td className="whitespace-nowrap px-2 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
-                  <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                  <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100 max-sm:opacity-100">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -322,8 +322,8 @@ export default function LibraryTable({
                     )}
                   </div>
                 </td>
-<td className="max-w-40 truncate px-2 py-1.5 text-slate-400">{t.artist}</td>
-              <td className="px-2 py-1.5 text-slate-500">{t.genre ?? t.folder_name ?? "Desconocido"}</td>
+<td className="hidden max-w-40 truncate px-2 py-1.5 text-slate-400 md:table-cell">{t.artist}</td>
+              <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? t.folder_name ?? "Desconocido"}</td>
               <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
                 <td className="px-2 py-1.5 text-center">
                   <span
@@ -337,8 +337,8 @@ export default function LibraryTable({
                   </span>
                 </td>
                 <td className="px-2 py-1.5"><EnergyDots value={t.energy} /></td>
-                <td className="max-w-28 truncate px-2 py-1.5 text-slate-500">{t.folder_name}</td>
-                <td className="px-2 py-1.5 text-right font-mono text-slate-400">{fmtDur(t.duration_sec)}</td>
+                <td className="hidden max-w-28 truncate px-2 py-1.5 text-slate-500 lg:table-cell">{t.folder_name}</td>
+                <td className="hidden px-2 py-1.5 text-right font-mono text-slate-400 sm:table-cell">{fmtDur(t.duration_sec)}</td>
               </tr>
             ))}
           </tbody>

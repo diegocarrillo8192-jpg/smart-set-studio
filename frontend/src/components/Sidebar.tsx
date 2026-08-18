@@ -13,7 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
-import { api, webRegisterFolder } from "../api";
+import { api, isWeb, webRegisterFolder } from "../api";
 
 interface Props {
   folders: Folder[];
@@ -248,13 +248,23 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-panel">
+    <aside className="flex w-full shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-panel md:w-64 md:overflow-y-auto">
       {hiddenInput}
       <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
         <Disc3 size={18} className="text-violet-400" />
         <div>
           <h1 className="text-sm font-black tracking-tight text-white">Smart Set Studio</h1>
-          <p className="text-[10px] text-slate-500">AI Set Architect &amp; DJ Library</p>
+          <p className="flex items-center gap-1.5 text-[10px] text-slate-500">
+            AI Set Architect &amp; DJ Library
+            {isWeb() && (
+              <span
+                className="rounded-full border border-cyan-700/60 bg-cyan-500/10 px-1.5 py-px text-[8px] font-bold uppercase tracking-widest text-cyan-300"
+                title="Demo web: sesión volátil en memoria del navegador, sin base de datos ni motor local"
+              >
+                Demo web · volátil
+              </span>
+            )}
+          </p>
         </div>
       </div>
 

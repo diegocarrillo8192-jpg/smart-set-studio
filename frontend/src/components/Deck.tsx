@@ -227,8 +227,9 @@ export default function Deck({
         )}
       </div>
 
-      {/* Controles directos */}
-      <div className="flex items-center gap-2">
+      {/* Controles directos: en pantallas estrechas los botones se reordenan en
+          varias filas para que entren en el ancho del teléfono */}
+      <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={toggle}
           disabled={!el || !track}

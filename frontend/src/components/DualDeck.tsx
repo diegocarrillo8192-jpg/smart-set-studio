@@ -145,8 +145,9 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
         </h2>
       </div>
 
-      {/* DECK A | CROSSFADER | DECK B */}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_200px_minmax(0,1fr)] gap-2">
+      {/* DECK A | CROSSFADER | DECK B — en móvil se apilan en columna
+          (A arriba, crossfader en medio, B abajo) para uso con el pulgar */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_200px_minmax(0,1fr)]">
         <div {...dropZone("A")} className={`relative min-h-0 rounded-xl ${dragOver === "A" ? "ring-2 ring-cyan-400/80" : ""}`}>
           <Deck
             name="A"

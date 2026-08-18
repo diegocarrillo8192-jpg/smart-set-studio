@@ -9,6 +9,7 @@
     "dev:backend": "cd backend && ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:electron": "npx electron .",
+    "build": "npm run build:frontend",
     "build:frontend": "cd frontend && npm run build",
     "backend:install": "python -m venv .venv && .\\.venv\\Scripts\\pip install -r backend\\requirements.txt",
     "frontend:install": "cd frontend && npm install",

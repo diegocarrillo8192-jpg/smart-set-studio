@@ -3,6 +3,7 @@ import { Library, Loader2, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api } from "./api";
 import SplashScreen from "./components/SplashScreen";
+import OrientationHint from "./components/OrientationHint";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
 import SetGenerator from "./components/SetGenerator";
@@ -196,9 +197,14 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-full flex-col bg-panel text-slate-200">
-      {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda */}
-      <div className="relative z-10 h-1/5 min-h-48 shrink-0 shadow-[0_18px_44px_rgba(0,0,0,0.6)]">
+    <div className="flex h-full flex-col overflow-y-auto bg-panel text-slate-200 md:overflow-hidden">
+      {/* Banner de orientación (solo móvil en vertical): se auto-oculta al
+          girar el teléfono o al descartarlo manualmente. */}
+      <OrientationHint />
+
+      {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda.
+          En móvil se apila en una sola columna: Deck A → Crossfader → Deck B. */}
+      <div className="relative z-10 shrink-0 md:h-1/5 md:min-h-48 md:shadow-[0_18px_44px_rgba(0,0,0,0.6)]">
         <DualDeck
           deckATrack={deckATrack}
           deckBTrack={deckBTrack}
@@ -211,8 +217,9 @@ export default function App() {
         />
       </div>
 
-      {/* BLOQUE INFERIOR: biblioteca & smart sets (80%) */}
-      <div className="flex min-h-0 flex-1 border-t border-slate-800">
+      {/* BLOQUE INFERIOR: biblioteca & smart sets (80%). En móvil el contenido
+          fluye en una sola columna (sidebar arriba, contenido debajo). */}
+      <div className="flex flex-col md:min-h-0 md:flex-1 md:flex-row md:border-t md:border-slate-800">
         <Sidebar
           folders={folders}
           sets={sets}
@@ -275,8 +282,8 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex min-h-0 flex-1 flex-col">
-            {tab === "library" ? (
+<div className="flex min-h-0 flex-1 flex-col px-3 md:px-0">
+        {tab === "library" ? (
               <>
                 <RecommendationsPanel
                   seed={deckATrack}

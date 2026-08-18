@@ -414,13 +414,16 @@ export async function resetWebCache(): Promise<void> {
 // carátulas ignoran el caché HTTP del navegador (cache: "reload").
 let webCacheReset = false;
 
-// --- Almacén de biblioteca en el navegador (modo web offline) ---------------
-// Sin backend local, los archivos elegidos con <input webkitdirectory> se
-// registran como una "carpeta" virtual con tracks sintéticos. listFolders y
-// listTracks devuelven este almacén cuando corre en web, de modo que las
-// canciones aparecen al instante en la tabla "Todos los tracks".
-// PERSISTENCIA: el almacén se serializa en localStorage y se hidrata al
-// arrancar para que carpetas y tracks vuelvan a mostrarse al reabrir la app.
+// --- Almacén de biblioteca en el navegador (modo web: DEMO VOLÁTIL) ---------
+// Sin backend local (deploy Vercel / uso en navegador), los archivos elegidos
+// con <input webkitdirectory> o la File System Access API se registran como
+// "carpetas" virtuales con tracks sintéticos, y listFolders/listTracks
+// devuelven este almacén cuando corre en web: las canciones aparecen al
+// instante para cargarlas y reproducirlas en los decks.
+// VOLATILIDAD: la sesión vive SOLO en memoria. Las páginas web no pueden
+// retener los File del usuario entre visitas (seguridad del navegador), así
+// que persistir metadatos dejaría filas muertas sin audio. Cada visita
+// arranca limpia: demo de sesión temporal, sin base de datos ni motor local.
 let webFolderSeq = 0;
 let webTrackSeq = 0;
 let webFolders: Folder[] = [];
@@ -433,35 +436,17 @@ function ensureWebStoreLoaded(): void {
   if (webStoreLoaded) return;
   webStoreLoaded = true;
   try {
-    const raw = localStorage.getItem(WEB_LIBRARY_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as {
-      folders?: Folder[];
-      tracks?: Track[];
-      folderSeq?: number;
-      trackSeq?: number;
-    };
-    if (Array.isArray(parsed.folders)) webFolders = parsed.folders;
-    if (Array.isArray(parsed.tracks)) webTracks = parsed.tracks;
-    webFolderSeq = typeof parsed.folderSeq === "number" ? parsed.folderSeq : 0;
-    webTrackSeq = typeof parsed.trackSeq === "number" ? parsed.trackSeq : 0;
+    // Limpieza única: eliminar la clave de bibliotecas web PERSISTIDAS de
+    // versiones anteriores (el almacén ya no se hidrata ni se escribe).
+    localStorage.removeItem(WEB_LIBRARY_KEY);
   } catch {
-    // Almacén corrupto (versión anterior): empezar de cero sin crashar.
-    webFolders = [];
-    webTracks = [];
+    /* almacenamiento no disponible */
   }
 }
 
 function saveWebStore(): void {
-  if (!isWeb()) return;
-  try {
-    localStorage.setItem(
-      WEB_LIBRARY_KEY,
-      JSON.stringify({ folders: webFolders, tracks: webTracks, folderSeq: webFolderSeq, trackSeq: webTrackSeq })
-    );
-  } catch {
-    // Cuota superada o almacenamiento no disponible: la sesión sigue en memoria.
-  }
+  // Demo volátil: la biblioteca web queda en memoria y se descarta al cerrar
+  // la pestaña. (Antes se serializaba en localStorage.)
 }
 
 const AUDIO_EXT_RE = /\.(mp3|wav|aiff?|flac|m4a|aac|ogg|opus)$/i;
