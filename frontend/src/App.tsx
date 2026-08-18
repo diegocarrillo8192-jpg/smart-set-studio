@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Library, Wand2 } from "lucide-react";
+import { Library, Loader2, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api } from "./api";
 import SplashScreen from "./components/SplashScreen";
@@ -29,7 +29,14 @@ export default function App() {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [backendDown, setBackendDown] = useState(false);
+  /** Período de gracia al arrancar la app de escritorio (8s): durante este
+   *  tiempo no se muestra la alerta roja de desconexión, solo el indicador
+   *  "Iniciando motor de audio…". En la web NO aplica (modo offline). */
+  const [startingUp, setStartingUp] = useState(() => !!window.smartSet?.isDesktop);
   const bootRef = useRef(false);
+  /** Ref espejo para lecturas estables dentro de `refresh` (useCallback []). */
+  const startingUpRef = useRef(startingUp);
+  const connectedRef = useRef(false);
 
   // Splash screen: logo animado ~1.6s, fade-out 500ms, luego desmonta.
   // No bloquea la carga: la UI arranca detrás y la capa se desvanece sola.
@@ -58,6 +65,10 @@ export default function App() {
       setFolders(f);
       setSets(s);
       setLibraryVersion((v) => v + 1);
+      // Backend respondió: se termina el arranque (oculta el indicador) y se
+      // garantiza que la alerta roja NO se muestre aunque el 8s aún corra.
+      connectedRef.current = true;
+      setStartingUp(false);
       setBackendDown(false);
       return f;
     } catch (err) {
@@ -68,11 +79,28 @@ export default function App() {
         console.error("[App] error refrescando carpetas y sets:", err);
         // El banner de backend caído solo aplica en escritorio: en la web no
         // existe un backend local en 127.0.0.1 y la app opera en modo offline.
-        if (window.smartSet?.isDesktop) setBackendDown(true);
+        // Durante la gracia de arranque (8s) NO se enciende la alerta roja.
+        if (window.smartSet?.isDesktop && !startingUpRef.current) setBackendDown(true);
       }
       throw err;
     }
   }, []);
+
+  // Gracias de arranque: 8s sin alerta roja. Si al agotarse el backend aún no
+  // respondió (primer refresh fallido), se muestra la alerta de reconexión.
+  useEffect(() => {
+    if (!window.smartSet?.isDesktop) return;
+    const t = window.setTimeout(() => {
+      setStartingUp(false);
+      if (!connectedRef.current) setBackendDown(true);
+    }, 8000);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  // Mantiene el ref espejo sincronizado con el estado de arranque.
+  useEffect(() => {
+    startingUpRef.current = startingUp;
+  }, [startingUp]);
 
   // Carga inicial: en escritorio reintenta varias veces al arrancar para que
   // la UI no quede vacía si el backend tarda unos segundos (PyInstaller +
@@ -221,6 +249,18 @@ export default function App() {
               <Wand2 size={14} /> Smart Set Generator
             </button>
           </div>
+
+          {/* Indicador de arranque (SOLO escritorio, durante la gracia de 8s):
+              estado amigable mientras el backend Python levanta (PyInstaller +
+              numpy/librosa). Desaparece al responder o al agotarse la gracia. */}
+          {startingUp && !backendDown && window.smartSet?.isDesktop && (
+            <div className="mb-2 mt-1 shrink-0 px-3">
+              <div className="flex items-center gap-2 rounded-lg border border-violet-800/50 bg-violet-950/30 px-3 py-2 text-[11px] font-semibold text-violet-300">
+                <Loader2 size={12} className="animate-spin" />
+                Iniciando motor de audio… conectando con el servicio local
+              </div>
+            </div>
+          )}
 
           {/* Aviso de backend caído (SOLO escritorio): contenedor independiente
               en flujo normal, justo encima de la barra de búsqueda y debajo de
