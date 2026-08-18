@@ -7,9 +7,12 @@ import { parseBlob } from "music-metadata-browser";
  * Todo el "análisis" ocurre en el cliente con music-metadata-browser:
  *  - parseAudioFile():   etiquetas ID3v2/ID3v2.4 y MP4/M4A con decodificación
  *                       correcta (UTF-16/UTF-8/latin1), duración real y
- *                       carátula embebida (APIC/©cov). Si falta clave/BPM,
- *                       fallback por regex sobre el nombre del archivo
- *                       (Camelot "10A" y "128 BPM").
+ *                       carátula embebida (APIC/©cov).
+ *  - parseFilenameMetadata(): fallback por regex del nombre: key Camelot
+ *                       ("12B"/"10A") o nota tradicional, BPM ("128 BPM") y
+ *                       artist/title por segmentos de guiones.
+ *  - detectBpmFromBuffer(): BPM real con OfflineAudioContext (autocorrelación
+ *                       de picos de energía) cuando ID3 y nombre no aportan.
  *  - musicalKeyToCamelot(): tonalidad ID3 tradicional → Rueda Camelot.
  *  - estimateEnergy():   métrica de energía 0-10 heurística y determinista
  *                       (BPM como base + semilla estable por título).
@@ -53,21 +56,76 @@ export function camelotFromString(key: string | null | undefined): string | null
   return musicalKeyToCamelot(s);
 }
 
-/** Fallbacks desde el NOMBRE del archivo para tracks sin etiquetas ID3:
- *  Camelot ("03 - 10A - Fabe (Ger)...") y BPM ("128 BPM"). Puro regex. */
-export function parseKeyAndBpmFromFilename(name: string): { musicalKey: string | null; bpm: number | null } {
-  const out: { musicalKey: string | null; bpm: number | null } = { musicalKey: null, bpm: null };
-  for (const tok of name.split(/[\s_\-()[\].,]+/)) {
-    const ck = camelotFromString(tok);
-    if (ck) {
-      out.musicalKey = ck;
-      break;
+/** Metadatos derivados del NOMBRE del archivo cuando el ID3 está incompleto:
+ *  - musicalKey: Camelot "12B"/"10A"/"2A" (\b(1[0-2]|[1-9])[AB]\b) o clave
+ *                tradicional ("F#m"/"Ab") en un token del nombre.
+ *  - bpm:        literal "128 BPM"/"128bpm".
+ *  - artist/title: segmentos separados por guiones "-", descartando la key,
+ *                la numeración ("03") y los paréntesis ("(Ger)"/"(Remix)").
+ *  Nunca deja el artista en blanco: en el peor caso cae al título. */
+export function parseFilenameMetadata(name: string): {
+  musicalKey: string | null;
+  bpm: number | null;
+  artist: string | null;
+  title: string | null;
+} {
+  const out: { musicalKey: string | null; bpm: number | null; artist: string | null; title: string | null } = {
+    musicalKey: null,
+    bpm: null,
+    artist: null,
+    title: null,
+  };
+
+  const camelot = name.match(/\b(1[0-2]|[1-9])\s*([AB])\b/i);
+  if (camelot) {
+    const n = Number(camelot[1]);
+    if (n >= 1 && n <= 12) out.musicalKey = `${n}${camelot[2].toUpperCase()}`;
+  }
+  if (!out.musicalKey) {
+    for (const tok of name.split(/[\s_\-()[\].,]+/)) {
+      const ck = camelotFromString(tok);
+      if (ck) {
+        out.musicalKey = ck;
+        break;
+      }
     }
   }
+
   const bpm = name.match(/(?<!\d)(\d{2,3})\s*bpm\b/i);
   if (bpm) {
     const v = Number(bpm[1]);
     if (v >= 60 && v <= 220) out.bpm = v;
+  }
+
+  const stem = name.replace(/\.[^.]+$/, "");
+  const clean = (s: string): string =>
+    s
+      .replace(/\s*\([^)]*\)\s*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const parts = stem
+    .split("-")
+    .map(clean)
+    .filter((s) => {
+      if (!s) return false;
+      if (/^\d{1,2}$/.test(s)) return false; // numeración tipo "03"
+      if (/^bpm$/i.test(s)) return false;
+      const ck = camelotFromString(s);
+      if (ck && out.musicalKey && ck === out.musicalKey) return false; // el segmento de la key
+      return true;
+    });
+  if (parts.length >= 2) {
+    out.artist = parts[0];
+    out.title = parts[1];
+  } else if (parts.length === 1) {
+    out.artist = parts[0];
+    out.title = parts[0];
+  } else {
+    const t = clean(stem);
+    if (t) {
+      out.title = t;
+      out.artist = t;
+    }
   }
   return out;
 }
@@ -94,6 +152,73 @@ export async function probeAudioDuration(file: File, timeoutMs = 8000): Promise<
   });
 }
 
+// ---------------------------------------------------------------------------
+// Detección de BPM dinámica (Web Audio API, OfflineAudioContext)
+// ---------------------------------------------------------------------------
+// Decodifica el archivo con el codec nativo del navegador y estima el tempo
+// por autocorrelación de los picos de energía (onset strength) sobre una
+// ventana de "maxSeconds". Se usa SOLO cuando el ID3 y el nombre no aportan
+// BPM. El buffer se pasa copiado porque decodeAudioData() lo consume.
+
+/** Picos de energía → BPM por autocorrelación (60-200). */
+function bpmFromOnsets(data: Float32Array, sampleRate: number): number | null {
+  const frame = 1024;
+  const hop = 512;
+  const energies: number[] = [];
+  let sum = 0;
+  for (let i = 0; i + frame < data.length; i += hop) {
+    let e = 0;
+    for (let j = 0; j < frame; j += 4) {
+      const v = data[i + j];
+      e += v * v;
+    }
+    energies.push(e);
+    sum += e;
+  }
+  if (energies.length < 8) return null;
+  const mean = sum / energies.length;
+  if (mean <= 0) return null;
+
+  const onsets = new Array<number>(energies.length).fill(0);
+  for (let i = 1; i < energies.length; i++) {
+    const d = energies[i] - energies[i - 1];
+    if (d > mean * 0.25) onsets[i] = d; // subidas marcadas de energía
+  }
+
+  const step = hop / sampleRate; // segundos por cuadro
+  const minLag = Math.max(1, Math.floor(60 / 200 / step)); // 200 BPM
+  const maxLag = Math.floor(60 / 60 / step); // 60 BPM
+  let bestLag = 0;
+  let bestScore = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let score = 0;
+    for (let i = 0; i + lag < onsets.length; i++) score += onsets[i] * onsets[i + lag];
+    if (score > bestScore) {
+      bestScore = score;
+      bestLag = lag;
+    }
+  }
+  if (!bestLag || bestScore <= 0) return null;
+  let bpm = 60 / (bestLag * step);
+  if (bpm < 60) bpm *= 2; // compensar halftime fuerte
+  if (bpm > 200) bpm /= 2; // compensar doble tempo
+  return Math.round(bpm);
+}
+
+/** BPM real de un ArrayBuffer de audio (mp3/wav/m4a/ogg) vía Web Audio. */
+export async function detectBpmFromBuffer(buffer: ArrayBuffer, maxSeconds = 40): Promise<number | null> {
+  try {
+    const ctx = new OfflineAudioContext(1, 1, 44100);
+    const decoded = await ctx.decodeAudioData(buffer.slice(0));
+    const ch = decoded.getChannelData(0);
+    const rate = decoded.sampleRate;
+    const n = Math.min(ch.length, Math.floor(rate * maxSeconds));
+    return bpmFromOnsets(ch.subarray(0, n), rate);
+  } catch {
+    return null; // formato no decodificable: se queda en null, no rompe el lote
+  }
+}
+
 export interface ParsedAudioFile {
   tags: AudioTags;
   duration_sec: number | null;
@@ -103,8 +228,10 @@ export interface ParsedAudioFile {
 /** Etiquetas + duración + carátula de un File, todo en el navegador. */
 export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   let meta;
+  let buf: ArrayBuffer | null = null;
   try {
-    meta = await parseBlob(file);
+    buf = await file.arrayBuffer(); // un solo read: se reutiliza para parseBlob y BPM
+    meta = await parseBlob(new Blob([buf], { type: file.type || "audio/mpeg" }));
   } catch {
     const tags = emptyTags();
     const duration_sec = await probeAudioDuration(file);
@@ -119,7 +246,13 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
       : null;
   const genre =
     Array.isArray(common.genre) && common.genre.length > 0 ? cleanText(common.genre.join(" / ")) : null;
-  const fromName = parseKeyAndBpmFromFilename(file.name);
+  const fromName = parseFilenameMetadata(file.name);
+
+  let detectedBpm: number | null = null;
+  if (bpm === null && fromName.bpm === null && buf) {
+    detectedBpm = await detectBpmFromBuffer(buf);
+  }
+
   const picture = Array.isArray(common.picture) && common.picture.length > 0 ? common.picture[0] : undefined;
 
   const fmtDuration = meta.format.duration;
@@ -129,11 +262,11 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
 
   return {
     tags: {
-      title: cleanText(common.title),
-      artist: cleanText(common.artist),
+      title: cleanText(common.title) ?? fromName.title ?? null,
+      artist: cleanText(common.artist) ?? fromName.artist ?? null,
       album: cleanText(common.album),
       genre,
-      bpm: bpm ?? fromName.bpm,
+      bpm: bpm ?? fromName.bpm ?? detectedBpm,
       musicalKey: cleanText(common.key) ?? fromName.musicalKey,
     },
     duration_sec,

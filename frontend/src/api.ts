@@ -532,7 +532,7 @@ export async function webRegisterFolder(
       title,
       artist,
       album,
-      genre: tags?.genre ?? undefined,
+      genre: tags?.genre ?? root, // carpeta padre (ej. "Progressive") como género por defecto
       duration_sec: res?.duration_sec ?? null,
       bpm: tags?.bpm ?? null,
       embedded_bpm: tags?.bpm ?? null,
