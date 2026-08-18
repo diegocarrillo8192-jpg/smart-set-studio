@@ -8,6 +8,12 @@ import type {
   Track,
   TrackAnalysis,
 } from "./types";
+import {
+  estimateEnergy,
+  generateDemoSet,
+  musicalKeyToCamelot,
+  parseAudioTags,
+} from "./lib/demoEngine";
 
 const BASE = "http://127.0.0.1:8765/api";
 
@@ -241,7 +247,10 @@ interface WebFsHandle {
   getFile?: () => Promise<File>;
 }
 
-/** Selecciona una carpeta con permiso del usuario y registra sus archivos. */
+/** Selecciona una carpeta con permiso del usuario y registra sus archivos
+ *  en el almacén web volátil (etiquetas ID3/BPM/Key analizadas en cliente).
+ *  Devuelve el nombre de la carpeta elegida, o null si se canceló/no existe
+ *  soporte (showDirectoryPicker). */
 export async function pickMusicFolder(): Promise<string | null> {
   const picker = (
     window as unknown as {
@@ -278,8 +287,9 @@ export async function pickMusicFolder(): Promise<string | null> {
   } catch {
     return null;
   }
-  if (files.length > 0) registerLocalFiles(files);
-  return root.name;
+  if (files.length === 0) return null;
+  const registered = await webRegisterFolder(files, { rootName: root.name });
+  return registered;
 }
 
 /** Blob URL estable si existe un archivo local para este path de track, si no null. */
@@ -457,8 +467,14 @@ function safeRelPath(f: File): string {
   return (rel ?? f.name ?? "track").replace(/\\/g, "/");
 }
 
-/** Registra los archivos de una carpeta web; devuelve el nombre raíz o null. */
-export function webRegisterFolder(files: File[]): string | null {
+/** Registra los archivos de una carpeta web; devuelve el nombre raíz o null.
+ *  ANÁLISIS EN CLIENTE: lee etiquetas ID3/MP4 (título, artista, álbum, BPM,
+ *  tonalidad) directamente de los primeros KB de cada archivo y deriva Key
+ *  Camelot + energía heurística. Todo queda solo en memoria (demo volátil). */
+export async function webRegisterFolder(
+  files: File[],
+  opts?: { rootName?: string }
+): Promise<string | null> {
   ensureWebStoreLoaded();
   const audio = files.filter((f) => {
     if (!f || typeof f !== "object") return false;
@@ -472,7 +488,11 @@ export function webRegisterFolder(files: File[]): string | null {
   // reproducir y mostrar los archivos sin depender de la API REST de escritorio.
   for (const f of audio) localUrlFor(safeRelPath(f));
 
-  const root = (safeRelPath(audio[0]).split(/[\\/]/)[0] || "Mi Música").trim();
+  const firstRel = safeRelPath(audio[0]);
+  const hasFolderPath = firstRel.includes("/") && firstRel.split("/").length > 1;
+  const root =
+    (opts?.rootName ?? (hasFolderPath ? firstRel.split(/[\\/]/)[0] : "Archivos locales")).trim() ||
+    "Archivos locales";
   let folder = webFolders.find((f) => f.name === root);
   if (!folder) {
     folder = {
@@ -486,39 +506,44 @@ export function webRegisterFolder(files: File[]): string | null {
   }
 
   const seen = new Set(webTracks.map((t) => t.file_path.toLowerCase()));
+  // Parseo de etiquetas en lote (slices de 128 KB por archivo, rápido).
+  const tagResults = await Promise.all(audio.map((f) => parseAudioTags(f)));
   const added: Track[] = [];
-  for (const f of audio) {
+  audio.forEach((f, idx) => {
     const name = f.name ?? "";
-    if (!name) continue;
+    if (!name) return;
     const rel = safeRelPath(f);
-    if (seen.has(rel.toLowerCase())) continue;
+    if (seen.has(rel.toLowerCase())) return;
     seen.add(rel.toLowerCase());
+    const tags = tagResults[idx] ?? null;
     const base = name.replace(/\.[^.]+$/, "");
+    const title = tags?.title ?? base;
+    const artist = tags?.artist ?? root;
     added.push({
       id: --webTrackSeq,
       file_path: rel,
-      folder_id: folder.id,
+      folder_id: folder!.id,
       folder_name: root,
-      title: base,
-      artist: root,
-      album: root,
+      title,
+      artist,
+      album: tags?.album ?? root,
       duration_sec: null,
-      bpm: null,
-      embedded_bpm: null,
-      musical_key: null,
-      camelot_key: null,
-      embedded_key: null,
-      energy: null,
+      bpm: tags?.bpm ?? null,
+      embedded_bpm: tags?.bpm ?? null,
+      musical_key: tags?.musicalKey ?? null,
+      camelot_key: musicalKeyToCamelot(tags?.musicalKey ?? null),
+      embedded_key: tags?.musicalKey ?? null,
+      energy: estimateEnergy({ bpm: tags?.bpm ?? null, title }),
       loudness_db: null,
       spectral_centroid: null,
-      analyzed: false,
+      analyzed: true,
       has_error: false,
       error_message: null,
     });
-  }
+  });
   if (added.length > 0) {
     webTracks.push(...added);
-    folder.track_count = webTracks.filter((t) => t.folder_id === folder.id).length;
+    folder.track_count = webTracks.filter((t) => t.folder_id === folder!.id).length;
   }
   saveWebStore();
   return root;
@@ -906,7 +931,23 @@ export const api = {
     energy_profile: EnergyProfile;
     seed_track_id?: number | null;
     name?: string | null;
-  }) => request<DJSet>("/sets/generate", { method: "POST", body: JSON.stringify(payload) }),
+  }) => {
+    if (isWeb()) {
+      // Demo volátil: el set se "genera" en pantalla con el motor del
+      // navegador (Camelot ±1, BPM ±2.5%, perfil de energía) sin backend.
+      ensureWebStoreLoaded();
+      return Promise.resolve(
+        generateDemoSet([...webTracks], {
+          duration_min: payload.duration_min,
+          folder_ids: payload.folder_ids,
+          energy_profile: payload.energy_profile,
+          seed_track_id: payload.seed_track_id ?? null,
+          name: payload.name ?? null,
+        })
+      );
+    }
+    return request<DJSet>("/sets/generate", { method: "POST", body: JSON.stringify(payload) });
+  },
   listSets: () => request<DJSet[]>("/sets"),
   deleteSet: (id: number) => request<{ ok: boolean }>(`/sets/${id}`, { method: "DELETE" }),
   renameSet: (id: number, name: string) =>

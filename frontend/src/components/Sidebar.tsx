@@ -7,13 +7,14 @@ import {
   Library,
   ListMusic,
   MoreVertical,
+  Music2,
   Pencil,
   RefreshCw,
   Settings,
   Trash2,
 } from "lucide-react";
 import type { DJSet, Folder, ScanJob } from "../types";
-import { api, isWeb, webRegisterFolder } from "../api";
+import { api, isWeb, pickMusicFolder, webRegisterFolder } from "../api";
 
 interface Props {
   folders: Folder[];
@@ -28,6 +29,42 @@ interface Props {
   onOpenSettings: () => void;
 }
 
+/** Selector de ARCHIVOS de audio sueltos (no carpeta): <input multiple>.
+ *  Los tracks se registran en la carpeta virtual "Archivos locales". */
+function useAudioFilesPicker(): {
+  pickAudioFiles: () => Promise<string | null>;
+  audioInput: ReactElement;
+} {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const pickAudioFiles = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      const input = inputRef.current;
+      if (!input) return resolve(null);
+      input.value = "";
+      input.onchange = () => {
+        const files = input.files ? Array.from(input.files) : [];
+        input.value = "";
+        if (files.length === 0) return resolve(null);
+        void webRegisterFolder(files, { rootName: "Archivos locales" }).then((root) => resolve(root));
+      };
+      input.click();
+    });
+
+  const audioInput = (
+    <input
+      id="web-audio-files-input"
+      ref={inputRef}
+      type="file"
+      className="hidden"
+      multiple
+      accept=".mp3,.wav,.m4a,.aiff,.aif,.flac,.m4a,.aac,.ogg,.opus,audio/*"
+    />
+  );
+
+  return { pickAudioFiles, audioInput };
+}
+
 function useFolderPicker(): {
   pickFolder: () => Promise<string | null>;
   hiddenInput: ReactElement;
@@ -39,10 +76,15 @@ function useFolderPicker(): {
     if (window.smartSet?.selectFolder) {
       return window.smartSet.selectFolder();
     }
-    // Versión web: el <input type="file" webkitdirectory> permite explorar y
-    // subir una carpeta completa desde el navegador. Se limpia su valor en
-    // cada intento para que el diálogo pueda reabrirse tantas veces como sea
-    // necesario (si no, re-seleccionar la misma carpeta no dispara onChange).
+    // Navegador: File System Access API (Chrome/Edge) si está disponible;
+    // registra la carpeta COMPLETA con análisis de etiquetas en cliente.
+    if (typeof (window as unknown as { showDirectoryPicker?: unknown }).showDirectoryPicker === "function") {
+      return pickMusicFolder(); // null = cancelado o sin archivos: no reabrir
+    }
+    // Fallback: <input webkitdirectory> (Firefox/Safari/iOS/Android).
+    // Se limpia su valor en cada intento para que el diálogo pueda reabrirse
+    // tantas veces como sea necesario (si no, re-seleccionar la misma carpeta
+    // no dispara onChange).
     return new Promise((resolve) => {
       const input = inputRef.current;
       if (!input) return resolve(null);
@@ -53,8 +95,7 @@ function useFolderPicker(): {
         if (files.length === 0) return resolve(null);
         // Registra todos los archivos de audio (nombre/ruta/Blob URL/formato)
         // en el almacén del navegador: listTracks los devuelve al instante.
-        const root = webRegisterFolder(files);
-        resolve(root);
+        void webRegisterFolder(files).then((root) => resolve(root));
       };
       input.click();
     });
@@ -107,6 +148,7 @@ export default function Sidebar({
   const [renameValue, setRenameValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
   const { pickFolder, hiddenInput } = useFolderPicker();
+  const { pickAudioFiles, audioInput } = useAudioFilesPicker();
   const pollRef = useRef<Record<number, number>>({});
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [setsOpen, setSetsOpen] = useState(false);
@@ -154,6 +196,24 @@ export default function Sidebar({
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  /** Web: carga archivos de audio sueltos (sin seleccionar una carpeta). */
+  const addAudioFiles = async () => {
+    setAdding(true);
+    setError("");
+    try {
+      const root = await pickAudioFiles();
+      if (root) {
+        // El análisis de etiquetas ya corrió en el navegador (webRegisterFolder);
+        // refrescar hace que carpetas y tracks aparezcan al instante.
+        onFoldersChanged();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setAdding(false);
     }
@@ -250,6 +310,7 @@ export default function Sidebar({
   return (
     <aside className="flex w-full shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-panel md:w-64 md:overflow-y-auto">
       {hiddenInput}
+      {audioInput}
       <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
         <Disc3 size={18} className="text-violet-400" />
         <div>
@@ -287,6 +348,16 @@ export default function Sidebar({
         >
           <FolderPlus size={14} /> Agregar Carpeta
         </button>
+        {isWeb() && (
+          <button
+            onClick={() => void addAudioFiles()}
+            disabled={adding}
+            className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
+            title="Selecciona archivos de audio sueltos (MP3/WAV/M4A…)"
+          >
+            <Music2 size={14} /> Cargar Audio
+          </button>
+        )}
 
         <div className="space-y-1.5">
           {/* Vista global: colección completa */}
