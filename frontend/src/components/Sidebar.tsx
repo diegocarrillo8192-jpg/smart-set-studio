@@ -529,16 +529,20 @@ export default function Sidebar({
 
       {/* Ajustes */}
       <section className="mt-auto border-t border-slate-800 px-3 py-3">
-        {/* Ajustes del Motor (SOLO escritorio): el motor Python no existe en el
-          navegador; en la demo web se omite la entrada. */}
-      {!isWeb() && (
-        <button
-          onClick={onOpenSettings}
-          className="mb-1.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-panel-2 hover:text-white"
-        >
-          <Settings size={14} /> Ajustes del Motor
-        </button>
-      )}
+{/* Ajustes del Motor: misma UI que escritorio; en la demo web el motor
+        Python no existe y el clic muestra un aviso en lugar del modal. */}
+      <button
+        onClick={() => {
+          if (isWeb()) {
+            window.alert("Función solo disponible en la versión de Escritorio");
+            return;
+          }
+          onOpenSettings();
+        }}
+        className="mb-1.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-panel-2 hover:text-white"
+      >
+        <Settings size={14} /> Ajustes del Motor
+      </button>
         {error && (
           <p className="mt-2 flex items-center gap-1 rounded bg-red-500/10 px-2 py-1 text-[10px] text-red-400">
             <Trash2 size={10} /> {error}

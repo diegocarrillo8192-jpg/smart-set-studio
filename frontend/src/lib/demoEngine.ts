@@ -7,7 +7,9 @@ import { parseBlob } from "music-metadata-browser";
  * Todo el "análisis" ocurre en el cliente con music-metadata-browser:
  *  - parseAudioFile():   etiquetas ID3v2/ID3v2.4 y MP4/M4A con decodificación
  *                       correcta (UTF-16/UTF-8/latin1), duración real y
- *                       carátula embebida (APIC/©cov).
+ *                       carátula embebida (APIC/©cov). Si falta clave/BPM,
+ *                       fallback por regex sobre el nombre del archivo
+ *                       (Camelot "10A" y "128 BPM").
  *  - musicalKeyToCamelot(): tonalidad ID3 tradicional → Rueda Camelot.
  *  - estimateEnergy():   métrica de energía 0-10 heurística y determinista
  *                       (BPM como base + semilla estable por título).
@@ -25,16 +27,49 @@ export interface AudioTags {
   title: string | null;
   artist: string | null;
   album: string | null;
+  genre: string | null;
   bpm: number | null;
   musicalKey: string | null;
 }
 
 function emptyTags(): AudioTags {
-  return { title: null, artist: null, album: null, bpm: null, musicalKey: null };
+  return { title: null, artist: null, album: null, genre: null, bpm: null, musicalKey: null };
 }
 
 function cleanText(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+/** Acepta Camelot directo ("10A"/"8B") o nota tradicional ("F#m"/"Ab") y
+ *  devuelve SIEMPRE el formato Camelot ("10A"), o null si no reconoce. */
+export function camelotFromString(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const s = String(key).trim();
+  const direct = s.match(/^(\d{1,2})\s*([AB])$/i);
+  if (direct) {
+    const n = Number(direct[1]);
+    return n >= 1 && n <= 12 ? `${n}${direct[2].toUpperCase()}` : null;
+  }
+  return musicalKeyToCamelot(s);
+}
+
+/** Fallbacks desde el NOMBRE del archivo para tracks sin etiquetas ID3:
+ *  Camelot ("03 - 10A - Fabe (Ger)...") y BPM ("128 BPM"). Puro regex. */
+export function parseKeyAndBpmFromFilename(name: string): { musicalKey: string | null; bpm: number | null } {
+  const out: { musicalKey: string | null; bpm: number | null } = { musicalKey: null, bpm: null };
+  for (const tok of name.split(/[\s_\-()[\].,]+/)) {
+    const ck = camelotFromString(tok);
+    if (ck) {
+      out.musicalKey = ck;
+      break;
+    }
+  }
+  const bpm = name.match(/(?<!\d)(\d{2,3})\s*bpm\b/i);
+  if (bpm) {
+    const v = Number(bpm[1]);
+    if (v >= 60 && v <= 220) out.bpm = v;
+  }
+  return out;
 }
 
 /** Duración real por metadatos del navegador (<audio> de BLOB), sin backend. */
@@ -82,6 +117,9 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
     typeof rawBpm === "number" && Number.isFinite(rawBpm) && rawBpm > 0 && rawBpm < 400
       ? Math.round(rawBpm * 10) / 10
       : null;
+  const genre =
+    Array.isArray(common.genre) && common.genre.length > 0 ? cleanText(common.genre.join(" / ")) : null;
+  const fromName = parseKeyAndBpmFromFilename(file.name);
   const picture = Array.isArray(common.picture) && common.picture.length > 0 ? common.picture[0] : undefined;
 
   const fmtDuration = meta.format.duration;
@@ -94,8 +132,9 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
       title: cleanText(common.title),
       artist: cleanText(common.artist),
       album: cleanText(common.album),
-      bpm,
-      musicalKey: cleanText(common.key),
+      genre,
+      bpm: bpm ?? fromName.bpm,
+      musicalKey: cleanText(common.key) ?? fromName.musicalKey,
     },
     duration_sec,
     coverUrl:

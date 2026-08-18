@@ -323,7 +323,7 @@ export default function LibraryTable({
                   </div>
                 </td>
 <td className="hidden max-w-40 truncate px-2 py-1.5 text-slate-400 md:table-cell">{t.artist}</td>
-              <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? t.folder_name ?? "Desconocido"}</td>
+              <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? "Desconocido"}</td>
               <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
                 <td className="px-2 py-1.5 text-center">
                   <span

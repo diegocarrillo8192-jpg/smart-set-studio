@@ -9,9 +9,9 @@ import type {
   TrackAnalysis,
 } from "./types";
 import {
+  camelotFromString,
   estimateEnergy,
   generateDemoSet,
-  musicalKeyToCamelot,
   parseAudioFile,
 } from "./lib/demoEngine";
 
@@ -521,7 +521,8 @@ export async function webRegisterFolder(
     const tags = res?.tags ?? null;
     const base = name.replace(/\.[^.]+$/, "");
     const title = tags?.title ?? base;
-    const artist = tags?.artist ?? root;
+    const artist = tags?.artist ?? "";
+    const album = tags?.album ?? "";
     if (res?.coverUrl) artworkCache.set(rel.replace(/\\/g, "/").toLowerCase(), res.coverUrl);
     added.push({
       id: --webTrackSeq,
@@ -530,12 +531,13 @@ export async function webRegisterFolder(
       folder_name: root,
       title,
       artist,
-      album: tags?.album ?? root,
+      album,
+      genre: tags?.genre ?? undefined,
       duration_sec: res?.duration_sec ?? null,
       bpm: tags?.bpm ?? null,
       embedded_bpm: tags?.bpm ?? null,
       musical_key: tags?.musicalKey ?? null,
-      camelot_key: musicalKeyToCamelot(tags?.musicalKey ?? null),
+      camelot_key: camelotFromString(tags?.musicalKey ?? null),
       embedded_key: tags?.musicalKey ?? null,
       energy: estimateEnergy({ bpm: tags?.bpm ?? null, title }),
       loudness_db: null,
