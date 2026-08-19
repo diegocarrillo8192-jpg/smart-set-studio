@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Library, Loader2, Wand2 } from "lucide-react";
+import { Library, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api, subscribeWebTracks } from "./api";
-import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
 import SetGenerator from "./components/SetGenerator";
@@ -33,34 +32,11 @@ export default function App() {
   /** Escritorio: ID de la carpeta cuyo escaneo está en curso (null = ninguno).
    *  Mientras no sea null, la tabla recarga progresivamente (UX "Analizando…"). */
   const [analyzingFolderId, setAnalyzingFolderId] = useState<number | null>(null);
-  /** Período de gracia al arrancar la app de escritorio (8s): durante este
-   *  tiempo no se muestra la alerta roja de desconexión, solo el indicador
-   *  "Iniciando motor de audio…". En la web NO aplica (modo offline). */
-  const [startingUp, setStartingUp] = useState(() => !!window.smartSet?.isDesktop);
   const bootRef = useRef(false);
-  /** Ref espejo para lecturas estables dentro de `refresh` (useCallback []). */
-  const startingUpRef = useRef(startingUp);
+  /** True una vez que el backend respondió al menos una vez: permite que el
+   *  sondeo de salud recargue la biblioteca en el reconectar sin duplicar la
+   *  carga inicial del arranque. */
   const connectedRef = useRef(false);
-
-  // Splash screen enlazado al BACKEND: no se cierra con un timer fijo — se
-  // mantiene (animación en loop) mientras la conexión a Python esté pendiente
-  // o fallando sus primeros intentos, y solo se desvanece cuando la API
-  // responde 200 OK. En la web (sin backend) se cierra igualmente al primer
-  // refresh exitoso del almacén volátil.
-  const [splashLeaving, setSplashLeaving] = useState(false);
-  const [splashGone, setSplashGone] = useState(false);
-  const [backendReady, setBackendReady] = useState(false);
-  const splashStartRef = useRef(Date.now());
-  useEffect(() => {
-    if (!backendReady) return; // sigue en el Splash: aún no hay sistema 100%
-    const delay = Math.max(0, 900 - (Date.now() - splashStartRef.current));
-    const t1 = window.setTimeout(() => setSplashLeaving(true), delay);
-    const t2 = window.setTimeout(() => setSplashGone(true), delay + 600);
-    return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-    };
-  }, [backendReady]);
 
   /** IDs de los tracks que suenan ahora mismo en A y/o B (resaltado en tablas). */
   const playingTrackIds = useMemo(() => {
@@ -76,12 +52,10 @@ export default function App() {
       setFolders(f);
       setSets(s);
       setLibraryVersion((v) => v + 1);
-      // Backend respondió: se termina el arranque (oculta el indicador) y se
-      // garantiza que la alerta roja NO se muestre aunque el 8s aún corra.
+      // Backend respondió: garantiza que la alerta roja NO se muestre (el
+      // sondeo vuelve a disparar refresh en la primera reconexión).
       connectedRef.current = true;
-      setStartingUp(false);
       setBackendDown(false);
-      setBackendReady(true); // Python respondió 200: el Splash inicia el fade-out
       return f;
     } catch (err) {
       // Si el error viene con status 409 (carpeta ya importada), igual lo
@@ -91,8 +65,9 @@ export default function App() {
         console.error("[App] error refrescando carpetas y sets:", err);
         // El banner de backend caído solo aplica en escritorio: en la web no
         // existe un backend local en 127.0.0.1 y la app opera en modo offline.
-        // Durante la gracia de arranque (8s) NO se enciende la alerta roja.
-        if (window.smartSet?.isDesktop && !startingUpRef.current) setBackendDown(true);
+        // La alerta ROJA queda bloqueada por la gracia silenciosa de arranque:
+        // mientras el motor Python levanta, jamás se muestra al usuario.
+        if (window.smartSet?.isDesktop) setBackendDown(true);
       }
       throw err;
     }
@@ -111,34 +86,26 @@ export default function App() {
     return () => window.clearInterval(t);
   }, [analyzingFolderId]);
 
-  // Timeout de seguridad (15s): si Python no levanta, se cierra el Splash
-  // igualmente y la alerta roja indica un fallo REAL del sistema (el Splash ya
-  // enmascaró el arranque normal, nunca se ve la alerta mientras bootea).
-  useEffect(() => {
-    if (!window.smartSet?.isDesktop || backendReady) return;
-    const t = window.setTimeout(() => {
-      setBackendReady(true);
-      setStartingUp(false);
-      if (!connectedRef.current) setBackendDown(true);
-    }, 15000);
-    return () => window.clearTimeout(t);
-  }, [backendReady]);
-
-  // Gracia de 20s para el banner ROJO: desde el arranque de la app y hasta que
-  // se agote este periodo, ESTÁ PROHIBIDO mostrar el error crítico, aunque la
-  // conexión falle o el backend siga bloqueado procesando la base de datos
-  // local. Dentro de la gracia se muestra el banner NEUTRO de sincronización.
+  // Gracia SILENCIOSA del banner ROJO (90s): desde el arranque y hasta que se
+  // agote este periodo, ESTÁ PROHIBIDO mostrar el error crítico, aunque la
+  // conexión falle o el backend siga bloqueado levantando (PyInstaller +
+  // numpy/librosa). Dentro de la gracia el cliente reintenta en silencio —
+  // sin splash, sin banner de carga — y la app abre directo a la pantalla
+  // principal en cuanto Python responde. Solo tras 90s reales de caída se
+  // enciende la alerta roja (fallo de verdad, no arranque lento).
   const [graceOver, setGraceOver] = useState(false);
   useEffect(() => {
     if (!window.smartSet?.isDesktop) return;
-    const t = window.setTimeout(() => setGraceOver(true), 20000);
+    const t = window.setTimeout(() => setGraceOver(true), 90000);
     return () => window.clearTimeout(t);
   }, []);
 
-  // Sondeo ligero de salud: en cuanto Python responde 200 OK se libera la UI
-  // (el refresh pesado de carpetas corre después, en segundo plano).
+  // Sondeo silencioso de salud: corre SIEMPRE en escritorio, en segundo plano.
+  // En cuanto Python responde 200 OK se refresca la biblioteca (la primera vez
+  // tras el arranque; en reconexiones posteriores solo limpia la alerta roja).
+  // Nunca muestra banners por sí mismo: reintenta cada 1.2s sin ruido visual.
   useEffect(() => {
-    if (!window.smartSet?.isDesktop || backendReady) return;
+    if (!window.smartSet?.isDesktop) return;
     let alive = true;
     const poll = () => {
       if (!alive) return;
@@ -147,15 +114,16 @@ export default function App() {
         .then((h) => {
           if (!alive) return;
           if (h && h.status === "ok") {
-            connectedRef.current = true;
-            setBackendReady(true);
-            setStartingUp(false);
-            void refresh().catch(() => undefined);
-          } else {
-            window.setTimeout(poll, 1200);
+            if (!connectedRef.current) {
+              connectedRef.current = true;
+              void refresh().catch(() => undefined);
+            } else {
+              setBackendDown(false);
+            }
           }
         })
-        .catch(() => {
+        .catch(() => undefined)
+        .finally(() => {
           if (alive) window.setTimeout(poll, 1200);
         });
     };
@@ -163,12 +131,7 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [backendReady, refresh]);
-
-  // Mantiene el ref espejo sincronizado con el estado de arranque.
-  useEffect(() => {
-    startingUpRef.current = startingUp;
-  }, [startingUp]);
+  }, [refresh]);
 
   // Carga inicial: en escritorio reintenta varias veces al arrancar para que
   // la UI no quede vacía si el backend tarda unos segundos (PyInstaller +
@@ -323,34 +286,12 @@ export default function App() {
             </button>
           </div>
 
-          {/* Indicador de arranque (SOLO escritorio, durante la gracia de 8s):
-              estado amigable mientras el backend Python levanta (PyInstaller +
-              numpy/librosa). Desaparece al responder o al agotarse la gracia. */}
-          {startingUp && !backendDown && window.smartSet?.isDesktop && (
-            <div className="mb-2 mt-1 shrink-0 px-3">
-              <div className="flex items-center gap-2 rounded-lg border border-violet-800/50 bg-violet-950/30 px-3 py-2 text-[11px] font-semibold text-violet-300">
-                <Loader2 size={12} className="animate-spin" />
-                Iniciando motor de audio… conectando con el servicio local
-              </div>
-            </div>
-          )}
-
-          {/* Banner NEUTRO de carga (SOLO escritorio, dentro de la gracia de
-              20s): reemplaza al rojo mientras el backend sincroniza la base
-              de datos de audio local tras el Splash. */}
-          {backendDown && !graceOver && window.smartSet?.isDesktop && (
-            <div className="mb-2 mt-1 shrink-0 px-3">
-              <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-800/60 px-3 py-2 text-[11px] font-semibold text-slate-300">
-                <Loader2 size={12} className="animate-spin text-sky-400" />
-                🎧 Sincronizando motor de audio y biblioteca… por favor espera
-              </div>
-            </div>
-          )}
-
-          {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia de
-              20s): el error crítico real. Contenedor independiente en flujo
-              normal, justo encima de la barra de búsqueda y debajo de las
-              tabs, con margin-bottom — nunca tapa las pestañas. */}
+          {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia
+              silenciosa de 90s): el error crítico real. Durante el arranque
+              jamás se muestra — el cliente espera en silencio. Contenedor
+              independiente en flujo normal, justo encima de la barra de
+              búsqueda y debajo de las tabs, con margin-bottom — nunca tapa
+              las pestañas. */}
           {backendDown && graceOver && window.smartSet?.isDesktop && (
             <div className="mb-2 mt-1 shrink-0 px-3">
               <div className="flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] font-semibold text-red-300">
@@ -408,8 +349,6 @@ export default function App() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-
-      {!splashGone && <SplashScreen leaving={splashLeaving} />}
       </div>
     </>
   );
