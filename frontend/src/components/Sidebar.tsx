@@ -182,11 +182,11 @@ export default function Sidebar({
       const path = await pickFolder();
       if (path) {
         if (window.smartSet?.selectFolder) {
-          // Escritorio: el backend importa la carpeta del disco y el escaneo
-          // arranca SOLO (igual que la web). El backend puebla el listado
-          // completo al instante (pase 1) y va hidratando fila a fila (pase 2):
-          // la tabla muestra todo de golpe con "Analizando…" y valores reales
-          // conforme el motor termina cada archivo.
+          // Escritorio: `addFolder` registra TODOS los archivos de la carpeta
+          // de golpe (analyzed=false, SIN procesar audio) — la tabla los
+          // renderiza al instante con "Analizando…". El escaneo arranca SOLO
+          // y el backend va hidratando cada fila con datos reales (BPM/Key)
+          // desde su hilo silencioso, sin bloquear la interfaz.
           const folder = await api.addFolder(path);
           void scanFolder(folder);
         }

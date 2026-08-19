@@ -30,11 +30,11 @@ export default function App() {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [backendDown, setBackendDown] = useState(false);
-  /** PISO DURO absoluto: el banner rojo JAMÁS se renderiza en los primeros 7s
+  /** PISO DURO absoluto: el banner rojo JAMÁS se renderiza en los primeros 12s
    *  de ejecución de la app, sin importar qué diga el polling de salud.
    *  Elimina cualquier falso positivo de arranque (backend lento, refresh
    *  fallando mientras el motor sincroniza la base local). */
-  const APP_RUN_HARD_GRACE_MS = 7000;
+  const APP_RUN_HARD_GRACE_MS = 12000;
   const appStartRef = useRef(Date.now());
   /** Escritorio: ID de la carpeta cuyo escaneo está en curso (null = ninguno).
    *  Mientras no sea null, la tabla recarga progresivamente (UX "Analizando…"). */
@@ -372,7 +372,7 @@ export default function App() {
           )}
 
           {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia de
-              30s Y tras el piso duro absoluto de 7s desde el arranque): el
+              30s Y tras el piso duro absoluto de 12s desde el arranque): el
               error crítico real. Contenedor independiente en flujo normal,
               justo encima de la barra de búsqueda y debajo de las tabs, con
               margin-bottom — nunca tapa las pestañas. */}
