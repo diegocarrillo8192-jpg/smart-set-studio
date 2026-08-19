@@ -53,9 +53,10 @@ export function camelotFromString(key: string | null | undefined): string | null
   if (!key) return null;
   const s = String(key).trim();
   const direct = s.match(/^(\d{1,2})\s*([A-Za-z])$/i);
-  if (direct) {
+  if (direct && direct[0]) {
     const n = Number(direct[1]);
-    return n >= 1 && n <= 12 ? `${n}${direct[2].toUpperCase()}` : null;
+    const letter = direct[0].slice(-1).toUpperCase(); // match completo: nunca undefined
+    return n >= 1 && n <= 12 ? `${n}${letter}` : null;
   }
   return musicalKeyToCamelot(s);
 }
@@ -81,9 +82,14 @@ export function parseFilenameMetadata(name: string): {
   };
 
   const camelot = name.match(/\b(1[0-2]|[1-9])[A-Za-z]\b/i);
-  if (camelot) {
+  if (camelot && camelot[0] && camelot[1]) {
     const n = Number(camelot[1]);
-    if (n >= 1 && n <= 12) out.musicalKey = `${n}${camelot[2].toUpperCase()}`;
+    if (n >= 1 && n <= 12) {
+      // El regex tiene UN solo grupo: la letra se toma del match completo
+      // (match[0]), nunca de un índice inexistente.
+      const letter = camelot[0].slice(-1).toUpperCase();
+      out.musicalKey = `${n}${letter}`;
+    }
   }
   if (!out.musicalKey) {
     for (const tok of name.split(/[\s_\-()[\].,]+/)) {
