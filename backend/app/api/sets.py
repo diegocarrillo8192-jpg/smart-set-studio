@@ -1,6 +1,4 @@
 """API de sets generados + exportación."""
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session, selectinload
@@ -12,8 +10,6 @@ from ..services.exporters import _safe_name, build_rekordbox_xml, export_to_usb,
 from ..services.set_generator import generate_set
 
 from .settings import get_all_settings
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sets", tags=["sets"])
 
@@ -46,16 +42,7 @@ def create_set(payload: SetGenerateRequest, db: Session = Depends(get_db)):
             settings=settings,
         )
     except ValueError as exc:
-        # Errores de negocio (sin candidatos, perfil desconocido...): 400
-        # legible para el frontend, jamás un dump del servidor.
         raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        # Cualquier fallo inesperado (datos nulos, estado raro de la BD...)
-        # se traduce a un 500 con mensaje claro en lugar de un volcado
-        # interno del servidor.
-        db.rollback()
-        logger.exception("Fallo inesperado generando el set")
-        raise HTTPException(500, f"No se pudo generar el set: {exc}") from exc
     return _load_set(db, dj_set.id)
 
 

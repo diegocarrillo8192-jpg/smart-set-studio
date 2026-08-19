@@ -30,12 +30,6 @@ export default function App() {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [backendDown, setBackendDown] = useState(false);
-  /** PISO DURO absoluto: el banner rojo JAMÁS se renderiza en los primeros 12s
-   *  de ejecución de la app, sin importar qué diga el polling de salud.
-   *  Elimina cualquier falso positivo de arranque (backend lento, refresh
-   *  fallando mientras el motor sincroniza la base local). */
-  const APP_RUN_HARD_GRACE_MS = 12000;
-  const appStartRef = useRef(Date.now());
   /** Escritorio: ID de la carpeta cuyo escaneo está en curso (null = ninguno).
    *  Mientras no sea null, la tabla recarga progresivamente (UX "Analizando…"). */
   const [analyzingFolderId, setAnalyzingFolderId] = useState<number | null>(null);
@@ -56,11 +50,6 @@ export default function App() {
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [splashGone, setSplashGone] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
-  /** Ref espejo para leer el estado dentro del bucle de salud persistente. */
-  const backendReadyRef = useRef(backendReady);
-  useEffect(() => {
-    backendReadyRef.current = backendReady;
-  }, [backendReady]);
   const splashStartRef = useRef(Date.now());
   useEffect(() => {
     if (!backendReady) return; // sigue en el Splash: aún no hay sistema 100%
@@ -135,59 +124,46 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [backendReady]);
 
-  // Gracia de 30s para el banner ROJO: desde el arranque de la app y hasta que
+  // Gracia de 20s para el banner ROJO: desde el arranque de la app y hasta que
   // se agote este periodo, ESTÁ PROHIBIDO mostrar el error crítico, aunque la
   // conexión falle o el backend siga bloqueado procesando la base de datos
   // local. Dentro de la gracia se muestra el banner NEUTRO de sincronización.
   const [graceOver, setGraceOver] = useState(false);
   useEffect(() => {
     if (!window.smartSet?.isDesktop) return;
-    const t = window.setTimeout(() => setGraceOver(true), 30000);
+    const t = window.setTimeout(() => setGraceOver(true), 20000);
     return () => window.clearTimeout(t);
   }, []);
 
   // Sondeo ligero de salud: en cuanto Python responde 200 OK se libera la UI
   // (el refresh pesado de carpetas corre después, en segundo plano).
-  // Monitor de salud PERSISTENTE (solo escritorio): el sondeo NO se detiene
-  // nunca, para que el estado refleje la verdad del backend en cuanto cambia.
-  // Antes del arranque sondea cada 1.2s (desbloquea el Splash); una vez
-  // arrancado, cada 2s para que el banner rojo SOLO exista mientras el
-  // servidor realmente no responde. Cualquier respuesta OK ejecuta
-  // setBackendDown(false) INMEDIATAMENTE: el rojo desaparece en el mismo
-  // render, sin depender de foco de ventana, repaints ni Snipping Tool.
   useEffect(() => {
-    if (!window.smartSet?.isDesktop) return;
+    if (!window.smartSet?.isDesktop || backendReady) return;
     let alive = true;
-    let timer = 0;
-    const poll = async () => {
+    const poll = () => {
       if (!alive) return;
-      try {
-        const h = await api.health();
-        if (!alive) return;
-        if (h && h.status === "ok") {
-          connectedRef.current = true;
-          setStartingUp(false);
-          setBackendDown(false);
-          if (!backendReadyRef.current) {
-            // Primera respuesta OK: desbloquear Splash + carga inicial.
+      api
+        .health()
+        .then((h) => {
+          if (!alive) return;
+          if (h && h.status === "ok") {
+            connectedRef.current = true;
             setBackendReady(true);
+            setStartingUp(false);
             void refresh().catch(() => undefined);
+          } else {
+            window.setTimeout(poll, 1200);
           }
-        } else if (backendReadyRef.current) {
-          // Ya arrancado y el health devuelve algo raro: el servidor está mal.
-          setBackendDown(true);
-        }
-      } catch {
-        if (backendReadyRef.current) setBackendDown(true);
-      }
-      timer = window.setTimeout(poll, backendReadyRef.current ? 2000 : 1200);
+        })
+        .catch(() => {
+          if (alive) window.setTimeout(poll, 1200);
+        });
     };
-    timer = window.setTimeout(poll, 300);
+    window.setTimeout(poll, 300);
     return () => {
       alive = false;
-      window.clearTimeout(timer);
     };
-  }, [refresh]);
+  }, [backendReady, refresh]);
 
   // Mantiene el ref espejo sincronizado con el estado de arranque.
   useEffect(() => {
@@ -360,7 +336,7 @@ export default function App() {
           )}
 
           {/* Banner NEUTRO de carga (SOLO escritorio, dentro de la gracia de
-              30s): reemplaza al rojo mientras el backend sincroniza la base
+              20s): reemplaza al rojo mientras el backend sincroniza la base
               de datos de audio local tras el Splash. */}
           {backendDown && !graceOver && window.smartSet?.isDesktop && (
             <div className="mb-2 mt-1 shrink-0 px-3">
@@ -372,14 +348,10 @@ export default function App() {
           )}
 
           {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia de
-              30s Y tras el piso duro absoluto de 12s desde el arranque): el
-              error crítico real. Contenedor independiente en flujo normal,
-              justo encima de la barra de búsqueda y debajo de las tabs, con
-              margin-bottom — nunca tapa las pestañas. */}
-          {backendDown &&
-            graceOver &&
-            Date.now() - appStartRef.current >= APP_RUN_HARD_GRACE_MS &&
-            window.smartSet?.isDesktop && (
+              20s): el error crítico real. Contenedor independiente en flujo
+              normal, justo encima de la barra de búsqueda y debajo de las
+              tabs, con margin-bottom — nunca tapa las pestañas. */}
+          {backendDown && graceOver && window.smartSet?.isDesktop && (
             <div className="mb-2 mt-1 shrink-0 px-3">
               <div className="flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] font-semibold text-red-300">
                 <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />

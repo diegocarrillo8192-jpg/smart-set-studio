@@ -2,14 +2,13 @@
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from ..config import AUDIO_EXTENSIONS
 from ..models import Folder, ScanJob, Track
-from .analyzer import AnalysisResult, analyze_file, embedded_key_to_camelot, read_metadata
+from .analyzer import analyze_file, embedded_key_to_camelot, read_metadata
 from .artwork_cache import extract_embedded, get_cached, store_embedded
 from .id3_writer import write_camelot_id3
 from .settings import get_all_settings
@@ -17,12 +16,6 @@ from .settings import get_all_settings
 logger = logging.getLogger(__name__)
 
 _jobs: dict[int, ScanJob] = {}
-
-# Tiempo máximo de espera (segundos) para la tanda de análisis en paralelo: si
-# en este margen NO termina NINGÚN worker (archivo corrupto colgado), se marca
-# la tanda pendiente con valores vacíos y la cola continúa. Un solo archivo
-# problemático jamás debe detener el escaneo entero.
-ANALYSIS_TIMEOUT_SEC = 30
 
 
 def discover_audio_files(root: str) -> list[Path]:
@@ -142,73 +135,49 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
             # (mutagen) y re-extrae las carátulas vía force_meta en _upsert_track.
             db.commit()
 
-        # PASE 1 (rápido): el LISTADO ya lo creó add_folder (analyzed=False, sin
-        # tocar audio). Aquí se hidratan las filas con los metadatos reales de
-        # las etiquetas (title/artist/género/duración vía mutagen) y se
-        # precachean carátulas, sin esperar al análisis pesado (pase 2).
-        for file_path in files:
-            try:
-                mtime = os.path.getmtime(file_path)
-                _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Track fallido (poblamiento) %s: %s", file_path, exc)
-        try:
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            # Un commit inicial fallido no debe abortar el escaneo restante:
-            # se descarta la transacción y el pase 2 reintenta cada track.
-            db.rollback()
-            logger.warning("Commit de poblamiento inicial fallido: %s", exc)
-
-        # PASE 2 (SECUENCIAL + TIMEOUT POR TRACK): un solo archivo en memoria
-        # a la vez (sin saturación de RAM como el pool paralelo) y tolerancia
-        # estricta a fallos: cada análisis corre en un worker desechable con
-        # timeout; si un archivo está corrupto o tarda demasiado se marca con
-        # valores vacíos y la cola continúa al instante siguiente — un track
-        # problemático NUNCA detiene el escaneo ni congela la app.
-        # Las escrituras a SQLite van UNA POR UNA en este hilo (commit por
-        # track), con WAL + busy_timeout activos: sin "database is locked".
-        db_tracks = {
-            t.file_path: t
-            for t in db.query(Track).filter(Track.folder_id == folder.id).all()
-        }
         for idx, file_path in enumerate(files):
             if _job_cancelled(job):
                 break
-            track = db_tracks.get(str(file_path))
-            # Ya analizado (escaneo previo sin cambios): conservar datos.
-            if track is not None and not track.analyzed:
-                result = _analyze_with_timeout(str(file_path), track.embedded_bpm)
-                if result.error:
-                    track.has_error = True
-                    track.error_message = result.error
-                else:
-                    track.bpm = result.bpm
-                    track.musical_key = result.musical_key
-                    track.camelot_key = result.camelot_key
-                    # Fallback: tonalidad original de las etiquetas del archivo
-                    # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
-                    if not track.camelot_key and track.embedded_key:
-                        music, camelot = embedded_key_to_camelot(track.embedded_key)
-                        track.musical_key = track.musical_key or music
-                        track.camelot_key = camelot
-                    track.loudness_db = result.loudness_db
-                    track.spectral_centroid = result.spectral_centroid
-                    track.energy = result.energy
-                    track.has_error = False
-                    track.error_message = None
-                    # Escritorio: escribir la key detectada en el ID3 del MP3
-                    _tag_track_id3(db, str(file_path), result.camelot_key)
-                track.analyzed = True
+            try:
+                mtime = os.path.getmtime(file_path)
+                track = _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
+                if track is not None and not track.analyzed:
+                    result = analyze_file(str(file_path), embedded_bpm=track.embedded_bpm)
+                    if result.error:
+                        track.has_error = True
+                        track.error_message = result.error
+                        track.analyzed = True
+                    else:
+                        track.bpm = result.bpm
+                        track.musical_key = result.musical_key
+                        track.camelot_key = result.camelot_key
+                        # Fallback: tonalidad original de las etiquetas del archivo
+                        # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
+                        if not track.camelot_key and track.embedded_key:
+                            music, camelot = embedded_key_to_camelot(track.embedded_key)
+                            track.musical_key = track.musical_key or music
+                            track.camelot_key = camelot
+                        track.loudness_db = result.loudness_db
+                        track.spectral_centroid = result.spectral_centroid
+                        track.energy = result.energy
+                        track.analyzed = True
+                        track.has_error = False
+                        track.error_message = None
+                        # Escritorio: escribir la key detectada en el ID3 del MP3
+                        _tag_track_id3(db, str(file_path), result.camelot_key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Track fallido %s: %s", file_path, exc)
 
             job.processed_files = idx + 1
-            try:
-                db.commit()
-            except Exception as exc:  # noqa: BLE001
-                # Un commit individual no debe abortar el escaneo restante:
-                # se descarta la transacción y se reintenta en el siguiente.
-                db.rollback()
-                logger.warning("Commit intermedio del escaneo fallido: %s", exc)
+            if idx % 5 == 0:
+                try:
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    # Un commit intermedio no debe abortar el escaneo restante:
+                    # se descarta la transacción y se reintenta en el siguiente
+                    # lote (los tracks pendientes se re-insertan al re-procesar).
+                    db.rollback()
+                    logger.warning("Commit intermedio del escaneo fallido: %s", exc)
 
         db.commit()
         folder.last_scanned_at = job.started_at
@@ -223,39 +192,6 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
 
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
-
-
-def _analyze_with_timeout(file_path: str, embedded_bpm: float | None) -> AnalysisResult:
-    """Analiza UN track con worker desechable y timeout.
-
-    Secuencial (1 solo archivo en memoria a la vez) y tolerante: si el
-    archivo está corrupto o el análisis se cuelga, se devuelve un resultado
-    vacío tras `ANALYSIS_TIMEOUT_SEC` y el escaneo continúa. El worker
-    colgado es un hilo daemon: se descarta sin bloquear la salida de la app.
-    """
-    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssa-an")
-    try:
-        future = pool.submit(analyze_file, file_path, embedded_bpm)
-        try:
-            return future.result(timeout=ANALYSIS_TIMEOUT_SEC)
-        except TimeoutError:
-            logger.warning(
-                "Análisis abandonado por timeout (%ds): %s", ANALYSIS_TIMEOUT_SEC, file_path
-            )
-            return AnalysisResult(
-                bpm=None, musical_key=None, camelot_key=None,
-                loudness_db=None, spectral_centroid=None, energy=None,
-                error="timeout: archivo corrupto o demasiado lento",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return AnalysisResult(
-                bpm=None, musical_key=None, camelot_key=None,
-                loudness_db=None, spectral_centroid=None, energy=None,
-                error=str(exc),
-            )
-    finally:
-        # No esperar al worker: si quedó colgado, se descarta (daemon).
-        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _job_cancelled(job: ScanJob) -> bool:

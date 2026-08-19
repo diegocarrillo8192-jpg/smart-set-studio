@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Folder, ScanJob, SetItem, Track
 from ..schemas import FolderCreate, FolderOut, FolderRenameRequest, ScanJobOut
-from ..services.scanner import discover_audio_files, start_scan
+from ..services.scanner import start_scan
 
 router = APIRouter(prefix="/api/folders", tags=["folders"])
 
@@ -45,32 +45,9 @@ def add_folder(payload: FolderCreate, db: Session = Depends(get_db)):
 
     folder = Folder(path=str(path), name=path.name)
     db.add(folder)
-    db.flush()
-
-    # LISTADO INSTANTÁNEO (igual que la web): se registran TODOS los archivos
-    # de audio de golpe, SIN procesar audio — solo el walk del filesystem.
-    # Cada fila queda con analyzed=False y metadatos derivados del nombre de
-    # archivo; la UI renderiza la lista completa al instante con el badge
-    # "ANALIZANDO…". El hilo de escaneo rellena luego los datos reales
-    # (etiquetas ID3 + BPM/Key) fila a fila, sin bloquear nada.
-    files = discover_audio_files(str(path))
-    db.add_all(
-        Track(
-            file_path=str(f),
-            folder_id=folder.id,
-            title=Path(f).stem,
-            artist="",
-            album="",
-            duration_sec=0.0,
-            genre=folder.name,
-            # None fuerza la re-lectura de metadatos reales en el primer scan.
-            file_modified_at=None,
-        )
-        for f in files
-    )
     db.commit()
     db.refresh(folder)
-    return _serialize_folder(folder, len(files))
+    return _serialize_folder(folder, 0)
 
 
 @router.put("/{folder_id}", response_model=FolderOut)

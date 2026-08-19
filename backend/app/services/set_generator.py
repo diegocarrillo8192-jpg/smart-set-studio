@@ -178,16 +178,7 @@ def generate_set(
     target_secs = duration_min * 60.0
 
     # --- Pool de candidatos ---
-    # Filtro ESTRICTO: solo entran al motor tracks con BPM y Key válidos.
-    # Los tracks abortados por timeout del escáner (o sin BPM/Key detectado)
-    # quedan ANALIZADOS pero vacíos: jamás deben tocar el motor curador,
-    # que explotaría con valores nulos (500). Si no hay candidatos válidos
-    # se devuelve el error legible de siempre.
-    stmt = select(Track).where(
-        Track.analyzed.is_(True),
-        Track.bpm.is_not(None),
-        Track.camelot_key.is_not(None),
-    )
+    stmt = select(Track).where(Track.analyzed.is_(True), Track.camelot_key.is_not(None))
     if folder_ids:
         stmt = stmt.where(Track.folder_id.in_(folder_ids))
     pool: list[Track] = list(db.execute(stmt).scalars())
@@ -244,8 +235,7 @@ def generate_set(
 
         candidates = []
         for t in pool:
-            # Doble seguro: nada sin BPM/Key válidos entra a la selección.
-            if t.id in used or not t.camelot_key or not t.bpm or not _bpm_ok(t):
+            if t.id in used or not t.camelot_key or not _bpm_ok(t):
                 continue
             # Anti-alternancia de modo (8A→8B→8A): excluir el vaivén armónico
             if (
