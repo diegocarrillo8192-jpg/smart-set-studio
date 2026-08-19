@@ -13,6 +13,7 @@ import {
   estimateEnergy,
   generateDemoSet,
   parseAudioFile,
+  parseFilenameMetadata,
 } from "./lib/demoEngine";
 
 const BASE = "http://127.0.0.1:8765/api";
@@ -520,8 +521,13 @@ export async function webRegisterFolder(
     const res = audioResults[idx] ?? null;
     const tags = res?.tags ?? null;
     const base = name.replace(/\.[^.]+$/, "");
-    const title = tags?.title ?? base;
-    const artist = tags?.artist ?? "";
+    const fromName = parseFilenameMetadata(name);
+    // Nunca dejar el nombre de archivo completo en el título: algunos rippers
+    // copian el filename al ID3 title; si el tag coincide con el nombre del
+    // archivo se descarta y se usa la versión derivada ("artista - título").
+    const tagsTitle = tags?.title ? tags.title.replace(/\.[^.]+$/, "").trim() : "";
+    const title = tagsTitle && tagsTitle !== base ? tagsTitle : (fromName.title ?? base);
+    const artist = (tags?.artist ?? "").trim() || fromName.artist || "";
     const album = tags?.album ?? "";
     if (res?.coverUrl) artworkCache.set(rel.replace(/\\/g, "/").toLowerCase(), res.coverUrl);
     added.push({

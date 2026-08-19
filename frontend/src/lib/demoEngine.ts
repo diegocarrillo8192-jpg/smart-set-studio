@@ -35,10 +35,6 @@ export interface AudioTags {
   musicalKey: string | null;
 }
 
-function emptyTags(): AudioTags {
-  return { title: null, artist: null, album: null, genre: null, bpm: null, musicalKey: null };
-}
-
 function cleanText(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
@@ -233,7 +229,19 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
     buf = await file.arrayBuffer(); // un solo read: se reutiliza para parseBlob y BPM
     meta = await parseBlob(new Blob([buf], { type: file.type || "audio/mpeg" }));
   } catch {
-    const tags = emptyTags();
+    // Sin ID3 ni siquiera parseable: los metadatos salen del NOMBRE del archivo
+    // y el BPM se detecta igual por Web Audio (nunca un track "pelado").
+    const fromName = parseFilenameMetadata(file.name);
+    let fallbackBpm: number | null = null;
+    if (buf) fallbackBpm = await detectBpmFromBuffer(buf);
+    const tags: AudioTags = {
+      title: fromName.title,
+      artist: fromName.artist,
+      album: null,
+      genre: null,
+      bpm: fromName.bpm ?? fallbackBpm,
+      musicalKey: fromName.musicalKey,
+    };
     const duration_sec = await probeAudioDuration(file);
     return { tags, duration_sec, coverUrl: null };
   }
@@ -260,9 +268,15 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
     typeof fmtDuration === "number" && Number.isFinite(fmtDuration) && fmtDuration > 0 ? fmtDuration : null;
   if (!duration_sec) duration_sec = await probeAudioDuration(file);
 
+  const id3Title = cleanText(common.title);
+  const fileStem = file.name.replace(/\.[^.]+$/, "").trim();
+  const stemTitle = id3Title ? id3Title.replace(/\.[^.]+$/, "").trim() : "";
+  // ID3 title que replica el nombre de archivo → derivado por guiones
+  const title = id3Title && stemTitle && stemTitle !== fileStem ? id3Title : (fromName.title ?? id3Title);
+
   return {
     tags: {
-      title: cleanText(common.title) ?? fromName.title ?? null,
+      title,
       artist: cleanText(common.artist) ?? fromName.artist ?? null,
       album: cleanText(common.album),
       genre,

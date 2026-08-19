@@ -3,7 +3,6 @@ import { Library, Loader2, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api } from "./api";
 import SplashScreen from "./components/SplashScreen";
-import OrientationHint from "./components/OrientationHint";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
 import SetGenerator from "./components/SetGenerator";
@@ -197,11 +196,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-panel text-slate-200 md:overflow-hidden">
-      {/* Banner de orientación (solo móvil en vertical): se auto-oculta al
-          girar el teléfono o al descartarlo manualmente. */}
-      <OrientationHint />
-
+    <div className="flex h-full flex-col overflow-y-auto bg-panel text-slate-200">
       {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda.
           En móvil se apila en una sola columna: Deck A → Crossfader → Deck B. */}
       <div className="relative z-10 shrink-0 md:h-1/5 md:min-h-48 md:shadow-[0_18px_44px_rgba(0,0,0,0.6)]">
