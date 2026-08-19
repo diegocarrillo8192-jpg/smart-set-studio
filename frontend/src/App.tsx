@@ -50,6 +50,11 @@ export default function App() {
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [splashGone, setSplashGone] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
+  /** Ref espejo para leer el estado dentro del bucle de salud persistente. */
+  const backendReadyRef = useRef(backendReady);
+  useEffect(() => {
+    backendReadyRef.current = backendReady;
+  }, [backendReady]);
   const splashStartRef = useRef(Date.now());
   useEffect(() => {
     if (!backendReady) return; // sigue en el Splash: aún no hay sistema 100%
@@ -137,33 +142,46 @@ export default function App() {
 
   // Sondeo ligero de salud: en cuanto Python responde 200 OK se libera la UI
   // (el refresh pesado de carpetas corre después, en segundo plano).
+  // Monitor de salud PERSISTENTE (solo escritorio): el sondeo NO se detiene
+  // nunca, para que el estado refleje la verdad del backend en cuanto cambia.
+  // Antes del arranque sondea cada 1.2s (desbloquea el Splash); una vez
+  // arrancado, cada 2s para que el banner rojo SOLO exista mientras el
+  // servidor realmente no responde. Cualquier respuesta OK ejecuta
+  // setBackendDown(false) INMEDIATAMENTE: el rojo desaparece en el mismo
+  // render, sin depender de foco de ventana, repaints ni Snipping Tool.
   useEffect(() => {
-    if (!window.smartSet?.isDesktop || backendReady) return;
+    if (!window.smartSet?.isDesktop) return;
     let alive = true;
-    const poll = () => {
+    let timer = 0;
+    const poll = async () => {
       if (!alive) return;
-      api
-        .health()
-        .then((h) => {
-          if (!alive) return;
-          if (h && h.status === "ok") {
-            connectedRef.current = true;
+      try {
+        const h = await api.health();
+        if (!alive) return;
+        if (h && h.status === "ok") {
+          connectedRef.current = true;
+          setStartingUp(false);
+          setBackendDown(false);
+          if (!backendReadyRef.current) {
+            // Primera respuesta OK: desbloquear Splash + carga inicial.
             setBackendReady(true);
-            setStartingUp(false);
             void refresh().catch(() => undefined);
-          } else {
-            window.setTimeout(poll, 1200);
           }
-        })
-        .catch(() => {
-          if (alive) window.setTimeout(poll, 1200);
-        });
+        } else if (backendReadyRef.current) {
+          // Ya arrancado y el health devuelve algo raro: el servidor está mal.
+          setBackendDown(true);
+        }
+      } catch {
+        if (backendReadyRef.current) setBackendDown(true);
+      }
+      timer = window.setTimeout(poll, backendReadyRef.current ? 2000 : 1200);
     };
-    window.setTimeout(poll, 300);
+    timer = window.setTimeout(poll, 300);
     return () => {
       alive = false;
+      window.clearTimeout(timer);
     };
-  }, [backendReady, refresh]);
+  }, [refresh]);
 
   // Mantiene el ref espejo sincronizado con el estado de arranque.
   useEffect(() => {

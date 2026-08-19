@@ -2,13 +2,15 @@
 import logging
 import os
 import threading
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from ..config import AUDIO_EXTENSIONS
 from ..models import Folder, ScanJob, Track
-from .analyzer import analyze_file, embedded_key_to_camelot, read_metadata
+from .analyzer import AnalysisResult, analyze_file, embedded_key_to_camelot, read_metadata
 from .artwork_cache import extract_embedded, get_cached, store_embedded
 from .id3_writer import write_camelot_id3
 from .settings import get_all_settings
@@ -16,6 +18,12 @@ from .settings import get_all_settings
 logger = logging.getLogger(__name__)
 
 _jobs: dict[int, ScanJob] = {}
+
+# Tiempo máximo de espera (segundos) para la tanda de análisis en paralelo: si
+# en este margen NO termina NINGÚN worker (archivo corrupto colgado), se marca
+# la tanda pendiente con valores vacíos y la cola continúa. Un solo archivo
+# problemático jamás debe detener el escaneo entero.
+ANALYSIS_TIMEOUT_SEC = 30
 
 
 def discover_audio_files(root: str) -> list[Path]:
@@ -154,41 +162,90 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
             db.rollback()
             logger.warning("Commit de poblamiento inicial fallido: %s", exc)
 
-        # PASE 2 (lento): análisis audio por archivo → hidratación fila a fila.
-        # Los tracks ya existen (pase 1); cada commit intermedio actualiza solo
-        # lo que se terminó de analizar y la UI refresca la fila real.
+        # PASE 2 (PARALELO): análisis de audio con todos los hilos del CPU.
+        # Cada track es una tarea PURA (sin acceso a DB) en un pool de hilos:
+        # librosa libera el GIL en decodificación/FFT/numpy, así que los
+        # workers corren de verdad en paralelo (sin el coste frágil de spawn
+        # que tendrían procesos dentro del ejecutable empaquetado). Los writes
+        # a SQLite/ID3 siguen en ESTE hilo, aplicados según cada resultado llega.
+        workers = max(2, min(32, os.cpu_count() or 4))
+        db_tracks = {
+            t.file_path: t
+            for t in db.query(Track).filter(Track.folder_id == folder.id).all()
+        }
+        results: dict[str, AnalysisResult] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ssa-an") as pool:
+            futures: dict[Future, str] = {}
+            for file_path in files:
+                if _job_cancelled(job):
+                    break
+                track = db_tracks.get(str(file_path))
+                # Ya analizado (escaneo previo sin cambios): conservar datos.
+                if track is None or track.analyzed:
+                    continue
+                futures[pool.submit(analyze_file, str(file_path), track.embedded_bpm)] = str(file_path)
+
+            pending: set[Future] = set(futures)
+            while pending:
+                if _job_cancelled(job):
+                    break
+                done, undone = futures_wait(
+                    pending, timeout=ANALYSIS_TIMEOUT_SEC, return_when=FIRST_COMPLETED
+                )
+                if not done:
+                    # Un worker se colgó (archivo corrupto/lento): timeout global.
+                    # Esa tanda se marca con valores vacíos y la cola SIGUE.
+                    # Los hilos colgados quedan huérfanos (daemon) y no bloquean
+                    # nada más: jamás detienen el escaneo entero.
+                    for fp in undone:
+                        results[fp] = AnalysisResult(
+                            bpm=None, musical_key=None, camelot_key=None,
+                            loudness_db=None, spectral_centroid=None, energy=None,
+                            error="timeout: análisis abandonado (archivo corrupto o muy lento)",
+                        )
+                    pending.clear()
+                    break
+                for fut in done:
+                    fp = futures[fut]
+                    try:
+                        results[fp] = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        results[fp] = AnalysisResult(
+                            bpm=None, musical_key=None, camelot_key=None,
+                            loudness_db=None, spectral_centroid=None, energy=None,
+                            error=str(exc),
+                        )
+                pending -= done
+
+        # Aplicar resultados en el hilo principal: fila por fila según la UI
+        # los ve, con commits por lotes; un track problemático NO detiene nada.
         for idx, file_path in enumerate(files):
             if _job_cancelled(job):
                 break
-            try:
-                mtime = os.path.getmtime(file_path)
-                track = _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
-                if track is not None and not track.analyzed:
-                    result = analyze_file(str(file_path), embedded_bpm=track.embedded_bpm)
-                    if result.error:
-                        track.has_error = True
-                        track.error_message = result.error
-                        track.analyzed = True
-                    else:
-                        track.bpm = result.bpm
-                        track.musical_key = result.musical_key
-                        track.camelot_key = result.camelot_key
-                        # Fallback: tonalidad original de las etiquetas del archivo
-                        # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
-                        if not track.camelot_key and track.embedded_key:
-                            music, camelot = embedded_key_to_camelot(track.embedded_key)
-                            track.musical_key = track.musical_key or music
-                            track.camelot_key = camelot
-                        track.loudness_db = result.loudness_db
-                        track.spectral_centroid = result.spectral_centroid
-                        track.energy = result.energy
-                        track.analyzed = True
-                        track.has_error = False
-                        track.error_message = None
-                        # Escritorio: escribir la key detectada en el ID3 del MP3
-                        _tag_track_id3(db, str(file_path), result.camelot_key)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Track fallido %s: %s", file_path, exc)
+            track = db_tracks.get(str(file_path))
+            result = results.get(str(file_path))
+            if track is not None and result is not None:
+                if result.error:
+                    track.has_error = True
+                    track.error_message = result.error
+                else:
+                    track.bpm = result.bpm
+                    track.musical_key = result.musical_key
+                    track.camelot_key = result.camelot_key
+                    # Fallback: tonalidad original de las etiquetas del archivo
+                    # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
+                    if not track.camelot_key and track.embedded_key:
+                        music, camelot = embedded_key_to_camelot(track.embedded_key)
+                        track.musical_key = track.musical_key or music
+                        track.camelot_key = camelot
+                    track.loudness_db = result.loudness_db
+                    track.spectral_centroid = result.spectral_centroid
+                    track.energy = result.energy
+                    track.has_error = False
+                    track.error_message = None
+                    # Escritorio: escribir la key detectada en el ID3 del MP3
+                    _tag_track_id3(db, str(file_path), result.camelot_key)
+                track.analyzed = True
 
             job.processed_files = idx + 1
             if idx % 5 == 0:

@@ -9,7 +9,11 @@ from .camelot import KS_MAJOR, KS_MINOR, NOTE_NAMES, note_to_camelot
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 22050
-ANALYSIS_MAX_SEC = 90  # se analizan los primeros N segundos para velocidad
+# CARGA LIGERA: solo se decodifican los primeros 60 segundos del archivo
+# (librosa/soundfile leen únicamente ese rango de frames, no el track entero
+# en memoria). Basta de sobra para BPM, tonalidad y energía, y abarata el
+# análisis en paralelo de carpetas grandes.
+ANALYSIS_MAX_SEC = 60
 HOP_LENGTH = 512
 
 
