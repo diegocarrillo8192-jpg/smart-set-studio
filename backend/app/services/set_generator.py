@@ -193,10 +193,24 @@ def generate_set(
         current = next(t for t in pool if t.id == seed_track_id)
     else:
         start_desired = curve(0.0)
-        current = min(
-            pool,
-            key=lambda t: abs((t.energy or 5) - start_desired) if t.energy else 99,
-        )
+        # Semilla "principal": se ancla al BPM dominante de la biblioteca (la
+        # mediana del pool) en vez del track de menor energía. En colecciones
+        # heterogéneas, la menor energía suele ser un outlier a ~108 BPM que
+        # asfixia la cadena ±2.5% y deja sets de 3 tracks. La cercanía al BPM
+        # mediano manda; la energía solo empata dentro del mismo tempo.
+        bpms = sorted(t.bpm for t in pool if t.bpm)
+        median_bpm = bpms[len(bpms) // 2] if bpms else None
+        if median_bpm:
+            current = min(
+                pool,
+                key=lambda t: abs((t.bpm or median_bpm) - median_bpm)
+                + abs((t.energy or 5) - start_desired) * 0.05,
+            )
+        else:
+            current = min(
+                pool,
+                key=lambda t: abs((t.energy or 5) - start_desired) if t.energy else 99,
+            )
     used.add(current.id)
 
     sequence: list[Track] = [current]

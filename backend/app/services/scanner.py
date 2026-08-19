@@ -141,6 +141,12 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
             try:
                 mtime = os.path.getmtime(file_path)
                 track = _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
+                # Commit inmediato tras registrar el track: la pesada detección
+                # de BPM/clave corre SIN transacción SQLite abierta. El escáner
+                # jamás retiene el lock de escritura más de unos milisegundos,
+                # así que el Generador de Sets y el frontend nunca sufren
+                # "database is locked" mientras se escanea.
+                db.commit()
                 if track is not None and not track.analyzed:
                     result = analyze_file(str(file_path), embedded_bpm=track.embedded_bpm)
                     if result.error:
@@ -165,19 +171,17 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
                         track.error_message = None
                         # Escritorio: escribir la key detectada en el ID3 del MP3
                         _tag_track_id3(db, str(file_path), result.camelot_key)
+                    # Persistir el resultado del track de inmediato: commit por
+                    # track, nunca transacciones largas que bloqueen SQLite.
+                    db.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Track fallido %s: %s", file_path, exc)
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
 
             job.processed_files = idx + 1
-            if idx % 5 == 0:
-                try:
-                    db.commit()
-                except Exception as exc:  # noqa: BLE001
-                    # Un commit intermedio no debe abortar el escaneo restante:
-                    # se descarta la transacción y se reintenta en el siguiente
-                    # lote (los tracks pendientes se re-insertan al re-procesar).
-                    db.rollback()
-                    logger.warning("Commit intermedio del escaneo fallido: %s", exc)
 
         db.commit()
         folder.last_scanned_at = job.started_at
