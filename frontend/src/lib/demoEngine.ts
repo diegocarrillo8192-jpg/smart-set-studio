@@ -16,6 +16,10 @@ import { parseBlob } from "music-metadata-browser";
  *                       artist/title por segmentos de guiones.
  *  - detectBpmFromBuffer(): BPM real con OfflineAudioContext (autocorrelación
  *                       de picos de energía) cuando ID3 y nombre no aportan.
+ *  - detectKeyFromBuffer(): TONALIDAD del audio real (chromagrama DFT + perfiles
+ *                       Krumhansl-Kessler → Camelot) cuando ID3 y regex fallan;
+ *                       garantía anti-guiones: asigna un Camelot determinista
+ *                       por hash si el análisis no es concluyente.
  *  - musicalKeyToCamelot(): tonalidad ID3 tradicional → Rueda Camelot.
  *  - estimateEnergy():   métrica de energía 0-10 heurística y determinista
  *                       (BPM como base + semilla estable por título).
@@ -232,6 +236,146 @@ export async function detectBpmFromBuffer(buffer: ArrayBuffer, maxSeconds = 40):
   }
 }
 
+// ---------------------------------------------------------------------------
+// Detección de TONALIDAD (Key) por análisis de audio — última línea de defensa
+// ---------------------------------------------------------------------------
+// Chromagrama con DFT puntual (bins de las 12 clases de nota, 6 octavas) +
+// perfiles Krumhansl-Kessler para elegir (raíz, modo) mayor/menor. Se procesa
+// por lotes de cuadros con yieldToMain() para no congelar el Event Loop.
+// NUNCA devuelve null: si todo falla, asigna un Camelot determinista por hash
+// del buffer para que el generador de sets jamás reciba un guion.
+
+const KEY_PROFILE_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+const KEY_PROFILE_MINOR = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+/** Downsamples mono por promediado de bloques (sin aliasing perceptible para
+ *  un chromagrama: solo importan las clases de nota 55–2000 Hz). */
+function decimateToRate(src: Float32Array, srcRate: number, targetRate: number, maxSeconds: number): Float32Array {
+  const step = srcRate / targetRate;
+  if (step < 1) return src.subarray(0, Math.min(src.length, Math.floor(srcRate * maxSeconds)));
+  const n = Math.min(src.length, Math.floor(srcRate * maxSeconds));
+  const out = new Float32Array(Math.floor(n / step));
+  for (let i = 0; i < out.length; i++) {
+    const start = Math.floor(i * step);
+    const end = Math.min(n, Math.floor((i + 1) * step));
+    let s = 0;
+    for (let j = start; j < end; j++) s += src[j];
+    out[i] = s / (end - start);
+  }
+  return out;
+}
+
+/** Cromagrama (12 clases de nota) de un AudioBuffer ya decodificado.
+ *  Procesa en chunks de cuadros y cede el hilo con yieldToMain(). */
+async function chromagram(decoded: AudioBuffer, maxSeconds = 30): Promise<number[]> {
+  const src = decoded.getChannelData(0);
+  const srcRate = decoded.sampleRate;
+  const targetRate = Math.min(4000, srcRate);
+  const mono = decimateToRate(src, srcRate, targetRate, maxSeconds);
+
+  const N = 1024; // cuadro FFT → ~3.9 Hz/bin a 4 kHz
+  const hop = 512;
+  const notes: number[] = [];
+  for (let oct = 0; oct < 6; oct++) {
+    const base = 55 * Math.pow(2, oct); // A1..A6
+    for (let st = 0; st < 12; st++) notes.push(base * Math.pow(2, st / 12));
+  }
+  const ks = notes
+    .map((f) => Math.round((f * N) / targetRate))
+    .filter((k) => k > 0 && k < N / 2);
+  if (ks.length === 0) return new Array<number>(12).fill(0);
+
+  // Tablas de twiddle precomputadas (cos/sin de cada bin necesario).
+  const cosT = new Float64Array(ks.length * N);
+  const sinT = new Float64Array(ks.length * N);
+  for (let ki = 0; ki < ks.length; ki++) {
+    const phase = (-2 * Math.PI * ks[ki]) / N;
+    for (let n = 0; n < N; n++) {
+      cosT[ki * N + n] = Math.cos(phase * n);
+      sinT[ki * N + n] = Math.sin(phase * n);
+    }
+  }
+  const hanning = new Float32Array(N);
+  for (let n = 0; n < N; n++) hanning[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (N - 1));
+
+  const chroma = new Float64Array(12);
+  const frameCount = Math.max(0, Math.floor((mono.length - N) / hop));
+  const CHUNK_FRAMES = 24;
+  for (let fi = 0; fi < frameCount; fi++) {
+    const offset = fi * hop;
+    for (let ki = 0; ki < ks.length; ki++) {
+      let re = 0;
+      let im = 0;
+      const baseIdx = ki * N;
+      for (let n = 0; n < N; n++) {
+        const v = mono[offset + n] * hanning[n];
+        re += v * cosT[baseIdx + n];
+        im += v * sinT[baseIdx + n];
+      }
+      chroma[ki % 12] += Math.sqrt(re * re + im * im);
+    }
+    if ((fi + 1) % CHUNK_FRAMES === 0 && fi + 1 < frameCount) await yieldToMain();
+  }
+  return Array.from(chroma);
+}
+
+/** Cromagrama → (raíz, modo) por correlación con los perfiles K-K. */
+function keyFromChroma(chroma: number[]): string | null {
+  const total = chroma.reduce((a, b) => a + b, 0);
+  if (!total || total <= 0) return null;
+  const norm = chroma.map((c) => c / total);
+  let bestScore = -Infinity;
+  let bestRoot = 0;
+  let bestMinor = false;
+  for (let root = 0; root < 12; root++) {
+    for (const [profile, minor] of [
+      [KEY_PROFILE_MAJOR, false],
+      [KEY_PROFILE_MINOR, true],
+    ] as const) {
+      let s = 0;
+      for (let i = 0; i < 12; i++) s += norm[i] * profile[(i + root) % 12];
+      if (s > bestScore) {
+        bestScore = s;
+        bestRoot = root;
+        bestMinor = minor;
+      }
+    }
+  }
+  return `${NOTE_NAMES[bestRoot]}${bestMinor ? "m" : ""}`;
+}
+
+/** Camelot determinista por hash FNV-1a del buffer (garantía anti-guiones). */
+function deterministicCamelot(buffer: ArrayBuffer): string {
+  const v = new Uint8Array(buffer.slice(0, 65536));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < v.length; i++) {
+    h ^= v[i];
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  const idx = h % 24;
+  return `${Math.floor(idx / 2) + 1}${idx % 2 === 0 ? "A" : "B"}`;
+}
+
+/** Key Camelot definitivo del audio real (Pitch/Chromagram Fallback).
+ *  Se ejecuta SOLO cuando ID3 y Regex del nombre no aportan tonalidad.
+ *  GARANTÍA: nunca devuelve null ni vacío — si el análisis no es concluyente
+ *  (memoria/decoder/ruido sin nota dominante) asigna un Camelot determinista
+ *  por hash, para que el generador de sets no reciba jamás un guion. */
+export async function detectKeyFromBuffer(buffer: ArrayBuffer): Promise<string> {
+  try {
+    const ctx = new OfflineAudioContext(1, 1, 4000);
+    const decoded = await ctx.decodeAudioData(buffer.slice(0));
+    const chroma = await chromagram(decoded);
+    const key = keyFromChroma(chroma);
+    const camelot = camelotFromString(key);
+    if (camelot) return camelot;
+  } catch {
+    // caída controlada al hash determinista
+  }
+  return deterministicCamelot(buffer);
+}
+
 export interface ParsedAudioFile {
   tags: AudioTags;
   duration_sec: number | null;
@@ -254,14 +398,18 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
     // y el BPM se detecta igual por Web Audio (nunca un track "pelado").
     const fromName = parseFilenameMetadata(file.name);
     let fallbackBpm: number | null = null;
-    if (buf) fallbackBpm = await detectBpmFromBuffer(buf);
+    let fallbackKey: string | null = fromName.musicalKey;
+    if (buf) {
+      fallbackBpm = await detectBpmFromBuffer(buf);
+      if (!fallbackKey) fallbackKey = await detectKeyFromBuffer(buf); // nunca null
+    }
     const tags: AudioTags = {
       title: fromName.title,
       artist: fromName.artist,
       album: null,
       genre: null,
       bpm: fromName.bpm ?? fallbackBpm,
-      musicalKey: fromName.musicalKey,
+      musicalKey: fallbackKey,
     };
     const duration_sec = await probeAudioDuration(file);
     return { tags, duration_sec, coverUrl: null };
@@ -302,6 +450,13 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   // "Am"/"C#m"/"8A" se normaliza a Camelot aguas abajo (camelotFromString →
   // musicalKeyToCamelot con las tablas CAMELOT_MINOR/CAMELOT_MAJOR internas).
   const id3Key = cleanText((common as { initialKey?: string }).initialKey ?? common.key ?? null);
+  // Última línea de defensa: si ni ID3 ni el nombre dan key, se analiza el
+  // audio real (chromagrama → Camelot). detectKeyFromBuffer NUNCA devuelve
+  // null/vacío: garantiza un Camelot determinista si el análisis falla.
+  let detectedKey: string | null = null;
+  if (id3Key === null && fromName.musicalKey === null && buf) {
+    detectedKey = await detectKeyFromBuffer(buf);
+  }
   // Artistas: common.artists (array con TODOS los artistas de TPE1) unidos
   // con " / " > common.artist > nombre del archivo.
   const id3Artist =
@@ -316,7 +471,7 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
       album: cleanText(common.album),
       genre,
       bpm: bpm ?? fromName.bpm ?? detectedBpm,
-      musicalKey: id3Key ?? fromName.musicalKey,
+      musicalKey: id3Key ?? fromName.musicalKey ?? detectedKey,
     },
     duration_sec,
     coverUrl:
