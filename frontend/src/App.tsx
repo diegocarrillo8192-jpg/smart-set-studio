@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Library, Loader2, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
-import { api } from "./api";
+import { api, subscribeWebTracks } from "./api";
 import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
@@ -86,6 +86,10 @@ export default function App() {
       throw err;
     }
   }, []);
+
+  // Demo web: el análisis por lotes corre en segundo plano; al terminar cada
+  // lote se refresca la biblioteca para mostrar el progreso en tiempo real.
+  useEffect(() => subscribeWebTracks(() => void refresh()), [refresh]);
 
   // Gracias de arranque: 8s sin alerta roja. Si al agotarse el backend aún no
   // respondió (primer refresh fallido), se muestra la alerta de reconexión.

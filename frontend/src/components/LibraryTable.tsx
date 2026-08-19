@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AudioLines, Disc2, Disc3, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
+import { AudioLines, Disc2, Disc3, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
 import type { Track } from "../types";
 import { api, prefetchArtworks } from "../api";
 import { fmtBpm } from "../lib/format";
@@ -315,6 +315,11 @@ export default function LibraryTable({
                     <CoverThumb track={t} size={26} />
                     <span className="min-w-0 flex-1 truncate">
                       {t.title}
+                      {!t.analyzed && (
+                        <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-violet-300">
+                          <Loader2 size={10} className="animate-spin" /> Analizando…
+                        </span>
+                      )}
                       {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
                     </span>
                     {playingTrackIds.includes(t.id) && (

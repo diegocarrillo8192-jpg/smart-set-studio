@@ -14,6 +14,7 @@ import {
   generateDemoSet,
   parseAudioFile,
   parseFilenameMetadata,
+  yieldToMain,
 } from "./lib/demoEngine";
 
 const BASE = "http://127.0.0.1:8765/api";
@@ -510,55 +511,115 @@ export async function webRegisterFolder(
   }
 
   const seen = new Set(webTracks.map((t) => t.file_path.toLowerCase()));
-  const audioResults = await Promise.all(audio.map((f) => parseAudioFile(f)));
-  const added: Track[] = [];
-  audio.forEach((f, idx) => {
+  const pending: File[] = [];
+  audio.forEach((f) => {
     const name = f.name ?? "";
     if (!name) return;
     const rel = safeRelPath(f);
     if (seen.has(rel.toLowerCase())) return;
     seen.add(rel.toLowerCase());
-    const res = audioResults[idx] ?? null;
-    const tags = res?.tags ?? null;
+    pending.push(f);
+    // Placeholder INMEDIATO: la carpeta y los tracks aparecen al instante en
+    // la tabla (con estado "Analizando…"); los metadatos ID3/detección BPM se
+    // completan en segundo plano por lotes sin bloquear el hilo principal.
     const base = name.replace(/\.[^.]+$/, "");
     const fromName = parseFilenameMetadata(name);
-    // Nunca dejar el nombre de archivo completo en el título: algunos rippers
-    // copian el filename al ID3 title; si el tag coincide con el nombre del
-    // archivo se descarta y se usa la versión derivada ("artista - título").
-    const tagsTitle = tags?.title ? tags.title.replace(/\.[^.]+$/, "").trim() : "";
-    const title = tagsTitle && tagsTitle !== base ? tagsTitle : (fromName.title ?? base);
-    const artist = (tags?.artist ?? "").trim() || fromName.artist || "";
-    const album = tags?.album ?? "";
-    if (res?.coverUrl) artworkCache.set(rel.replace(/\\/g, "/").toLowerCase(), res.coverUrl);
-    added.push({
+    webTracks.push({
       id: --webTrackSeq,
       file_path: rel,
       folder_id: folder!.id,
       folder_name: root,
-      title,
-      artist,
-      album,
-      genre: tags?.genre ?? root, // carpeta padre (ej. "Progressive") como género por defecto
-      duration_sec: res?.duration_sec ?? null,
-      bpm: tags?.bpm ?? null,
-      embedded_bpm: tags?.bpm ?? null,
-      musical_key: tags?.musicalKey ?? null,
-      camelot_key: camelotFromString(tags?.musicalKey ?? null),
-      embedded_key: tags?.musicalKey ?? null,
-      energy: estimateEnergy({ bpm: tags?.bpm ?? null, title }),
+      title: fromName.title ?? base,
+      artist: fromName.artist ?? "",
+      album: root,
+      genre: root, // carpeta padre (ej. "Progressive") como género por defecto
+      duration_sec: null,
+      bpm: fromName.bpm,
+      embedded_bpm: null,
+      musical_key: fromName.musicalKey,
+      camelot_key: camelotFromString(fromName.musicalKey),
+      embedded_key: null,
+      energy: estimateEnergy({ bpm: fromName.bpm, title: fromName.title ?? base }),
       loudness_db: null,
       spectral_centroid: null,
-      analyzed: true,
+      analyzed: false,
       has_error: false,
       error_message: null,
     });
   });
-  if (added.length > 0) {
-    webTracks.push(...added);
-    folder.track_count = webTracks.filter((t) => t.folder_id === folder!.id).length;
-  }
+  folder.track_count = webTracks.filter((t) => t.folder_id === folder!.id).length;
   saveWebStore();
+  if (pending.length > 0) void analyzeWebTracks(pending, folder.id);
   return root;
+}
+
+// ---------------------------------------------------------------------------
+// Análisis web en segundo plano por lotes (sin congelar la UI)
+// ---------------------------------------------------------------------------
+// Cada lote de "WEB_ANALYSIS_BATCH_SIZE" archivos se procesa (ID3 + duración +
+// BPM Web Audio) y después se cede el hilo principal con yieldToMain() para
+// que el navegador pinte el progreso y siga respondiendo a la entrada. Cada
+// lote terminado notifica a la UI (subscribeWebTracks) y refresca la tabla.
+
+const WEB_ANALYSIS_BATCH_SIZE = 4;
+const webTracksListeners = new Set<() => void>();
+
+/** Suscribe a los avances del análisis web; devuelve el unsubscribe. */
+export function subscribeWebTracks(listener: () => void): () => void {
+  webTracksListeners.add(listener);
+  return () => {
+    webTracksListeners.delete(listener);
+  };
+}
+
+function notifyWebTracksChanged(): void {
+  for (const listener of Array.from(webTracksListeners)) listener();
+}
+
+async function analyzeWebTracks(files: File[], folderId: number): Promise<void> {
+  for (let i = 0; i < files.length; i += WEB_ANALYSIS_BATCH_SIZE) {
+    await analyzeWebChunk(files.slice(i, i + WEB_ANALYSIS_BATCH_SIZE), folderId);
+    if (i + WEB_ANALYSIS_BATCH_SIZE < files.length) await yieldToMain();
+  }
+}
+
+async function analyzeWebChunk(files: File[], folderId: number): Promise<void> {
+  const results = await Promise.all(files.map((f) => parseAudioFile(f)));
+  let changed = false;
+  files.forEach((f, idx) => {
+    const rel = safeRelPath(f);
+    const track = webTracks.find((t) => t.file_path === rel && t.folder_id === folderId);
+    if (!track) return;
+    const res = results[idx] ?? null;
+    const tags = res?.tags ?? null;
+    if (res?.coverUrl) artworkCache.set(rel.replace(/\\/g, "/").toLowerCase(), res.coverUrl);
+    const id3Title = tags?.title;
+    const fileStem = f.name.replace(/\.[^.]+$/, "").trim();
+    const cleanTitle = id3Title ? id3Title.replace(/\.[^.]+$/, "").trim() : "";
+    // Nunca dejar el nombre de archivo completo como título (rippers copian
+    // el filename al ID3 title); se conserva el derivado por guiones.
+    if (id3Title && cleanTitle && cleanTitle !== fileStem) track.title = id3Title;
+    if (tags?.artist) track.artist = tags.artist;
+    if (tags?.album) track.album = tags.album;
+    if (tags?.genre) track.genre = tags.genre;
+    if (res?.duration_sec) track.duration_sec = res.duration_sec;
+    if (tags?.bpm) {
+      track.bpm = tags.bpm;
+      track.embedded_bpm = tags.bpm;
+    }
+    if (tags?.musicalKey) {
+      track.musical_key = tags.musicalKey;
+      track.embedded_key = tags.musicalKey;
+    }
+    track.camelot_key = camelotFromString(track.musical_key ?? tags?.musicalKey ?? null);
+    track.energy = estimateEnergy({ bpm: track.bpm, title: track.title });
+    track.analyzed = true;
+    changed = true;
+  });
+  if (changed) {
+    saveWebStore();
+    notifyWebTracksChanged();
+  }
 }
 
 function webListTracks(params: Record<string, string | number | boolean | undefined>): Track[] {

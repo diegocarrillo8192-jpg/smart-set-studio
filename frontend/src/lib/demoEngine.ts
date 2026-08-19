@@ -22,6 +22,12 @@ import { parseBlob } from "music-metadata-browser";
 
 const MAX_TRACKS_IN_SET = 40;
 
+/** Cede el hilo principal al navegador (pintado de la UI y entrada del
+ *  usuario) entre lotes de análisis. Nunca bloquea el event loop. */
+export function yieldToMain(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 10));
+}
+
 // ---------------------------------------------------------------------------
 // Lectura de etiquetas (ID3v2/MP4) con music-metadata-browser
 // ---------------------------------------------------------------------------
@@ -39,12 +45,14 @@ function cleanText(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
-/** Acepta Camelot directo ("10A"/"8B") o nota tradicional ("F#m"/"Ab") y
- *  devuelve SIEMPRE el formato Camelot ("10A"), o null si no reconoce. */
+/** Acepta Camelot directo ("10A"/"8B"/"12B") o nota tradicional ("F#m"/"Ab")
+ *  y devuelve SIEMPRE el formato Camelot ("10A"), o null si no reconoce.
+ *  Case-insensitive y tolerante a cualquier letra sufijo (convenciones de
+ *  DJ pools usan "12B", "10x", "2a", etc.). */
 export function camelotFromString(key: string | null | undefined): string | null {
   if (!key) return null;
   const s = String(key).trim();
-  const direct = s.match(/^(\d{1,2})\s*([AB])$/i);
+  const direct = s.match(/^(\d{1,2})\s*([A-Za-z])$/i);
   if (direct) {
     const n = Number(direct[1]);
     return n >= 1 && n <= 12 ? `${n}${direct[2].toUpperCase()}` : null;
@@ -72,7 +80,7 @@ export function parseFilenameMetadata(name: string): {
     title: null,
   };
 
-  const camelot = name.match(/\b(1[0-2]|[1-9])\s*([AB])\b/i);
+  const camelot = name.match(/\b(1[0-2]|[1-9])[A-Za-z]\b/i);
   if (camelot) {
     const n = Number(camelot[1]);
     if (n >= 1 && n <= 12) out.musicalKey = `${n}${camelot[2].toUpperCase()}`;
@@ -273,6 +281,10 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   const stemTitle = id3Title ? id3Title.replace(/\.[^.]+$/, "").trim() : "";
   // ID3 title que replica el nombre de archivo → derivado por guiones
   const title = id3Title && stemTitle && stemTitle !== fileStem ? id3Title : (fromName.title ?? id3Title);
+  // Key desde etiquetas ID3 estándar: music-metadata expone TKEY como
+  // common.key (y en algunos builds como common.initialKey). Se comprueban
+  // AMBOS antes de caer al fallback del nombre del archivo.
+  const id3Key = cleanText(common.key ?? (common as { initialKey?: string }).initialKey ?? null);
 
   return {
     tags: {
@@ -281,7 +293,7 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
       album: cleanText(common.album),
       genre,
       bpm: bpm ?? fromName.bpm ?? detectedBpm,
-      musicalKey: cleanText(common.key) ?? fromName.musicalKey,
+      musicalKey: id3Key ?? fromName.musicalKey,
     },
     duration_sec,
     coverUrl:
