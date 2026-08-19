@@ -20,6 +20,9 @@ interface Props {
   /** Cada vez que cambia este número (desde App.tsx via libraryVersion),
    *  la tabla recarga la lista de canciones automáticamente. */
   refreshKey: number;
+  /** Escritorio: carpeta cuyo escaneo está en curso. Mientras no sea null, las
+   *  filas de esa carpeta muestran "Analizando…" aunque ya tengan metadatos. */
+  analyzingFolderId: number | null;
 }
 
 const CAMELOT_CODES = Array.from({ length: 12 }, (_, i) => [`${i + 1}A`, `${i + 1}B`]).flat();
@@ -60,6 +63,7 @@ export default function LibraryTable({
   onSetCompatibleWith,
   playingTrackIds,
   refreshKey,
+  analyzingFolderId,
 }: Props) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
@@ -315,7 +319,7 @@ export default function LibraryTable({
                     <CoverThumb track={t} size={26} />
                     <span className="min-w-0 flex-1 truncate">
                       {t.title}
-                      {!t.analyzed && (
+                      {(!t.analyzed || (analyzingFolderId !== null && t.folder_id === analyzingFolderId)) && (
                         <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-violet-300">
                           <Loader2 size={10} className="animate-spin" /> Analizando…
                         </span>

@@ -30,6 +30,9 @@ export default function App() {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [backendDown, setBackendDown] = useState(false);
+  /** Escritorio: ID de la carpeta cuyo escaneo está en curso (null = ninguno).
+   *  Mientras no sea null, la tabla recarga progresivamente (UX "Analizando…"). */
+  const [analyzingFolderId, setAnalyzingFolderId] = useState<number | null>(null);
   /** Período de gracia al arrancar la app de escritorio (8s): durante este
    *  tiempo no se muestra la alerta roja de desconexión, solo el indicador
    *  "Iniciando motor de audio…". En la web NO aplica (modo offline). */
@@ -98,6 +101,15 @@ export default function App() {
   // Demo web: el análisis por lotes corre en segundo plano; al terminar cada
   // lote se refresca la biblioteca para mostrar el progreso en tiempo real.
   useEffect(() => subscribeWebTracks(() => void refresh()), [refresh]);
+
+  // Escritorio: durante un escaneo de carpeta, recarga la tabla cada 2s para
+  // ir mostrando las filas recién insertadas por el backend ("Analizando…"
+  // hasta que cada track quede analizado) sin esperar al final del escaneo.
+  useEffect(() => {
+    if (!window.smartSet?.isDesktop || analyzingFolderId === null) return;
+    const t = window.setInterval(() => setLibraryVersion((v) => v + 1), 2000);
+    return () => window.clearInterval(t);
+  }, [analyzingFolderId]);
 
   // Timeout de seguridad (15s): si Python no levanta, se cierra el Splash
   // igualmente y la alerta roja indica un fallo REAL del sistema (el Splash ya
@@ -279,6 +291,7 @@ export default function App() {
           activeSetId={activeSetId}
           selectedFolderId={selectedFolderId}
           onFoldersChanged={refresh}
+          onScanActive={setAnalyzingFolderId}
           onSelectFolder={setSelectedFolderId}
           onSelectSet={selectSet}
           onDeleteSet={deleteSet}
@@ -367,6 +380,7 @@ export default function App() {
                   onSetCompatibleWith={setCompatibleWith}
                   playingTrackIds={playingTrackIds}
                   refreshKey={libraryVersion}
+                  analyzingFolderId={analyzingFolderId}
                 />
               </>
             ) : (

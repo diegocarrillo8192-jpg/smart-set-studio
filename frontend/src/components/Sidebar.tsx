@@ -22,6 +22,9 @@ interface Props {
   activeSetId: number | null;
   selectedFolderId: number | null;
   onFoldersChanged: () => void;
+  /** Escritorio: avisa a App cuando una carpeta entra/sale de escaneo para que
+   *  la tabla recargue progresivamente (UX "Analizando…"). */
+  onScanActive: (id: number | null) => void;
   onSelectFolder: (id: number | null) => void;
   onSelectSet: (set: DJSet) => void;
   onDeleteSet: (set: DJSet) => void;
@@ -131,6 +134,7 @@ export default function Sidebar({
   activeSetId,
   selectedFolderId,
   onFoldersChanged,
+  onScanActive,
   onSelectFolder,
   onSelectSet,
   onDeleteSet,
@@ -223,6 +227,9 @@ export default function Sidebar({
     setError("");
     await api.scanFolder(folder.id, force);
     setScanningIds((prev) => new Set(prev).add(folder.id));
+    // Progresivo: mientras escanea, App recarga la tabla por su cuenta para
+    // mostrar las filas recién insertadas con "Analizando…" (igual que web).
+    onScanActive(folder.id);
     pollRef.current[folder.id] = window.setInterval(async () => {
       try {
         const status = await api.scanStatus(folder.id);
@@ -235,11 +242,13 @@ export default function Sidebar({
               next.delete(folder.id);
               return next;
             });
+            onScanActive(null);
             onFoldersChanged();
           }
         }
       } catch {
         clearInterval(pollRef.current[folder.id]);
+        onScanActive(null);
       }
     }, 1500);
   };

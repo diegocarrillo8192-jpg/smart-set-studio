@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
@@ -49,20 +49,27 @@ if (!gotSingleInstanceLock) {
   });
 
   app.on("window-all-closed", () => {
+    quitting = true;
+    killBackend();
     if (process.platform !== "darwin") app.quit();
   });
 
   app.on("before-quit", () => {
-    if (backendProc) {
-      backendProc.kill();
-      backendProc = null;
-    }
+    quitting = true;
+    killBackend();
   });
 
   // Doble seguro de cierre limpio: asegura que el binario Python (ssa-backend)
   // no quede huérfano si el usuario sale con la app (will-quit es lo último).
   process.on("exit", () => {
-    if (backendProc) backendProc.kill();
+    if (backendProc && backendProc.pid) {
+      try {
+        backendProc.kill();
+      } catch {}
+      try {
+        execSync(`taskkill /PID ${backendProc.pid} /F /T`, { windowsHide: true, stdio: "ignore" });
+      } catch {}
+    }
   });
 }
 
@@ -94,13 +101,66 @@ function waitForUrl(url, timeoutMs = 30000) {
 
 const waitForBackend = () => waitForUrl(`${BACKEND_URL}/api/health`);
 
+/** Limpieza de puerto: mata agresivamente cualquier proceso que esté ocupando
+ *  "port" (zombies de sesiones anteriores de ssa-backend que dejan
+ *  127.0.0.1:8765 tomado y provocan la alerta roja de desconexión del motor). */
+function killPortProcesses(port) {
+  if (process.platform !== "win32") return;
+  try {
+    const netstat = execSync("netstat -ano -p tcp", { encoding: "utf8", windowsHide: true });
+    const pids = new Set();
+    for (const line of netstat.split(/\r?\n/)) {
+      const m = line.trim().match(/^TCP\s+(\S+):(\d+)\s+\S+\s+\S+\s+(\d+)$/i);
+      if (m && Number(m[2]) === port) pids.add(m[3]);
+    }
+    for (const pid of pids) {
+      try {
+        execSync(`taskkill /PID ${pid} /F /T`, { windowsHide: true, stdio: "ignore" });
+        console.log(`[smart-set] Puerto ${port} liberado: proceso zombie PID ${pid} terminado`);
+      } catch (err) {
+        console.warn(`[smart-set] No se pudo terminar el PID ${pid} (${err.message})`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[smart-set] No se pudo inspeccionar el puerto ${port}: ${err.message}`);
+  }
+}
+
+/** Terminación FORZADA del backend: mata el árbol completo de procesos (no
+ *  solo el hijo directo) para que ningún binario Python quede huérfano. */
+function killBackend() {
+  const proc = backendProc;
+  backendProc = null;
+  if (!proc || proc.killed || !proc.pid) return;
+  try {
+    proc.kill();
+  } catch {}
+  try {
+    execSync(`taskkill /PID ${proc.pid} /F /T`, { windowsHide: true, stdio: "ignore" });
+  } catch {}
+  console.log(`[smart-set] Backend terminado por la fuerza (PID ${proc.pid})`);
+}
+
 // Estado del backend para saber si una salida del proceso es una caída real
 // (reiniciar) o un apagado normal de la app (no reiniciar).
 let backendReady = false;
 let backendRestarts = 0;
 const MAX_BACKEND_RESTARTS = 2;
+/** true cuando la app está saliendo: el 'exit' del backend por kill() propio
+ *  no debe programar un reinicio (la app ya no existe en 800ms). */
+let quitting = false;
 
 async function startBackend() {
+  // Limpieza de zombies ANTES de spawnear (solo en el instalador; en dev el
+  // backend lo lanza `npm run dev`): si una sesión anterior dejó un proceso
+  // huérfano en 8765, el healthcheck inicial lo daría por "vivo" y el nuevo
+  // spawn fallaría al bindear el puerto (alerta roja permanente).
+  if (app.isPackaged) {
+    killPortProcesses(BACKEND_PORT);
+    // Margen para que Windows libere el socket tras el taskkill.
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
   if (await waitForBackend(1500)) {
     console.log("[smart-set] Backend ya estaba corriendo");
     return;
@@ -197,7 +257,7 @@ async function startBackend() {
       // vez (máx. 2 veces totales): el healthcheck lo confirma antes de usar.
       // Si la app está saliendo (before-quit ya mató el proceso), no se
       // reinicia nada.
-      if (backendReady && backendRestarts < MAX_BACKEND_RESTARTS) {
+      if (backendReady && !quitting && backendRestarts < MAX_BACKEND_RESTARTS) {
         backendReady = false;
         backendRestarts += 1;
         const proc = backendProc;
