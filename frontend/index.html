@@ -5,9 +5,91 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI Smart Set Architect</title>
     <link rel="icon" type="image/png" href="/icon.png" />
+    <style>
+      /* Splash estático: pinta en el PRIMER parseo del HTML, antes de que se
+         descargue/ejecute el bundle de React, con el MISMO diseño que el
+         SplashScreen de React (logo + ring + título). React monta y reemplaza
+         #root sin corte visual; el timer de 2s lo controla la app. */
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: #0f1420;
+        font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+      }
+      #boot-splash .col {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 24px;
+      }
+      #boot-splash .wrap {
+        position: relative;
+      }
+      #boot-splash .ring {
+        position: absolute;
+        inset: 0;
+        border-radius: 9999px;
+        border: 2px solid rgba(139, 92, 246, 0.55);
+        animation: boot-ring 2s ease-out both;
+      }
+      #boot-splash img {
+        position: relative;
+        display: block;
+        width: 112px;
+        height: 112px;
+        border-radius: 26px;
+        object-fit: cover;
+        box-shadow: 0 0 40px rgba(139, 92, 246, 0.35);
+        animation: boot-logo 1.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      #boot-splash h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.34em;
+        text-transform: uppercase;
+        color: #e2e8f0;
+        animation: boot-title 1.2s ease-out both;
+      }
+      #boot-splash p {
+        margin: 0;
+        font-size: 10px;
+        letter-spacing: 0.45em;
+        text-transform: uppercase;
+        color: rgba(167, 139, 250, 0.7);
+      }
+      @keyframes boot-logo {
+        0% { opacity: 0; transform: scale(0.82); filter: drop-shadow(0 0 0 rgba(139, 92, 246, 0)); }
+        55% { opacity: 1; transform: scale(1.04); filter: drop-shadow(0 0 26px rgba(139, 92, 246, 0.75)); }
+        100% { opacity: 1; transform: scale(1); filter: drop-shadow(0 0 14px rgba(139, 92, 246, 0.4)); }
+      }
+      @keyframes boot-ring {
+        0% { opacity: 0; transform: scale(0.8); }
+        40% { opacity: 1; }
+        100% { opacity: 0; transform: scale(1.45); border-color: rgba(34, 211, 238, 0.3); }
+      }
+      @keyframes boot-title {
+        from { opacity: 0; transform: translateY(10px); letter-spacing: 0.6em; }
+        to { opacity: 1; transform: none; letter-spacing: 0.34em; }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-splash" aria-hidden="true">
+        <div class="col">
+          <div class="wrap">
+            <div class="ring"></div>
+            <img src="logo.png" alt="" draggable="false" />
+          </div>
+          <h1>Smart Set Architect</h1>
+          <p>AI Set Builder</p>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

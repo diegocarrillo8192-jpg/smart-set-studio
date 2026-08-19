@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Library, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api, subscribeWebTracks } from "./api";
+import SplashScreen from "./components/SplashScreen";
 import Sidebar from "./components/Sidebar";
 import LibraryTable from "./components/LibraryTable";
 import SetGenerator from "./components/SetGenerator";
@@ -37,6 +38,22 @@ export default function App() {
    *  sondeo de salud recargue la biblioteca en el reconectar sin duplicar la
    *  carga inicial del arranque. */
   const connectedRef = useRef(false);
+
+  // Splash de marca: presentación del logo durante EXACTAMENTE 2s completos,
+  // seguida de un desvanecido suave (700ms) hacia la vista principal. Es un
+  // timer puro, desacoplado del backend: mientras el logo se muestra, Python
+  // arranca en silencio por debajo (sin banners, sin errores rojos) y la
+  // biblioteca aparece lista al terminar la transición.
+  const [splashLeaving, setSplashLeaving] = useState(false);
+  const [splashGone, setSplashGone] = useState(false);
+  useEffect(() => {
+    const t1 = window.setTimeout(() => setSplashLeaving(true), 2000);
+    const t2 = window.setTimeout(() => setSplashGone(true), 2700);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, []);
 
   /** IDs de los tracks que suenan ahora mismo en A y/o B (resaltado en tablas). */
   const playingTrackIds = useMemo(() => {
@@ -349,6 +366,8 @@ export default function App() {
       </div>
 
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {!splashGone && <SplashScreen leaving={splashLeaving} />}
       </div>
     </>
   );
