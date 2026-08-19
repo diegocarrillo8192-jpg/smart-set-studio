@@ -20,8 +20,10 @@ interface Props {
   /** Cada vez que cambia este número (desde App.tsx via libraryVersion),
    *  la tabla recarga la lista de canciones automáticamente. */
   refreshKey: number;
-  /** Escritorio: carpeta cuyo escaneo está en curso. Mientras no sea null, las
-   *  filas de esa carpeta muestran "Analizando…" aunque ya tengan metadatos. */
+  /** Escritorio: carpeta cuyo escaneo está en curso. App.tsx la usa para
+   *  recargar la lista cada 2s durante el escaneo; la fila se pinta SOLO según
+   *  `track.analyzed` (una canción con BPM/Key listos muestra sus datos de
+   *  inmediato, sin spinner, igual que la versión web). */
   analyzingFolderId: number | null;
 }
 
@@ -63,7 +65,6 @@ export default function LibraryTable({
   onSetCompatibleWith,
   playingTrackIds,
   refreshKey,
-  analyzingFolderId,
 }: Props) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
@@ -319,7 +320,7 @@ export default function LibraryTable({
                     <CoverThumb track={t} size={26} />
                     <span className="min-w-0 flex-1 truncate">
                       {t.title}
-                      {(!t.analyzed || (analyzingFolderId !== null && t.folder_id === analyzingFolderId)) && (
+                      {!t.analyzed && (
                         <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-violet-300">
                           <Loader2 size={10} className="animate-spin" /> Analizando…
                         </span>
