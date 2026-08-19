@@ -135,6 +135,28 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
             # (mutagen) y re-extrae las carátulas vía force_meta en _upsert_track.
             db.commit()
 
+        # PASE 1 (rápido): poblar TODA la carpeta de golpe. Se insertan las
+        # filas con los metadatos de etiquetas (title/artist/género) y
+        # analyzed=False en un único commit: la UI muestra el listado completo
+        # al instante con "Analizando…" y valores "-" en BPM/Key, igual que
+        # la web. El análisis pesado de audio llega después, fila por fila.
+        for file_path in files:
+            try:
+                mtime = os.path.getmtime(file_path)
+                _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Track fallido (poblamiento) %s: %s", file_path, exc)
+        try:
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            # Un commit inicial fallido no debe abortar el escaneo restante:
+            # se descarta la transacción y el pase 2 reintenta cada track.
+            db.rollback()
+            logger.warning("Commit de poblamiento inicial fallido: %s", exc)
+
+        # PASE 2 (lento): análisis audio por archivo → hidratación fila a fila.
+        # Los tracks ya existen (pase 1); cada commit intermedio actualiza solo
+        # lo que se terminó de analizar y la UI refresca la fila real.
         for idx, file_path in enumerate(files):
             if _job_cancelled(job):
                 break

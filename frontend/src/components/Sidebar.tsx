@@ -182,8 +182,13 @@ export default function Sidebar({
       const path = await pickFolder();
       if (path) {
         if (window.smartSet?.selectFolder) {
-          // Escritorio: el backend importa la carpeta del disco.
-          await api.addFolder(path);
+          // Escritorio: el backend importa la carpeta del disco y el escaneo
+          // arranca SOLO (igual que la web). El backend puebla el listado
+          // completo al instante (pase 1) y va hidratando fila a fila (pase 2):
+          // la tabla muestra todo de golpe con "Analizando…" y valores reales
+          // conforme el motor termina cada archivo.
+          const folder = await api.addFolder(path);
+          void scanFolder(folder);
         }
         // Web: la carpeta ya quedó registrada en el almacén del navegador
         // (dentro de pickFolder); refrescar hace que aparezca al instante.
