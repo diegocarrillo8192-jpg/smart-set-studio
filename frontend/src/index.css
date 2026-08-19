@@ -156,16 +156,16 @@ input[type="radio"] {
   accent-color: #7c3aed;
 }
 
-/* --- Portrait Lock: SOLO móviles (<=768px) en orientación horizontal -------
+/* --- Portrait Lock: SOLO móviles (<=900px) en orientación horizontal -------
    El overlay nace con display: none. Solo cuando se cumplen AMBAS condiciones
    simultáneas (pantalla de celular + landscape) se muestra y se oculta el
-   contenido principal. Desktop/laptops (>768px, landscape natural) nunca
+   contenido principal. Desktop/laptops (>900px, landscape natural) nunca
    cumplen el ancho y jamás ven este overlay. */
 .portrait-lock {
   display: none;
 }
 
-@media (max-width: 768px) and (orientation: landscape) {
+@media (max-width: 900px) and (orientation: landscape) {
   .portrait-lock {
     display: flex;
   }
