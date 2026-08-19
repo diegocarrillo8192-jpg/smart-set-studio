@@ -2,8 +2,7 @@
 import logging
 import os
 import threading
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
-from concurrent.futures import wait as futures_wait
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -162,69 +161,25 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
             db.rollback()
             logger.warning("Commit de poblamiento inicial fallido: %s", exc)
 
-        # PASE 2 (PARALELO): análisis de audio con todos los hilos del CPU.
-        # Cada track es una tarea PURA (sin acceso a DB) en un pool de hilos:
-        # librosa libera el GIL en decodificación/FFT/numpy, así que los
-        # workers corren de verdad en paralelo (sin el coste frágil de spawn
-        # que tendrían procesos dentro del ejecutable empaquetado). Los writes
-        # a SQLite/ID3 siguen en ESTE hilo, aplicados según cada resultado llega.
-        workers = max(2, min(32, os.cpu_count() or 4))
+        # PASE 2 (SECUENCIAL + TIMEOUT POR TRACK): un solo archivo en memoria
+        # a la vez (sin saturación de RAM como el pool paralelo) y tolerancia
+        # estricta a fallos: cada análisis corre en un worker desechable con
+        # timeout; si un archivo está corrupto o tarda demasiado se marca con
+        # valores vacíos y la cola continúa al instante siguiente — un track
+        # problemático NUNCA detiene el escaneo ni congela la app.
+        # Las escrituras a SQLite van UNA POR UNA en este hilo (commit por
+        # track), con WAL + busy_timeout activos: sin "database is locked".
         db_tracks = {
             t.file_path: t
             for t in db.query(Track).filter(Track.folder_id == folder.id).all()
         }
-        results: dict[str, AnalysisResult] = {}
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ssa-an") as pool:
-            futures: dict[Future, str] = {}
-            for file_path in files:
-                if _job_cancelled(job):
-                    break
-                track = db_tracks.get(str(file_path))
-                # Ya analizado (escaneo previo sin cambios): conservar datos.
-                if track is None or track.analyzed:
-                    continue
-                futures[pool.submit(analyze_file, str(file_path), track.embedded_bpm)] = str(file_path)
-
-            pending: set[Future] = set(futures)
-            while pending:
-                if _job_cancelled(job):
-                    break
-                done, undone = futures_wait(
-                    pending, timeout=ANALYSIS_TIMEOUT_SEC, return_when=FIRST_COMPLETED
-                )
-                if not done:
-                    # Un worker se colgó (archivo corrupto/lento): timeout global.
-                    # Esa tanda se marca con valores vacíos y la cola SIGUE.
-                    # Los hilos colgados quedan huérfanos (daemon) y no bloquean
-                    # nada más: jamás detienen el escaneo entero.
-                    for fp in undone:
-                        results[fp] = AnalysisResult(
-                            bpm=None, musical_key=None, camelot_key=None,
-                            loudness_db=None, spectral_centroid=None, energy=None,
-                            error="timeout: análisis abandonado (archivo corrupto o muy lento)",
-                        )
-                    pending.clear()
-                    break
-                for fut in done:
-                    fp = futures[fut]
-                    try:
-                        results[fp] = fut.result()
-                    except Exception as exc:  # noqa: BLE001
-                        results[fp] = AnalysisResult(
-                            bpm=None, musical_key=None, camelot_key=None,
-                            loudness_db=None, spectral_centroid=None, energy=None,
-                            error=str(exc),
-                        )
-                pending -= done
-
-        # Aplicar resultados en el hilo principal: fila por fila según la UI
-        # los ve, con commits por lotes; un track problemático NO detiene nada.
         for idx, file_path in enumerate(files):
             if _job_cancelled(job):
                 break
             track = db_tracks.get(str(file_path))
-            result = results.get(str(file_path))
-            if track is not None and result is not None:
+            # Ya analizado (escaneo previo sin cambios): conservar datos.
+            if track is not None and not track.analyzed:
+                result = _analyze_with_timeout(str(file_path), track.embedded_bpm)
                 if result.error:
                     track.has_error = True
                     track.error_message = result.error
@@ -248,15 +203,13 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
                 track.analyzed = True
 
             job.processed_files = idx + 1
-            if idx % 5 == 0:
-                try:
-                    db.commit()
-                except Exception as exc:  # noqa: BLE001
-                    # Un commit intermedio no debe abortar el escaneo restante:
-                    # se descarta la transacción y se reintenta en el siguiente
-                    # lote (los tracks pendientes se re-insertan al re-procesar).
-                    db.rollback()
-                    logger.warning("Commit intermedio del escaneo fallido: %s", exc)
+            try:
+                db.commit()
+            except Exception as exc:  # noqa: BLE001
+                # Un commit individual no debe abortar el escaneo restante:
+                # se descarta la transacción y se reintenta en el siguiente.
+                db.rollback()
+                logger.warning("Commit intermedio del escaneo fallido: %s", exc)
 
         db.commit()
         folder.last_scanned_at = job.started_at
@@ -271,6 +224,39 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
 
         job.finished_at = datetime.now(timezone.utc)
         db.commit()
+
+
+def _analyze_with_timeout(file_path: str, embedded_bpm: float | None) -> AnalysisResult:
+    """Analiza UN track con worker desechable y timeout.
+
+    Secuencial (1 solo archivo en memoria a la vez) y tolerante: si el
+    archivo está corrupto o el análisis se cuelga, se devuelve un resultado
+    vacío tras `ANALYSIS_TIMEOUT_SEC` y el escaneo continúa. El worker
+    colgado es un hilo daemon: se descarta sin bloquear la salida de la app.
+    """
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ssa-an")
+    try:
+        future = pool.submit(analyze_file, file_path, embedded_bpm)
+        try:
+            return future.result(timeout=ANALYSIS_TIMEOUT_SEC)
+        except TimeoutError:
+            logger.warning(
+                "Análisis abandonado por timeout (%ds): %s", ANALYSIS_TIMEOUT_SEC, file_path
+            )
+            return AnalysisResult(
+                bpm=None, musical_key=None, camelot_key=None,
+                loudness_db=None, spectral_centroid=None, energy=None,
+                error="timeout: archivo corrupto o demasiado lento",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return AnalysisResult(
+                bpm=None, musical_key=None, camelot_key=None,
+                loudness_db=None, spectral_centroid=None, energy=None,
+                error=str(exc),
+            )
+    finally:
+        # No esperar al worker: si quedó colgado, se descarta (daemon).
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _job_cancelled(job: ScanJob) -> bool:

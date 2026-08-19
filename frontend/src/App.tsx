@@ -30,6 +30,12 @@ export default function App() {
   const [deckBPlaying, setDeckBPlaying] = useState(false);
   const [libraryVersion, setLibraryVersion] = useState(0);
   const [backendDown, setBackendDown] = useState(false);
+  /** PISO DURO absoluto: el banner rojo JAMÁS se renderiza en los primeros 7s
+   *  de ejecución de la app, sin importar qué diga el polling de salud.
+   *  Elimina cualquier falso positivo de arranque (backend lento, refresh
+   *  fallando mientras el motor sincroniza la base local). */
+  const APP_RUN_HARD_GRACE_MS = 7000;
+  const appStartRef = useRef(Date.now());
   /** Escritorio: ID de la carpeta cuyo escaneo está en curso (null = ninguno).
    *  Mientras no sea null, la tabla recarga progresivamente (UX "Analizando…"). */
   const [analyzingFolderId, setAnalyzingFolderId] = useState<number | null>(null);
@@ -366,10 +372,14 @@ export default function App() {
           )}
 
           {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia de
-              30s): el error crítico real. Contenedor independiente en flujo
-              normal, justo encima de la barra de búsqueda y debajo de las
-              tabs, con margin-bottom — nunca tapa las pestañas. */}
-          {backendDown && graceOver && window.smartSet?.isDesktop && (
+              30s Y tras el piso duro absoluto de 7s desde el arranque): el
+              error crítico real. Contenedor independiente en flujo normal,
+              justo encima de la barra de búsqueda y debajo de las tabs, con
+              margin-bottom — nunca tapa las pestañas. */}
+          {backendDown &&
+            graceOver &&
+            Date.now() - appStartRef.current >= APP_RUN_HARD_GRACE_MS &&
+            window.smartSet?.isDesktop && (
             <div className="mb-2 mt-1 shrink-0 px-3">
               <div className="flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] font-semibold text-red-300">
                 <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
