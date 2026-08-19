@@ -9,6 +9,7 @@ import SetGenerator from "./components/SetGenerator";
 import DualDeck from "./components/DualDeck";
 import RecommendationsPanel from "./components/RecommendationsPanel";
 import SettingsModal from "./components/SettingsModal";
+import PortraitLock from "./components/PortraitLock";
 
 type Tab = "library" | "generator";
 
@@ -196,8 +197,10 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto bg-panel text-slate-200">
-      {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda.
+    <>
+      <PortraitLock />
+      <div className="app-shell flex h-full flex-col overflow-y-auto bg-panel text-slate-200">
+        {/* BLOQUE SUPERIOR: reproductor compacto (20%) con elevación profunda.
           En móvil se apila en una sola columna: Deck A → Crossfader → Deck B. */}
       <div className="relative z-10 shrink-0 md:h-1/5 md:min-h-48 md:shadow-[0_18px_44px_rgba(0,0,0,0.6)]">
         <DualDeck
@@ -325,6 +328,7 @@ export default function App() {
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {!splashGone && <SplashScreen leaving={splashLeaving} />}
-    </div>
+      </div>
+    </>
   );
 }
