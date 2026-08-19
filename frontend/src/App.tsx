@@ -39,18 +39,25 @@ export default function App() {
   const startingUpRef = useRef(startingUp);
   const connectedRef = useRef(false);
 
-  // Splash screen: logo animado ~1.6s, fade-out 500ms, luego desmonta.
-  // No bloquea la carga: la UI arranca detrás y la capa se desvanece sola.
+  // Splash screen enlazado al BACKEND: no se cierra con un timer fijo — se
+  // mantiene (animación en loop) mientras la conexión a Python esté pendiente
+  // o fallando sus primeros intentos, y solo se desvanece cuando la API
+  // responde 200 OK. En la web (sin backend) se cierra igualmente al primer
+  // refresh exitoso del almacén volátil.
   const [splashLeaving, setSplashLeaving] = useState(false);
   const [splashGone, setSplashGone] = useState(false);
+  const [backendReady, setBackendReady] = useState(false);
+  const splashStartRef = useRef(Date.now());
   useEffect(() => {
-    const t1 = window.setTimeout(() => setSplashLeaving(true), 1600);
-    const t2 = window.setTimeout(() => setSplashGone(true), 2100);
+    if (!backendReady) return; // sigue en el Splash: aún no hay sistema 100%
+    const delay = Math.max(0, 900 - (Date.now() - splashStartRef.current));
+    const t1 = window.setTimeout(() => setSplashLeaving(true), delay);
+    const t2 = window.setTimeout(() => setSplashGone(true), delay + 600);
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
     };
-  }, []);
+  }, [backendReady]);
 
   /** IDs de los tracks que suenan ahora mismo en A y/o B (resaltado en tablas). */
   const playingTrackIds = useMemo(() => {
@@ -71,6 +78,7 @@ export default function App() {
       connectedRef.current = true;
       setStartingUp(false);
       setBackendDown(false);
+      setBackendReady(true); // Python respondió 200: el Splash inicia el fade-out
       return f;
     } catch (err) {
       // Si el error viene con status 409 (carpeta ya importada), igual lo
@@ -91,16 +99,48 @@ export default function App() {
   // lote se refresca la biblioteca para mostrar el progreso en tiempo real.
   useEffect(() => subscribeWebTracks(() => void refresh()), [refresh]);
 
-  // Gracias de arranque: 8s sin alerta roja. Si al agotarse el backend aún no
-  // respondió (primer refresh fallido), se muestra la alerta de reconexión.
+  // Timeout de seguridad (15s): si Python no levanta, se cierra el Splash
+  // igualmente y la alerta roja indica un fallo REAL del sistema (el Splash ya
+  // enmascaró el arranque normal, nunca se ve la alerta mientras bootea).
   useEffect(() => {
-    if (!window.smartSet?.isDesktop) return;
+    if (!window.smartSet?.isDesktop || backendReady) return;
     const t = window.setTimeout(() => {
+      setBackendReady(true);
       setStartingUp(false);
       if (!connectedRef.current) setBackendDown(true);
-    }, 8000);
+    }, 15000);
     return () => window.clearTimeout(t);
-  }, []);
+  }, [backendReady]);
+
+  // Sondeo ligero de salud: en cuanto Python responde 200 OK se libera la UI
+  // (el refresh pesado de carpetas corre después, en segundo plano).
+  useEffect(() => {
+    if (!window.smartSet?.isDesktop || backendReady) return;
+    let alive = true;
+    const poll = () => {
+      if (!alive) return;
+      api
+        .health()
+        .then((h) => {
+          if (!alive) return;
+          if (h && h.status === "ok") {
+            connectedRef.current = true;
+            setBackendReady(true);
+            setStartingUp(false);
+            void refresh().catch(() => undefined);
+          } else {
+            window.setTimeout(poll, 1200);
+          }
+        })
+        .catch(() => {
+          if (alive) window.setTimeout(poll, 1200);
+        });
+    };
+    window.setTimeout(poll, 300);
+    return () => {
+      alive = false;
+    };
+  }, [backendReady, refresh]);
 
   // Mantiene el ref espejo sincronizado con el estado de arranque.
   useEffect(() => {
