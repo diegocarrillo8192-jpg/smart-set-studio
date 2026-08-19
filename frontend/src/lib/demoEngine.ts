@@ -7,7 +7,10 @@ import { parseBlob } from "music-metadata-browser";
  * Todo el "análisis" ocurre en el cliente con music-metadata-browser:
  *  - parseAudioFile():   etiquetas ID3v2/ID3v2.4 y MP4/M4A con decodificación
  *                       correcta (UTF-16/UTF-8/latin1), duración real y
- *                       carátula embebida (APIC/©cov).
+ *                       carátula embebida (APIC/©cov). PRIORIDAD ABSOLUTA a
+ *                       las etiquetas internas (initialKey/TKEY, bpm,
+ *                       artists/title); el nombre del archivo solo es
+ *                       fallback y el BPM Web Audio el último recurso.
  *  - parseFilenameMetadata(): fallback por regex del nombre: key Camelot
  *                       ("12B"/"10A") o nota tradicional, BPM ("128 BPM") y
  *                       artist/title por segmentos de guiones.
@@ -235,7 +238,11 @@ export interface ParsedAudioFile {
   coverUrl: string | null;
 }
 
-/** Etiquetas + duración + carátula de un File, todo en el navegador. */
+/** Etiquetas + duración + carátula de un File, todo en el navegador.
+ *  Prioridad ABSOLUTA a las etiquetas ID3/MP4 internas (common.initialKey /
+ *  common.key para tonalidad, common.bpm, common.artists/common.artist y
+ *  common.title); el nombre del archivo SOLO se usa como fallback cuando el
+ *  tag está vacío o es ilegible, y el BPM Web Audio como último recurso. */
 export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   let meta;
   let buf: ArrayBuffer | null = null;
@@ -285,17 +292,27 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   const id3Title = cleanText(common.title);
   const fileStem = file.name.replace(/\.[^.]+$/, "").trim();
   const stemTitle = id3Title ? id3Title.replace(/\.[^.]+$/, "").trim() : "";
-  // ID3 title que replica el nombre de archivo → derivado por guiones
+  // Prioridad absoluta al ID3: el título de la etiqueta manda siempre, salvo
+  // en el caso degenerado en que replica EXACTAMENTE el nombre del archivo
+  // (rippers copian el filename al TIT2): ahí se usa el derivado por guiones.
   const title = id3Title && stemTitle && stemTitle !== fileStem ? id3Title : (fromName.title ?? id3Title);
-  // Key desde etiquetas ID3 estándar: music-metadata expone TKEY como
-  // common.key (y en algunos builds como common.initialKey). Se comprueban
-  // AMBOS antes de caer al fallback del nombre del archivo.
-  const id3Key = cleanText(common.key ?? (common as { initialKey?: string }).initialKey ?? null);
+  // Key (Camelot): etiqueta ID3 primero. Keyfinder/Rekordbox escriben TKEY,
+  // que music-metadata expone como common.initialKey (y common.key en otros
+  // builds). Ambas se verifican ANTES del fallback por nombre del archivo.
+  // "Am"/"C#m"/"8A" se normaliza a Camelot aguas abajo (camelotFromString →
+  // musicalKeyToCamelot con las tablas CAMELOT_MINOR/CAMELOT_MAJOR internas).
+  const id3Key = cleanText((common as { initialKey?: string }).initialKey ?? common.key ?? null);
+  // Artistas: common.artists (array con TODOS los artistas de TPE1) unidos
+  // con " / " > common.artist > nombre del archivo.
+  const id3Artist =
+    (Array.isArray(common.artists) && common.artists.length > 0
+      ? cleanText(common.artists.join(" / "))
+      : null) ?? cleanText(common.artist);
 
   return {
     tags: {
       title,
-      artist: cleanText(common.artist) ?? fromName.artist ?? null,
+      artist: id3Artist ?? fromName.artist ?? null,
       album: cleanText(common.album),
       genre,
       bpm: bpm ?? fromName.bpm ?? detectedBpm,
