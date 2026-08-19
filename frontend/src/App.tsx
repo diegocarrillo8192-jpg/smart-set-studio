@@ -112,6 +112,17 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [backendReady]);
 
+  // Gracia de 20s para el banner ROJO: desde el arranque de la app y hasta que
+  // se agote este periodo, ESTÁ PROHIBIDO mostrar el error crítico, aunque la
+  // conexión falle o el backend siga bloqueado procesando la base de datos
+  // local. Dentro de la gracia se muestra el banner NEUTRO de sincronización.
+  const [graceOver, setGraceOver] = useState(false);
+  useEffect(() => {
+    if (!window.smartSet?.isDesktop) return;
+    const t = window.setTimeout(() => setGraceOver(true), 20000);
+    return () => window.clearTimeout(t);
+  }, []);
+
   // Sondeo ligero de salud: en cuanto Python responde 200 OK se libera la UI
   // (el refresh pesado de carpetas corre después, en segundo plano).
   useEffect(() => {
@@ -311,10 +322,23 @@ export default function App() {
             </div>
           )}
 
-          {/* Aviso de backend caído (SOLO escritorio): contenedor independiente
-              en flujo normal, justo encima de la barra de búsqueda y debajo de
-              las tabs, con margin-bottom — nunca tapa la pestañas. */}
-          {backendDown && window.smartSet?.isDesktop && (
+          {/* Banner NEUTRO de carga (SOLO escritorio, dentro de la gracia de
+              20s): reemplaza al rojo mientras el backend sincroniza la base
+              de datos de audio local tras el Splash. */}
+          {backendDown && !graceOver && window.smartSet?.isDesktop && (
+            <div className="mb-2 mt-1 shrink-0 px-3">
+              <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-800/60 px-3 py-2 text-[11px] font-semibold text-slate-300">
+                <Loader2 size={12} className="animate-spin text-sky-400" />
+                🎧 Sincronizando motor de audio y biblioteca… por favor espera
+              </div>
+            </div>
+          )}
+
+          {/* Aviso de backend caído (SOLO escritorio, SOLO tras la gracia de
+              20s): el error crítico real. Contenedor independiente en flujo
+              normal, justo encima de la barra de búsqueda y debajo de las
+              tabs, con margin-bottom — nunca tapa las pestañas. */}
+          {backendDown && graceOver && window.smartSet?.isDesktop && (
             <div className="mb-2 mt-1 shrink-0 px-3">
               <div className="flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-[11px] font-semibold text-red-300">
                 <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-red-500" />
