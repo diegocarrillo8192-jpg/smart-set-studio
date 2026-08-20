@@ -91,9 +91,13 @@ export default function Deck({
 
   // Al cambiar de track: reset del CUE y del SYNC (rate vuelve a 1);
   // el FILTER (Low Kill) se conserva, como un interruptor de hardware.
+  // El estado visual del botón se fuerza a "Play" (listo para reproducir):
+  // el track nuevo arranca pausado, aunque el anterior hubiera quedado en
+  // "Pause" por eventos del elemento de audio.
   useEffect(() => {
     setCue(null);
     setSync(false);
+    setPlaying(false);
     if (name) audioEngine.clearSync(name);
   }, [track?.id, name]);
 
