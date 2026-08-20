@@ -42,19 +42,22 @@ jobs:
 
       # En runners macOS el PATH puede resolver `python` al framework del
       # sistema (misma versión), que NO tiene las dependencias instaladas.
-      # Prependemos explícitamente el intérprete del toolcache de setup-python
-      # para que `python` y `pip` sean siempre el mismo en ambos sistemas.
-      - name: Ensure toolchain Python on PATH
+      # Resolvemos la ruta absoluta del intérprete del toolcache de setup-python
+      # y la guardamos en PY_BIN para usarla en todos los pasos de Python.
+      - name: Resolve Python interpreter
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            echo "${{ env.pythonLocation }}" >> "$GITHUB_PATH"
+            echo "PY_BIN=${{ env.pythonLocation }}/python.exe" >> "$GITHUB_ENV"
           else
-            echo "${{ env.pythonLocation }}/bin" >> "$GITHUB_PATH"
+            echo "PY_BIN=${{ env.pythonLocation }}/bin/python" >> "$GITHUB_ENV"
           fi
 
       - name: Install Python dependencies
-        run: python -m pip install -r backend/requirements.txt
+        shell: bash
+        run: |
+          "$PY_BIN" -m pip install -r backend/requirements.txt
+          "$PY_BIN" -m pip install pyinstaller==6.22.1
 
       - name: Build frontend
         run: npm run build:frontend
@@ -62,7 +65,7 @@ jobs:
       - name: Bundle backend (PyInstaller)
         shell: bash
         run: |
-          python -m PyInstaller --noconfirm --onedir --noconsole --name ssa-backend \
+          "$PY_BIN" -m PyInstaller --noconfirm --onedir --noconsole --name ssa-backend \
             --paths=backend \
             --hidden-import=uvicorn.logging \
             --hidden-import=uvicorn.loops.auto \
