@@ -71,9 +71,15 @@ export default function Deck({
       report(false);
     };
     const onEnded = () => setPlaying(false);
+    // ÚLTIMA acción tras cargar un track nuevo: forzar el icono a "Play".
+    // El reemplazo de un track que sonaba dispara pause()/load() internos que
+    // pueden dejar el estado visual en "Pausa"; al completarse la carga de la
+    // metadata (loadedmetadata) se garantiza el reset visual definitivo.
+    const onMetadataLoaded = () => setPlaying(false);
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
     el.addEventListener("ended", onEnded);
+    el.addEventListener("loadedmetadata", onMetadataLoaded);
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -85,6 +91,7 @@ export default function Deck({
       el.removeEventListener("play", onPlay);
       el.removeEventListener("pause", onPause);
       el.removeEventListener("ended", onEnded);
+      el.removeEventListener("loadedmetadata", onMetadataLoaded);
       report(false);
     };
   }, [el]);
