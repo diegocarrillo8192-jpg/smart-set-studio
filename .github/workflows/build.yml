@@ -121,6 +121,15 @@ jobs:
           name: smart-set-architect-macos
           path: installers/macos
 
+      # GitHub normaliza los espacios del nombre de subida a puntos, por lo que
+      # renombramos los instaladores a nombres estables con guiones antes de
+      # publicarlos (así se sobrescriben limpiamente los assets previos).
+      - name: Rename installers for release
+        shell: bash
+        run: |
+          mv "installers/windows/Smart Set Architect - Setup.exe" "installers/windows/Smart-Set-Architect-Setup.exe"
+          mv "installers/macos"/*arm64.dmg "installers/macos/Smart-Set-Architect-arm64.dmg"
+
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
