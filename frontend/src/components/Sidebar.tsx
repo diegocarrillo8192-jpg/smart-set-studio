@@ -338,14 +338,17 @@ export default function Sidebar({
 
       {/* Mi Biblioteca */}
       <section className="px-3 py-3">
-        <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
-          <Library size={12} /> Mi Biblioteca
+        <h2 className="mb-2">
           <button
             onClick={() => setLibraryOpen((o) => !o)}
-            className="rounded-full p-1 text-xs font-semibold text-slate-400 transition hover:text-violet-300"
+            className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
             title={libraryOpen ? "Colapsar sección" : "Expandir sección"}
           >
-            <ChevronDown size={12} className="shrink-0" />
+            <Library size={12} className="shrink-0" /> Mi Biblioteca
+            <ChevronDown
+              size={12}
+              className={`ml-auto shrink-0 transition-transform ${libraryOpen ? "" : "-rotate-90"}`}
+            />
           </button>
         </h2>
         <button
@@ -467,14 +470,17 @@ export default function Sidebar({
 
       {/* Playlists & Sets */}
       <section className="border-t border-slate-800 px-3 py-3">
-<h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-slate-400">
-          <ListMusic size={12} /> Playlists & Sets
+<h2 className="mb-2">
           <button
             onClick={() => setSetsOpen((o) => !o)}
-            className="rounded-full p-1 text-xs font-semibold text-slate-400 transition hover:text-violet-300"
+            className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
             title={setsOpen ? "Colapsar sección" : "Expandir sección"}
           >
-            <ChevronDown size={12} className="shrink-0" />
+            <ListMusic size={12} className="shrink-0" /> Playlists & Sets
+            <ChevronDown
+              size={12}
+              className={`ml-auto shrink-0 transition-transform ${setsOpen ? "" : "-rotate-90"}`}
+            />
           </button>
         </h2>
         <div className="space-y-1">

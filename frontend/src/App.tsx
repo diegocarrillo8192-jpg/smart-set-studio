@@ -226,6 +226,14 @@ export default function App() {
     setGeneratedSet(set);
   };
 
+  /** Simetría de navegación con `selectSet`: al hacer clic en una carpeta
+   *  (desde cualquier pantalla) se despliega la pestaña "Biblioteca General"
+   *  filtrada por esa carpeta. null = "Todos los tracks" (sin filtro). */
+  const selectFolder = (id: number | null) => {
+    setSelectedFolderId(id);
+    setTab("library");
+  };
+
   /** Elimina un set y, si era el que estaba desplegado, limpia la vista. */
   const deleteSet = async (set: DJSet) => {
     await api.deleteSet(set.id);
@@ -272,7 +280,7 @@ export default function App() {
           selectedFolderId={selectedFolderId}
           onFoldersChanged={refresh}
           onScanActive={setAnalyzingFolderId}
-          onSelectFolder={setSelectedFolderId}
+          onSelectFolder={selectFolder}
           onSelectSet={selectSet}
           onDeleteSet={deleteSet}
           onRemoveFolder={removeFolder}
