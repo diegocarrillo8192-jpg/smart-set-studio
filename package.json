@@ -4,7 +4,9 @@
   "private": true,
   "description": "AI Smart Set Architect & DJ Library Manager - Desktop app (Electron + FastAPI + React)",
   "main": "electron/main.js",
-  "workspaces": ["frontend"],
+  "workspaces": [
+    "frontend"
+  ],
   "scripts": {
     "dev": "concurrently -k -n BACKEND,FRONTEND,ELECTRON -c blue,magenta,green \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:electron\"",
     "dev:backend": "cd backend && ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload",
@@ -19,12 +21,14 @@
     "dist:win": "npm run build:frontend && npm run bundle:backend && electron-builder --win",
     "dist": "npm run dist:win",
     "build:win": "npm run dist:win",
-    "build:mac": "npm run build:frontend && npm run bundle:backend && electron-builder --mac"
+    "build:mac": "npm run build:frontend && npm run bundle:backend && electron-builder --mac",
+    "doctor": "npx react-doctor@latest"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
     "electron": "^43.4.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "react-doctor": "^0.9.12"
   },
   "build": {
     "appId": "com.smartsetstudio.app",

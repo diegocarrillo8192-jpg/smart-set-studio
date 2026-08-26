@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Track } from "../types";
 import { cachedTrackArtwork, getTrackArtwork, subscribeArtwork } from "../api";
+import { hexRgba } from "../lib/color";
 
 /** Logo oficial de la marca como fallback limpio cuando el track no tiene
  *  portada (ID3 sin APIC) o mientras la extracción aún carga. */
@@ -13,16 +14,6 @@ interface Props {
   size?: number;
   /** Clave para remontar con animación al cambiar de track. */
   remountKey?: string | number;
-}
-
-export function hexRgba(hex: string, a: number): string {
-  if (hex.startsWith("#")) {
-    const r = parseInt(hex.slice(1, 3), 16);
-    const g = parseInt(hex.slice(3, 5), 16);
-    const b = parseInt(hex.slice(5, 7), 16);
-    return `rgba(${r},${g},${b},${a})`;
-  }
-  return hex;
 }
 
 /**

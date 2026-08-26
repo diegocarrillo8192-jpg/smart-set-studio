@@ -3,7 +3,8 @@ import { MoveRight, RefreshCw, Sparkles } from "lucide-react";
 import type { Recommendation, Track } from "../types";
 import { api } from "../api";
 import { fmtBpm } from "../lib/format";
-import Artwork, { hexRgba } from "./Artwork";
+import { hexRgba } from "../lib/color";
+import Artwork from "./Artwork";
 
 interface Props {
   /** Track semilla cargado en el Deck A (null = no mostrar). */

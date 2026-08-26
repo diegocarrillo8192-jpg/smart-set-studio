@@ -4,6 +4,7 @@ import type { Track } from "../types";
 import { api, prefetchArtworks } from "../api";
 import { fmtBpm } from "../lib/format";
 import { CoverThumb } from "./Artwork";
+import EnergyBar from "./EnergyBar";
 
 interface Props {
   folders: { id: number; name: string }[];
@@ -36,23 +37,6 @@ function fmtDur(sec: number | null): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function EnergyDots({ value }: { value: number | null }) {
-  if (!value) return <span className="text-slate-600">-</span>;
-  return (
-    <div className="flex items-center gap-0.5" title={`Energía ${value}/10`}>
-      {Array.from({ length: 10 }, (_, i) => (
-        <span
-          key={i}
-          className="h-2 w-1 rounded-sm"
-          style={{
-            background: i < value ? (value >= 7 ? "#f87171" : value >= 4 ? "#fbbf24" : "#34d399") : "#243046",
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
 export default function LibraryTable({
   folders,
   folderId,
@@ -75,6 +59,10 @@ export default function LibraryTable({
   const [minEnergy, setMinEnergy] = useState("");
   const [maxEnergy, setMaxEnergy] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+
+  /** Lookup O(1) de los IDs en reproducción para evitar `Array.includes` O(n)
+   *  dentro del map de cada fila de la tabla. */
+  const playingIds = useMemo(() => new Set(playingTrackIds), [playingTrackIds]);
 
   const load = useCallback(async (attempt = 0) => {
     setLoading(true);
@@ -142,6 +130,7 @@ export default function LibraryTable({
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
+            aria-label="Buscar en la biblioteca"
             placeholder="Buscar por título, artista, key, folder..."
             className="w-full rounded-lg border border-slate-700 bg-panel-2 py-1.5 pl-8 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
           />
@@ -235,7 +224,7 @@ export default function LibraryTable({
             <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
               <Music2 size={12} />
               Compatibles con <b>{compatibleWith.camelot_key}</b> ({compatibleWith.title.slice(0, 18)})
-              <button onClick={() => onSetCompatibleWith(null)} className="ml-1 font-bold text-emerald-400 hover:text-white">×</button>
+              <button onClick={() => onSetCompatibleWith(null)} aria-label="Quitar filtro de compatibilidad" className="ml-1 font-bold text-emerald-400 hover:text-white">×</button>
             </div>
           )}
           {filtersActive && (
@@ -275,7 +264,7 @@ export default function LibraryTable({
                 className={`group cursor-default border-t border-slate-800/60 transition hover:bg-panel-2 ${
                   compatibleWith?.id === t.id ? "bg-emerald-500/10" : ""
                 } ${
-                  playingTrackIds.includes(t.id)
+                  playingIds.has(t.id)
                     ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
                     : ""
                 }`}
@@ -289,6 +278,7 @@ export default function LibraryTable({
                         onPlayPreview(t);
                       }}
                       className="grid h-6 w-6 place-items-center rounded-full bg-panel-3 text-slate-300 transition hover:bg-violet-600 hover:text-white hover:shadow-[0_0_12px_rgba(139,92,246,0.7)]"
+                      aria-label="Pre-escuchar"
                       title="Pre-escuchar (carga en Deck A y mueve el fader)"
                     >
                       <Play size={11} className="ml-0.5" />
@@ -299,6 +289,7 @@ export default function LibraryTable({
                         onLoadToDeckA(t);
                       }}
                       className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500 hover:text-black hover:shadow-[0_0_12px_rgba(34,211,238,0.7)]"
+                      aria-label="Cargar en Deck A"
                       title="Cargar en Deck A"
                     >
                       <Disc3 size={13} />
@@ -309,6 +300,7 @@ export default function LibraryTable({
                         onLoadToDeckB(t);
                       }}
                       className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-violet-500 hover:text-black hover:shadow-[0_0_12px_rgba(167,139,250,0.7)]"
+                      aria-label="Cargar en Deck B"
                       title="Cargar en Deck B"
                     >
                       <Disc2 size={13} />
@@ -327,7 +319,7 @@ export default function LibraryTable({
                       )}
                       {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
                     </span>
-                    {playingTrackIds.includes(t.id) && (
+                    {playingIds.has(t.id) && (
                       <AudioLines size={12} className="shrink-0 animate-pulse text-emerald-400" />
                     )}
                   </div>
@@ -346,7 +338,7 @@ export default function LibraryTable({
                     {t.camelot_key ?? "-"}
                   </span>
                 </td>
-                <td className="px-2 py-1.5"><EnergyDots value={t.energy} /></td>
+                <td className="px-2 py-1.5"><EnergyBar value={t.energy} /></td>
                 <td className="hidden max-w-28 truncate px-2 py-1.5 text-slate-500 lg:table-cell">{t.folder_name}</td>
                 <td className="hidden px-2 py-1.5 text-right font-mono text-slate-400 sm:table-cell">{fmtDur(t.duration_sec)}</td>
               </tr>

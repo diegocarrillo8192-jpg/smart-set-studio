@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Library, Wand2 } from "lucide-react";
 import type { DJSet, Folder, Track } from "./types";
 import { api, subscribeWebTracks } from "./api";
@@ -66,13 +66,18 @@ export default function App() {
   const refresh = useCallback(async () => {
     try {
       const [f, s] = await Promise.all([api.listFolders(), api.listSets()]);
-      setFolders(f);
-      setSets(s);
-      setLibraryVersion((v) => v + 1);
       // Backend respondió: garantiza que la alerta roja NO se muestre (el
       // sondeo vuelve a disparar refresh en la primera reconexión).
       connectedRef.current = true;
       setBackendDown(false);
+      // Los cambios de listas/versión de biblioteca se procesan como transición
+      // (no urgentes): durante el análisis masivo (+1200 tracks) React puede
+      // interrumpirlos para atender clics/navegación de pestañas sin congelarse.
+      startTransition(() => {
+        setFolders(f);
+        setSets(s);
+        setLibraryVersion((v) => v + 1);
+      });
       return f;
     } catch (err) {
       // Si el error viene con status 409 (carpeta ya importada), igual lo
@@ -234,14 +239,20 @@ export default function App() {
     setTab("library");
   };
 
-  /** Elimina un set y, si era el que estaba desplegado, limpia la vista. */
-  const deleteSet = async (set: DJSet) => {
-    await api.deleteSet(set.id);
-    await refresh().catch(console.error);
+  /** Elimina un set de forma OPTIMISTA: la pestaña desaparece de la vista al
+   *  instante (0ms percibidos) actualizando el estado local, y la eliminación
+   *  física en BD/almacenamiento corre en segundo plano sin bloquear el render
+   *  ni esperar confirmación. Si la petición falla, se re-sincroniza el estado. */
+  const deleteSet = (set: DJSet) => {
+    setSets((prev) => prev.filter((s) => s.id !== set.id));
     if (set.id === activeSetId) {
       setActiveSetId(null);
       setGeneratedSet(null);
     }
+    void api.deleteSet(set.id).catch((err) => {
+      console.error("[App] error eliminando set:", err);
+      void refresh().catch(console.error);
+    });
   };
 
   /** Quita una carpeta y deselecciona el filtro si apuntaba a ella. */

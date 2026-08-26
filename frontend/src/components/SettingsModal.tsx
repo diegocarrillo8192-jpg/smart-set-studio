@@ -8,6 +8,14 @@ interface Props {
   onClose: () => void;
 }
 
+/** Parsea el valor de un input numérico de forma segura: si el texto no es un
+ *  número finito (campo vacío o parcial, p. ej. "-" o "e") devuelve 0 en vez
+ *  de propagar NaN al estado. */
+function parseNum(v: string): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function SettingsModal({ open, onClose }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -62,12 +70,15 @@ export default function SettingsModal({ open, onClose }: Props) {
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Ajustes del Motor de Mezcla"
         className="w-full max-w-lg rounded-2xl border border-slate-700 bg-panel-2 p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-bold uppercase tracking-widest text-white">Ajustes del Motor de Mezcla</h2>
-          <button onClick={onClose} className="rounded p-1 text-slate-400 hover:text-white">
+          <button onClick={onClose} aria-label="Cerrar ajustes" className="rounded p-1 text-slate-400 hover:text-white">
             <X size={16} />
           </button>
         </div>
@@ -83,8 +94,9 @@ export default function SettingsModal({ open, onClose }: Props) {
               min={0.5}
               max={20}
               step={0.5}
+              aria-label="Tolerancia de BPM"
               value={settings.max_bpm_variation_pct}
-              onChange={(e) => update({ max_bpm_variation_pct: Number(e.target.value) })}
+              onChange={(e) => update({ max_bpm_variation_pct: parseNum(e.target.value) })}
               className={input}
             />
           </div>
@@ -97,8 +109,9 @@ export default function SettingsModal({ open, onClose }: Props) {
               type="number"
               min={1}
               max={5}
+              aria-label="Salto de Energy Boost"
               value={settings.energy_boost_jump}
-              onChange={(e) => update({ energy_boost_jump: Number(e.target.value) })}
+              onChange={(e) => update({ energy_boost_jump: parseNum(e.target.value) })}
               className={input}
             />
           </div>
@@ -111,8 +124,9 @@ export default function SettingsModal({ open, onClose }: Props) {
               type="number"
               min={1}
               max={2}
+              aria-label="Radio armónico (vecinos)"
               value={settings.harmonic_radius}
-              onChange={(e) => update({ harmonic_radius: Number(e.target.value) })}
+              onChange={(e) => update({ harmonic_radius: parseNum(e.target.value) })}
               className={input}
             />
           </div>
@@ -123,6 +137,7 @@ export default function SettingsModal({ open, onClose }: Props) {
             </div>
             <input
               type="checkbox"
+              aria-label="Permitir cambio de modo"
               checked={settings.allow_mode_change}
               onChange={(e) => update({ allow_mode_change: e.target.checked })}
               className="h-4 w-4"
@@ -142,6 +157,7 @@ export default function SettingsModal({ open, onClose }: Props) {
             </div>
             <input
               type="checkbox"
+              aria-label="Escribir Key detectado en etiquetas ID3"
               checked={settings.write_id3_keys}
               disabled={!isDesktop}
               onChange={(e) => update({ write_id3_keys: e.target.checked })}

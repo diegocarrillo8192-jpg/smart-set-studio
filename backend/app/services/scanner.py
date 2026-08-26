@@ -2,6 +2,7 @@
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -182,6 +183,14 @@ def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> 
                     pass
 
             job.processed_files = idx + 1
+
+            # Prioridad de procesos: cede el GIL y el scheduler de forma
+            # cooperativa tras cada track. El análisis corre en un hilo daemon
+            # en segundo plano; esta cesión garantiza que las peticiones de
+            # gestión de sets (crear/abrir/eliminar) del threadpool de FastAPI
+            # obtengan turno de CPU y bloqueos SQLite sin quedarse encoladas
+            # detrás del motor de análisis durante escaneos masivos.
+            time.sleep(0)
 
         db.commit()
         folder.last_scanned_at = job.started_at

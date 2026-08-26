@@ -4,7 +4,8 @@ import type { Track } from "../types";
 import type { DeckHandle } from "../lib/audio";
 import { audioEngine } from "../lib/audio";
 import { fmtBpm } from "../lib/format";
-import Artwork, { hexRgba } from "./Artwork";
+import { hexRgba } from "../lib/color";
+import Artwork from "./Artwork";
 import Waveform from "./Waveform";
 
 interface Props {

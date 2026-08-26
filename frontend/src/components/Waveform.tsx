@@ -24,6 +24,10 @@ interface Props {
 /** Media ventana a cada lado del playhead (segundos). */
 const HALF_WINDOW = 8;
 
+/** Cues por defecto estables: evita crear un array nuevo en cada render
+ *  (el valor por defecto de una prop [] rompería cualquier memo). */
+const EMPTY_CUES: { t: number; color: string; label?: string }[] = [];
+
 interface Sample {
   t: number;
   lo: number;
@@ -105,7 +109,7 @@ export default function Waveform({
   color = "#7c3aed",
   height = 64,
   onSeek,
-  cues = [],
+  cues = EMPTY_CUES,
   playheadFrac = 0.4,
   display = "time",
   grid = true,
@@ -527,7 +531,7 @@ export default function Waveform({
     };
     draw();
     return () => cancelAnimationFrame(raf);
-  }, [analyser, el, bpm, color, gridOffsetSec, cues, playheadFrac, display, analysis, analysisLoading]);
+  }, [analyser, el, bpm, color, gridOffsetSec, cues, playheadFrac, display, grid, analysis, analysisLoading, bandMax]);
 
   const draggingRef = useRef(false);
 

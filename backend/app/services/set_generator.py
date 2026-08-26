@@ -10,8 +10,11 @@ Reglas (PRD §4, optimización de calidad):
      (+1 BPM cada 4 tracks en zona alta) sin saltos bruscos.
   3. Curvas de energía reales por estructura (Warm-Up 3→7, Peak constante
      8.6–9.8, Storytelling intro→clímax→outro).
-  4. Sin duplicados, diversificación de artistas y razón lógica de cada
-     cruce en la playlist (ej. "Transición Armónica Directa 10A → 10A (+0 BPM)").
+   4. Sin duplicados (ni en el set ni en los sets recientes), diversificación de
+      artistas y razón lógica de cada cruce en la playlist (ej.
+      "Transición Armónica Directa 10A → 10A (+0 BPM)").
+   5. Variedad entre generaciones: arranque aleatorio, pool Top-K (5..8) y
+      jitter del 5-10% en la puntuación de compatibilidad.
 """
 import math
 import random
@@ -48,6 +51,18 @@ ENERGY_PROFILES = {
         "description": "Transiciones agresivas con saltos de clave +2 para máxima tensión.",
     },
 }
+
+
+# Ventana de "sets recientes" cuyos tracks se evitan repetir salvo que no
+# exista ninguna otra opción compatible en toda la colección.
+RECENT_SETS_WINDOW = 3
+
+# Tolerancia de energía (1..10) al anclar el track inicial a la curva.
+START_ENERGY_TOL = 2.0
+
+# Rango de candidatos Top-K entre los que se elige aleatoriamente.
+TOP_K_MIN = 5
+TOP_K_MAX = 8
 
 
 def _clamp(v: float, lo: float = 1.0, hi: float = 10.0) -> float:
@@ -155,6 +170,53 @@ def _transition_reason(
     return "fallback", f"Cruce de Respaldo {current} → {nxt} ({delta_str})"
 
 
+def _pick_start(
+    pool: list[Track],
+    rng: random.Random,
+    start_desired: float,
+    legacy_pct: float,
+    max_bpm_diff: float | None,
+    recently_used: set[int],
+) -> Track:
+    """Elige el track inicial (slot 0) al azar entre todos los que encajan con
+    el BPM dominante de la biblioteca y el nivel de energía inicial de la curva.
+
+    Nunca devuelve siempre el mismo track: filtra las opciones válidas y sortea.
+    """
+    def _bpm_limit(ref: float) -> float:
+        return max_bpm_diff if max_bpm_diff else (ref * (legacy_pct or 2.5) / 100.0)
+
+    def _bpm_near(t: Track, ref: float) -> bool:
+        if not t.bpm:
+            return True
+        return abs(t.bpm - ref) <= _bpm_limit(ref)
+
+    bpms = sorted(t.bpm for t in pool if t.bpm)
+    median_bpm = bpms[len(bpms) // 2] if bpms else None
+
+    def _energy_near(t: Track) -> bool:
+        return t.energy is None or abs((t.energy or 5) - start_desired) <= START_ENERGY_TOL
+
+    # Nivel 1: BPM cercano al dominante + energía cercana al inicio de la curva.
+    if median_bpm:
+        candidates = [t for t in pool if _bpm_near(t, median_bpm) and _energy_near(t)]
+    else:
+        candidates = [t for t in pool if _energy_near(t)]
+    # Nivel 2: relaja la energía (mantiene solo el BPM dominante).
+    if not candidates and median_bpm:
+        candidates = [t for t in pool if _bpm_near(t, median_bpm)]
+    # Nivel 3: último recurso, toda la biblioteca.
+    if not candidates:
+        candidates = pool
+
+    # Evita tracks ya usados en sets recientes salvo que no quede alternativa.
+    fresh = [t for t in candidates if t.id not in recently_used]
+    if fresh:
+        candidates = fresh
+
+    return rng.choice(candidates)
+
+
 def generate_set(
     db: Session,
     *,
@@ -187,30 +249,36 @@ def generate_set(
             "No hay tracks analizados disponibles. Escanea una carpeta primero."
         )
 
-    # --- Track inicial (semilla o el que mejor encaja con el inicio de la curva) ---
+    rng = random.Random()
+
+    # Tracks ya seleccionados en sets recientes: se evitan para maximizar el
+    # uso de toda la colección, salvo que no quede ninguna alternativa válida.
+    recently_used: set[int] = set()
+    try:
+        recent_sets = (
+            db.query(Set)
+            .order_by(Set.created_at.desc())
+            .limit(RECENT_SETS_WINDOW)
+            .all()
+        )
+        for rs in recent_sets:
+            recently_used.update(item.track_id for item in rs.items)
+    except Exception:
+        recently_used = set()
+
+    # --- Track inicial (semilla o arranque aleatorio entre los compatibles) ---
     used: set[int] = set()
     if seed_track_id and any(t.id == seed_track_id for t in pool):
         current = next(t for t in pool if t.id == seed_track_id)
     else:
-        start_desired = curve(0.0)
-        # Semilla "principal": se ancla al BPM dominante de la biblioteca (la
-        # mediana del pool) en vez del track de menor energía. En colecciones
-        # heterogéneas, la menor energía suele ser un outlier a ~108 BPM que
-        # asfixia la cadena ±2.5% y deja sets de 3 tracks. La cercanía al BPM
-        # mediano manda; la energía solo empata dentro del mismo tempo.
-        bpms = sorted(t.bpm for t in pool if t.bpm)
-        median_bpm = bpms[len(bpms) // 2] if bpms else None
-        if median_bpm:
-            current = min(
-                pool,
-                key=lambda t: abs((t.bpm or median_bpm) - median_bpm)
-                + abs((t.energy or 5) - start_desired) * 0.05,
-            )
-        else:
-            current = min(
-                pool,
-                key=lambda t: abs((t.energy or 5) - start_desired) if t.energy else 99,
-            )
+        current = _pick_start(
+            pool,
+            rng,
+            curve(0.0),
+            legacy_pct,
+            max_bpm_diff,
+            recently_used,
+        )
     used.add(current.id)
 
     sequence: list[Track] = [current]
@@ -218,7 +286,6 @@ def generate_set(
     start_bpm = current.bpm or 120.0
 
     # --- Selección greedy con rampa de tempo acumulativa ---
-    rng = random.Random()
     bpm_ramp = 0.0          # aumento acumulativo en zona de alta energía
     RAMP_PER_TRACK = 1.0 / 4  # +1 BPM cada 4 tracks en zona alta (perfil pro)
     pos = 1
@@ -247,18 +314,26 @@ def generate_set(
             limit = max_bpm_diff if max_bpm_diff else (cur_bpm * (legacy_pct or 2.5) / 100.0)
             return diff <= limit
 
-        candidates = []
-        for t in pool:
-            if t.id in used or not t.camelot_key or not _bpm_ok(t):
-                continue
-            # Anti-alternancia de modo (8A→8B→8A): excluir el vaivén armónico
-            if (
-                prev_prev_key
-                and normalize_camelot(prev_prev_key) == normalize_camelot(t.camelot_key)
-                and relation(normalize_camelot(t.camelot_key), cur_key)[0] == "mode"
-            ):
-                continue
-            candidates.append(t)
+        def _gather(exclude_ids: set[int]) -> list[Track]:
+            out: list[Track] = []
+            for t in pool:
+                if t.id in exclude_ids or not t.camelot_key or not _bpm_ok(t):
+                    continue
+                # Anti-alternancia de modo (8A→8B→8A): excluir el vaivén armónico
+                if (
+                    prev_prev_key
+                    and normalize_camelot(prev_prev_key) == normalize_camelot(t.camelot_key)
+                    and relation(normalize_camelot(t.camelot_key), cur_key)[0] == "mode"
+                ):
+                    continue
+                out.append(t)
+            return out
+
+        # Evita repetir tracks de sets recientes; solo como último recurso (si no
+        # queda ninguna otra opción compatible) se permite repetir uno reciente.
+        candidates = _gather(used | recently_used)
+        if not candidates and recently_used:
+            candidates = _gather(used)
         if not candidates:
             break
 
@@ -306,10 +381,16 @@ def generate_set(
             else:
                 artist_s = 0.0
             # Anti-alternancia de modo: 8A→8B→8A ya fue EXCLUIDO en el filtro duro
-            return 0.40 * harmonic + 0.30 * bpm_s + 0.24 * energy_s + 0.06 * artist_s
+            base = 0.40 * harmonic + 0.30 * bpm_s + 0.24 * energy_s + 0.06 * artist_s
+            # Jitter del 5-10%: fluctuación aleatoria del ranking para que cada
+            # generación varíe sin romper la jerarquía de compatibilidad.
+            jitter = rng.uniform(0.05, 0.10) * rng.choice((-1, 1))
+            return base * (1.0 + jitter)
 
-        # Top 5 mejores + pequeña aleatoriedad para variedad entre generaciones
-        ranked = sorted(best_pool, key=_score, reverse=True)[:5]
+        # Pool Top-K (5..8): elige aleatoriamente entre los mejores candidatos
+        # compatibles (BPM, key armónica y energía) en vez del #1 absoluto.
+        k = rng.randint(TOP_K_MIN, TOP_K_MAX)
+        ranked = sorted(best_pool, key=_score, reverse=True)[:k]
         nxt = rng.choice(ranked) if len(ranked) > 1 else ranked[0]
 
         sequence.append(nxt)

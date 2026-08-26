@@ -3,11 +3,17 @@ const { spawn, execSync } = require("child_process");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
+const crypto = require("crypto");
 
 const BACKEND_PORT = 8765;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const DEV_URL = "http://localhost:5173";
 const isDev = !app.isPackaged;
+
+// Secreto de bucle local: la ventana (renderer) y el backend lo comparten para
+// autenticar cada petición. Se regenera en cada arranque y se pasa al backend
+// por entorno (SMART_SET_TOKEN) y al renderer vía preload (additionalArguments).
+const SSA_TOKEN = crypto.randomBytes(32).toString("hex");
 
 let backendProc = null;
 let mainWindow = null;
@@ -235,6 +241,8 @@ async function startBackend() {
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
+      // Comparte el secreto de bucle local con el backend (autenticación).
+      env: { ...process.env, SMART_SET_TOKEN: SSA_TOKEN },
     });
     backendProc.stdout.on("data", (d) => {
       process.stdout.write(`[backend] ${d}`);
@@ -311,6 +319,9 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // El secreto de bucle local llega al preload (y de ahí a la UI) por esta
+      // vía; nunca se expone process.env completo al renderer.
+      additionalArguments: [`--smart-set-token=${SSA_TOKEN}`],
     },
   });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   AudioLines,
   ChevronDown,
@@ -20,6 +20,7 @@ import { ENERGY_PROFILES } from "../types";
 import { api } from "../api";
 import { fmtBpm } from "../lib/format";
 import { CoverThumb } from "./Artwork";
+import EnergyBar from "./EnergyBar";
 
 interface Props {
   folders: Folder[];
@@ -61,6 +62,13 @@ function safeFileName(name: string): string {
 function fmtTotalTime(sec: number | null): string {
   const s = Math.max(0, Math.floor(sec ?? 0));
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function formatDuration(sec: number | null): string {
+  if (!sec) return "--:--";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function fileTypeOf(path: string): string {
@@ -203,6 +211,10 @@ export default function SetGenerator({
   const [confirmClear, setConfirmClear] = useState(false);
   const sourcesRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
+
+  /** Lookup O(1) de los IDs en reproducción para evitar `Array.includes` O(n)
+   *  dentro del map de cada item del set. */
+  const playingIds = useMemo(() => new Set(playingTrackIds), [playingTrackIds]);
 
   // Cierra los dropdowns (fuentes / perfil) al hacer clic fuera
   useEffect(() => {
@@ -347,6 +359,7 @@ export default function SetGenerator({
               <input
                 type="number"
                 min={1}
+                aria-label="Duración personalizada en minutos"
                 value={customDuration}
                 onChange={(e) => setCustomDuration(e.target.value)}
                 placeholder="Minutos (ej: 45)"
@@ -433,7 +446,7 @@ export default function SetGenerator({
             {seedTrack && (
               <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
                 <Sparkles size={12} /> Track semilla: <b className="truncate">{seedTrack.title}</b> ({seedTrack.camelot_key})
-                <button onClick={onClearSeed} className="ml-auto font-bold hover:text-white">×</button>
+                <button onClick={onClearSeed} aria-label="Quitar track semilla" className="ml-auto font-bold hover:text-white">×</button>
               </div>
             )}
           </div>
@@ -568,89 +581,120 @@ export default function SetGenerator({
               </div>
             </div>
 
-            <div className="space-y-1">
-              {result.items.map((item) => {
-                const badge = relationBadge(item);
-                const prev = prevKey(item);
-                return (
-                  <div key={item.id}>
-                    {badge && (
-                      <div className="flex items-center gap-2 py-1 pl-10">
-                        <span className="h-px flex-1 bg-slate-800" />
-                        {prev && (
-                          <span className="font-mono text-[9px] text-slate-600">{prev} ➔</span>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 z-10 bg-panel text-[10px] uppercase tracking-wider text-slate-500">
+                  <tr>
+                    <th className="px-2 py-2"></th>
+                    <th className="w-full px-2 py-2">Título</th>
+                    <th className="w-14 px-2 py-2 text-right">BPM</th>
+                    <th className="w-16 px-2 py-2 text-center">Key</th>
+                    <th className="w-24 px-2 py-2">Energía</th>
+                    <th className="hidden w-28 px-2 py-2 text-right sm:table-cell">Género</th>
+                    <th className="hidden w-16 px-2 py-2 text-right sm:table-cell">Duración</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.items.map((item) => {
+                    const badge = relationBadge(item);
+                    const prev = prevKey(item);
+                    return (
+                      <Fragment key={item.id}>
+                        {badge && (
+                          <tr className="border-t border-slate-800/60">
+                            <td colSpan={7} className="px-2 py-1">
+                              <div className="flex items-center gap-2 pl-10">
+                                <span className="h-px flex-1 bg-slate-800" />
+                                {prev && (
+                                  <span className="font-mono text-[9px] text-slate-600">{prev} ➔</span>
+                                )}
+                                <span className={`rounded-full bg-panel-3 px-2 py-0.5 text-[10px] font-semibold ${badge.cls}`}>
+                                  {badge.text}
+                                </span>
+                                <span className="h-px flex-1 bg-slate-800" />
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                        <span className={`rounded-full bg-panel-3 px-2 py-0.5 text-[10px] font-semibold ${badge.cls}`}>
-                          {badge.text}
-                        </span>
-                        <span className="h-px flex-1 bg-slate-800" />
-                      </div>
-                    )}
-                    <div
-                      className={`group flex cursor-grab items-center gap-2 rounded-lg bg-panel-2 px-2.5 py-1.5 transition hover:bg-panel-3 active:cursor-grabbing ${
-                        playingTrackIds.includes(item.track.id)
-                          ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
-                          : ""
-                      }`}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData("application/json", JSON.stringify(item.track));
-                        e.dataTransfer.effectAllowed = "copy";
-                      }}
-                      onDoubleClick={() => onLoadToActiveDeck(item.track)}
-                      title="Doble clic: cargar en el deck activo · arrastra a un Deck"
-                    >
-                      <span className="w-6 text-right font-mono text-[10px] text-slate-500">
-                        {String(item.position).padStart(2, "0")}
-                      </span>
-                      <button
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        onClick={() => onPlayPreview(item.track)}
-                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-panel-3 text-slate-300 transition hover:bg-violet-600 hover:text-white"
-                        title="Pre-escuchar (carga en Deck A y mueve el fader)"
-                      >
-                        <Play size={10} className="ml-0.5" />
-                      </button>
-                      <button
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        onClick={() => onLoadTrackToDeckA(item.track)}
-                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500 hover:text-black"
-                        title="Cargar en Deck A"
-                      >
-                        <Disc3 size={12} />
-                      </button>
-                      <button
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        onClick={() => onLoadTrackToDeckB(item.track)}
-                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-300 transition hover:bg-violet-500 hover:text-black"
-                        title="Cargar en Deck B"
-                      >
-                        <Disc2 size={12} />
-                      </button>
-                      <div className="min-w-0 flex-1 text-left">
-                        <p className="flex items-center gap-2 text-xs font-medium text-slate-100">
-                          <CoverThumb track={item.track} size={20} />
-                          <span className="min-w-0 flex-1 truncate">{item.track.title}</span>
-                          {playingTrackIds.includes(item.track.id) && (
-                            <AudioLines size={11} className="shrink-0 animate-pulse text-emerald-400" />
-                          )}
-                        </p>
-                        <p className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</p>
-                      </div>
-                      <span className="rounded px-1.5 py-0.5 text-[9px] text-slate-400 rounded-md border border-slate-700/50">
-                        {item.track.genre ?? "Desconocido"}
-                      </span>
-                      <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${item.track.camelot_key?.endsWith("B") ? "bg-violet-500/20 text-violet-300" : "bg-cyan-500/20 text-cyan-300"}`}>
-                        {item.track.camelot_key}
-                      </span>
-                      <span className="w-20 text-right font-mono text-[10px] text-slate-400">
-                        {fmtBpm(item.track.bpm)} BPM
-                      </span>
-                      <span className="w-8 text-right font-mono text-[10px] text-slate-500">E{item.track.energy}</span>
-                    </div>
-                  </div>
-                );
-              })}
+                        <tr
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData("application/json", JSON.stringify(item.track));
+                            e.dataTransfer.effectAllowed = "copy";
+                          }}
+                          onDoubleClick={() => onLoadToActiveDeck(item.track)}
+                          className={`group cursor-grab border-t border-slate-800/60 transition hover:bg-panel-2 active:cursor-grabbing ${
+                            playingIds.has(item.track.id)
+                              ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
+                              : ""
+                          }`}
+                          title="Doble clic: cargar en el deck activo · arrastra a un Deck"
+                        >
+                          <td className="whitespace-nowrap px-2 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-1">
+                              <span className="w-6 text-right font-mono text-[10px] text-slate-500">
+                                {String(item.position).padStart(2, "0")}
+                              </span>
+                              <button
+                                onDoubleClick={(e) => e.stopPropagation()}
+                                onClick={() => onPlayPreview(item.track)}
+                                className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-panel-3 text-slate-300 transition hover:bg-violet-600 hover:text-white"
+                                aria-label="Pre-escuchar"
+                                title="Pre-escuchar (carga en Deck A y mueve el fader)"
+                              >
+                                <Play size={10} className="ml-0.5" />
+                              </button>
+                              <button
+                                onDoubleClick={(e) => e.stopPropagation()}
+                                onClick={() => onLoadTrackToDeckA(item.track)}
+                                className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500 hover:text-black"
+                                aria-label="Cargar en Deck A"
+                                title="Cargar en Deck A"
+                              >
+                                <Disc3 size={12} />
+                              </button>
+                              <button
+                                onDoubleClick={(e) => e.stopPropagation()}
+                                onClick={() => onLoadTrackToDeckB(item.track)}
+                                className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-slate-300 transition hover:bg-violet-500 hover:text-black"
+                                aria-label="Cargar en Deck B"
+                                title="Cargar en Deck B"
+                              >
+                                <Disc2 size={12} />
+                              </button>
+                            </div>
+                          </td>
+                          <td className="w-full px-2 py-1.5 font-medium text-slate-100">
+                            <div className="flex items-center gap-2">
+                              <CoverThumb track={item.track} size={20} />
+                              <span className="min-w-0 flex-1 truncate">{item.track.title}</span>
+                              {playingIds.has(item.track.id) && (
+                                <AudioLines size={11} className="shrink-0 animate-pulse text-emerald-400" />
+                              )}
+                            </div>
+                            <div className="truncate pl-7 text-[10px] text-slate-500">{item.track.artist}</div>
+                          </td>
+                          <td className="whitespace-nowrap px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(item.track.bpm)}</td>
+                          <td className="px-2 py-1.5 text-center">
+                            <span
+                              className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm ${
+                                item.track.camelot_key?.endsWith("B")
+                                  ? "border-violet-400/40 bg-gradient-to-br from-violet-500/35 to-violet-500/5 text-violet-200 shadow-violet-500/20"
+                                  : "border-cyan-400/40 bg-gradient-to-br from-cyan-500/35 to-cyan-500/5 text-cyan-200 shadow-cyan-500/20"
+                              }`}
+                            >
+                              {item.track.camelot_key ?? "-"}
+                            </span>
+                          </td>
+                          <td className="px-2 py-1.5"><EnergyBar value={item.track.energy} /></td>
+                          <td className="hidden max-w-32 truncate px-2 py-1.5 text-right text-slate-400 sm:table-cell">{item.track.genre ?? "Desconocido"}</td>
+                          <td className="hidden whitespace-nowrap px-2 py-1.5 text-right font-mono text-slate-400 sm:table-cell">{formatDuration(item.track.duration_sec)}</td>
+                        </tr>
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

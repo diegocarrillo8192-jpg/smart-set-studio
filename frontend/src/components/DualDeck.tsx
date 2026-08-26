@@ -135,9 +135,11 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
   return (
     <div className="flex h-full min-h-0 flex-col gap-1.5 p-2">
       {/* Audio elements ocultos — crossOrigin es OBLIGATORIO para que Web Audio
-          (MediaElementSource) reciba el audio por CORS en vez de silencio. */}
-      <audio ref={audioARef} crossOrigin="anonymous" preload="auto" className="hidden" />
-      <audio ref={audioBRef} crossOrigin="anonymous" preload="auto" className="hidden" />
+          (MediaElementSource) reciba el audio por CORS en vez de silencio.
+          Son fuentes del grafo de audio (display:none), no reproductores con
+          interfaz: aria-hidden para excluirlos del árbol de accesibilidad. */}
+      <audio ref={audioARef} crossOrigin="anonymous" preload="auto" className="hidden" aria-hidden="true" />
+      <audio ref={audioBRef} crossOrigin="anonymous" preload="auto" className="hidden" aria-hidden="true" />
 
       <div className="flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-300">

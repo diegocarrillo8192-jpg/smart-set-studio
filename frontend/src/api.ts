@@ -19,6 +19,23 @@ import {
 
 const BASE = "http://127.0.0.1:8765/api";
 
+// --- Secreto de bucle local (loopback) --------------------------------------
+// En escritorio (Electron) el backend exige un token aleatorio por petición:
+// lo comparte el proceso principal vía preload (window.smartSet.token). En la
+// versión web no hay token y el backend ni siquiera está corriendo, así que
+// estas funciones son no-op.
+
+function authToken(): string | null {
+  return window.smartSet?.token ?? null;
+}
+
+/** Añade el token como query param a URLs de <audio>/<img> (no envían headers). */
+function withToken(url: string): string {
+  const token = authToken();
+  if (!token) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
+
 // --- Reproducción en la versión web (sin backend local) --------------------
 // Registro de archivos elegidos localmente (File API / <input webkitdirectory>):
 // cuando el path de un track coincide, el audio se sirve desde un Blob URL
@@ -313,7 +330,7 @@ export function localUrlFor(path: string): string | null {
 function audioUrlFor(track: Track): string {
   return (
     localUrlFor(track.file_path) ??
-    `${BASE}/audio/stream?path=${encodeURIComponent(track.file_path)}`
+    withToken(`${BASE}/audio/stream?path=${encodeURIComponent(track.file_path)}`)
   );
 }
 
@@ -572,8 +589,21 @@ export function subscribeWebTracks(listener: () => void): () => void {
   };
 }
 
+// --- Throttling de notificaciones de análisis (UI responsive) ------------------
+// El análisis por lotes puede notificar cientos de veces para bibliotecas
+// grandes (+1200 tracks). En lugar de disparar un refresco de la UI por cada
+// lote, se colapsan en un único flush cada ~180ms (trailing): el hilo principal
+// solo pinta a ese ritmo y la navegación/clics siguen fluidos.
+
+const WEB_ANALYSIS_NOTIFY_MS = 180;
+let webTracksNotifyTimer: number | null = null;
+
 function notifyWebTracksChanged(): void {
-  for (const listener of Array.from(webTracksListeners)) listener();
+  if (webTracksNotifyTimer !== null) return;
+  webTracksNotifyTimer = window.setTimeout(() => {
+    webTracksNotifyTimer = null;
+    for (const listener of Array.from(webTracksListeners)) listener();
+  }, WEB_ANALYSIS_NOTIFY_MS);
 }
 
 async function analyzeWebTracks(files: File[], folderId: number): Promise<void> {
@@ -638,10 +668,11 @@ function webListTracks(params: Record<string, string | number | boolean | undefi
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  const token = authToken();
+  if (token) headers.set("X-SSA-Token", token);
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -893,9 +924,11 @@ export async function getTrackArtwork(track: Track): Promise<string | null | und
       const timer = window.setTimeout(() => controller.abort(), 12000);
       let result: string | null | undefined = undefined;
       try {
+        const token = authToken();
+        const headers = token ? { "X-SSA-Token": token } : undefined;
         const res = await fetch(
           `${BASE}/audio/artwork?path=${encodeURIComponent(key)}&thumb=1${force ? "&force=1" : ""}`,
-          { signal: controller.signal, cache: webCacheReset ? "reload" : "force-cache" }
+          { signal: controller.signal, cache: webCacheReset ? "reload" : "force-cache", headers }
         );
         if (res.ok) {
           const blob = await res.blob();
@@ -1001,10 +1034,10 @@ export const api = {
   /** URL de streaming del audio: Blob URL local (versión web) o servidor (CORS + Range). */
   audioUrl: (track: Track) => audioUrlFor(track),
   /** Stream por ID de track: salvoconducto cuando la ruta por path falla. */
-  audioUrlById: (id: number) => `${BASE}/tracks/${id}/audio`,
+  audioUrlById: (id: number) => withToken(`${BASE}/tracks/${id}/audio`),
   /** URL de la carátula del track (404 = sin portada, el frontend pone placeholder). */
   artworkUrl: (track: Track) =>
-    `${BASE}/audio/artwork?path=${encodeURIComponent(track.file_path)}`,
+    withToken(`${BASE}/audio/artwork?path=${encodeURIComponent(track.file_path)}`),
   /** Análisis estructural (onda RGB, frases, cues, zonas vocales): lazy + cacheado. */
   getAnalysis: (filePath: string) =>
     request<TrackAnalysis>(`/audio/analysis?path=${encodeURIComponent(filePath)}`),
@@ -1095,6 +1128,8 @@ declare global {
       selectFolderForExport: () => Promise<string | null>;
       /** Siempre true cuando la app corre embebida en Electron (escritorio). */
       isDesktop: true;
+      /** Secreto de bucle local para autenticar el backend (solo escritorio). */
+      token?: string;
     };
   }
 }

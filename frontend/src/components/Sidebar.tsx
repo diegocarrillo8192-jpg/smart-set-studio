@@ -423,6 +423,7 @@ export default function Sidebar({
                             else if (e.key === "Escape") cancelRename();
                           }}
                           onBlur={() => setRenameTarget(null)}
+                          aria-label="Renombrar carpeta"
                           className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
                           placeholder="Nombre de la carpeta"
                         />
@@ -442,6 +443,7 @@ export default function Sidebar({
                         e.stopPropagation();
                         void scanFolder(folder);
                       }}
+                      aria-label="Escanear / Re-analizar"
                       title="Escanear / Re-analizar"
                       className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
                     >
@@ -452,6 +454,7 @@ export default function Sidebar({
                         e.stopPropagation();
                         openMenu("folder", folder.id, e);
                       }}
+                      aria-label="Opciones de carpeta"
                       title="Opciones"
                       className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
                     >
@@ -517,6 +520,7 @@ export default function Sidebar({
                       else if (e.key === "Escape") cancelRename();
                     }}
                     onBlur={() => setRenameTarget(null)}
+                    aria-label="Renombrar set"
                     className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
                     placeholder="Nombre del set"
                   />
@@ -528,6 +532,7 @@ export default function Sidebar({
                     e.stopPropagation();
                     openMenu("set", set.id, e);
                   }}
+                  aria-label="Opciones del set"
                   title="Opciones del set"
                   className={`rounded p-1 transition ${menu && menu.kind === "set" && menu.id === set.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
                 >

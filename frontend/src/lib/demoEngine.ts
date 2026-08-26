@@ -1,5 +1,5 @@
 import type { DJSet, EnergyProfile, Track } from "../types";
-import { parseBlob } from "music-metadata-browser";
+import { parseBlob } from "music-metadata";
 
 /**
  * MOTOR DE DEMO EN NAVEGADOR (modo web volátil).
@@ -281,9 +281,11 @@ async function chromagram(decoded: AudioBuffer, maxSeconds = 30): Promise<number
     const base = 55 * Math.pow(2, oct); // A1..A6
     for (let st = 0; st < 12; st++) notes.push(base * Math.pow(2, st / 12));
   }
-  const ks = notes
-    .map((f) => Math.round((f * N) / targetRate))
-    .filter((k) => k > 0 && k < N / 2);
+  const ks: number[] = [];
+  for (const f of notes) {
+    const k = Math.round((f * N) / targetRate);
+    if (k > 0 && k < N / 2) ks.push(k);
+  }
   if (ks.length === 0) return new Array<number>(12).fill(0);
 
   // Tablas de twiddle precomputadas (cos/sin de cada bin necesario).
@@ -481,12 +483,6 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
   };
 }
 
-/** Compatibilidad: solo etiquetas (sin carátula ni duración). */
-export async function parseAudioTags(file: File): Promise<AudioTags> {
-  const r = await parseAudioFile(file);
-  return r.tags;
-}
-
 // ---------------------------------------------------------------------------
 // Tonalidad ID3 tradicional → Rueda Camelot
 // ---------------------------------------------------------------------------
@@ -563,9 +559,12 @@ export function generateDemoSet(
   allTracks: Track[],
   o: DemoGenerateOptions
 ): DJSet {
-  const pool = allTracks
-    .map(enrichDemoTrack)
-    .filter((t) => o.folder_ids.length === 0 || o.folder_ids.includes(Number(t.folder_id)));
+  const folderIdSet = new Set(o.folder_ids.map((id) => Number(id)));
+  const pool: Track[] = [];
+  for (const t of allTracks) {
+    const enriched = enrichDemoTrack(t);
+    if (folderIdSet.size === 0 || folderIdSet.has(Number(enriched.folder_id))) pool.push(enriched);
+  }
 
   const target = Math.max(3, Math.min(MAX_TRACKS_IN_SET, Math.round(o.duration_min / 4)));
   const energyTarget = PROFILE_ENERGY[o.energy_profile] ?? 5;

@@ -1,6 +1,7 @@
 """Exportación de sets: XML Rekordbox/Serato y copia ordenada a USB."""
 import os
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -166,8 +167,28 @@ def _safe_name(name: str) -> str:
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in name)
 
 
+def _copy_track(src: Path, target: Path) -> bool:
+    """Copia un único track de forma secuencial (bloqueante) con 1 reintento.
+
+    Devuelve True si la copia terminó correctamente y False si falló también
+    tras el reintento (lentitud del buffer USB, permisos, etc.)."""
+    for attempt in range(2):
+        try:
+            if target.exists():
+                target.unlink()
+            shutil.copy2(src, target)
+            return True
+        except OSError:
+            if attempt == 0:
+                time.sleep(0.3)
+    return False
+
+
 def export_to_usb(dj_set: Set, destination: str) -> dict:
-    """Copia los tracks en orden con prefijo numérico a un destino (USB/otra carpeta)."""
+    """Copia los tracks en orden con prefijo numérico a un destino (USB/otra carpeta).
+
+    La transferencia es secuencial: se espera a que cada track termine antes de
+    iniciar el siguiente, evitando así bloqueos de I/O y saturación del puerto USB."""
     import re
 
     if not destination or not destination.strip():
@@ -179,18 +200,27 @@ def export_to_usb(dj_set: Set, destination: str) -> dict:
 
     items = sorted(dj_set.items, key=lambda i: i.position)
     copied: list[str] = []
+    failed: list[str] = []
     for item in items:
         src = Path(item.track.file_path)
         if not src.exists():
+            failed.append(item.track.file_path)
             continue
         ext = src.suffix.lower()
         # Sanitizar el nombre: sin caracteres inválidos ni segmentos ".."
         # (previene Path Traversal dentro del destino copiado).
         safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", src.stem).strip().replace("..", "_") or "track"
         target = dest / f"{item.position:02d} - {safe_stem}{ext}"
-        if target.exists():
-            target.unlink()
-        shutil.copy2(src, target)
+
+        if not _copy_track(src, target):
+            failed.append(item.track.file_path)
+            continue
         copied.append(target.name)
 
-    return {"copied": len(copied), "total": len(items), "destination": str(dest)}
+    return {
+        "copied": len(copied),
+        "failed": len(failed),
+        "failed_files": failed,
+        "total": len(items),
+        "destination": str(dest),
+    }

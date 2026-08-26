@@ -31,3 +31,5 @@ electron.out.log
 .env.local
 .vscode/
 .idea/
+.vercel
+.env*
