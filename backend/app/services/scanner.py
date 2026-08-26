@@ -1,15 +1,35 @@
-"""Escaneo de carpetas: descubre archivos de audio y los analiza en background."""
+"""Escaneo de carpetas: descubre archivos de audio y los analiza en background.
+
+Pipeline de rendimiento:
+
+- **Paralelización**: un `ThreadPoolExecutor` compartido (4-6 hilos) ejecuta en
+  simultáneo el trabajo CPU/IO por archivo (lectura de tags con mutagen,
+  análisis BPM/key/energía con librosa y extracción de carátula). numpy/librosa
+  liberan el GIL durante la decodificación, el resampling y las FFT, así que los
+  hilos aprovechan todos los núcleos de la CPU.
+- **Escritura en lote**: el hilo principal consolida los resultados y hace
+  `commit` de SQLite cada `DB_COMMIT_BATCH` tracks (no por track), evitando
+  fsync/commit continuos y manteniendo el lock de escritura abierto el mínimo
+  tiempo posible (WAL).
+"""
 import logging
 import os
 import threading
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from ..config import AUDIO_EXTENSIONS
 from ..models import Folder, ScanJob, Track
-from .analyzer import analyze_file, embedded_key_to_camelot, read_metadata
+from .analyzer import (
+    AnalysisResult,
+    TrackMetadata,
+    analyze_file,
+    embedded_key_to_camelot,
+    read_metadata,
+)
 from .artwork_cache import extract_embedded, get_cached, store_embedded
 from .id3_writer import write_camelot_id3
 from .settings import get_all_settings
@@ -17,6 +37,54 @@ from .settings import get_all_settings
 logger = logging.getLogger(__name__)
 
 _jobs: dict[int, ScanJob] = {}
+
+# Número de hilos de análisis concurrentes (4-6, según núcleos disponibles).
+def _analysis_workers() -> int:
+    try:
+        n = os.cpu_count() or 4
+    except Exception:  # noqa: BLE001
+        n = 4
+    return max(4, min(6, n))
+
+
+ANALYSIS_WORKERS = _analysis_workers()
+
+# Escritura agrupada: commit de SQLite cada N tracks (no por track individual).
+DB_COMMIT_BATCH = 25
+
+# Pool compartido de análisis (único para toda la app): acota la concurrencia
+# global a 4-6 hilos aunque se lancen varios escaneos de carpetas a la vez.
+_analysis_pool: ThreadPoolExecutor | None = None
+_pool_lock = threading.Lock()
+
+
+def _get_pool() -> ThreadPoolExecutor:
+    global _analysis_pool
+    with _pool_lock:
+        if _analysis_pool is None:
+            _analysis_pool = ThreadPoolExecutor(
+                max_workers=ANALYSIS_WORKERS, thread_name_prefix="ssa-analysis"
+            )
+        return _analysis_pool
+
+
+@dataclass
+class _FileWork:
+    path: str
+    mtime: float
+    needs_meta: bool
+    needs_analysis: bool
+    embedded_bpm: float | None
+    extract_art: bool
+
+
+@dataclass
+class _FileResult:
+    path: str
+    mtime: float
+    meta: TrackMetadata | None
+    analysis: AnalysisResult | None
+    artwork: tuple[bytes, str] | None
 
 
 def discover_audio_files(root: str) -> list[Path]:
@@ -45,39 +113,43 @@ def discover_audio_files(root: str) -> list[Path]:
     return files
 
 
-def _cache_artwork_once(path: str, force: bool = False) -> None:
-    """Precache en el primer escaneo: la carátula embebida se extrae UNA vez
-    y se persiste (disco sha1 + SQLite). Así, al abrir una carpeta ya
-    escaneada, el endpoint sirve el 100% de las portadas desde la caché en
-    <1 ms cada una. SOLO guarda positivos: el negativo (sin arte) lo decide
-    el endpoint, porque la carpeta puede tener una portada adjunta.
-
-    `force=True` (re-escaneo manual): re-extrae la carátula embebida aunque
-    ya exista fila en caché, y regenera la miniatura si el arte cambió."""
+def _process_file(work: _FileWork) -> _FileResult:
+    """Trabajo CPU/IO por archivo, ejecutado en un hilo del pool (sin tocar BD)."""
+    meta: TrackMetadata | None = None
+    analysis: AnalysisResult | None = None
+    artwork: tuple[bytes, str] | None = None
     try:
-        if not force and get_cached(path) is not None:
-            return
-        embedded = extract_embedded(path)
-        if embedded is not None:
-            data, mime = embedded
-            store_embedded(path, data, mime)
+        if work.needs_meta:
+            meta = read_metadata(work.path)
+        if work.needs_analysis:
+            embedded = meta.embedded_bpm if meta is not None else work.embedded_bpm
+            analysis = analyze_file(work.path, embedded_bpm=embedded)
+        if work.extract_art:
+            artwork = extract_embedded(work.path)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Arte de %s no precacheable: %s", path, exc)
+        logger.warning("Análisis de worker falló en %s: %s", work.path, exc)
+    return _FileResult(work.path, work.mtime, meta, analysis, artwork)
 
 
-def _upsert_track(
-    db: Session, folder: Folder, path: str, mtime: float, force_meta: bool = False
-) -> Track | None:
-    """Inserta o actualiza un track (solo si el archivo cambió o fue no analizado).
+def _apply_result(
+    db: Session,
+    folder: Folder,
+    track: Track | None,
+    result: _FileResult,
+    force: bool,
+    id3_enabled: bool,
+) -> None:
+    """Aplica metadatos, análisis y carátula de un track a la BD (sin commit).
 
-    `force_meta=True` (re-escaneo manual): re-lee SIEMPRE las etiquetas
-    (mutagen) para repoblar género/artista/tonalidad de la pista sin depender
-    del mtime — los 1049 tracks indexados antes de la columna `genre` quedan
-    NULL y este re-escaneo los rellena. No re-analiza BPM (los datos de
-    análisis del archivo intacto se conservan)."""
-    track = db.query(Track).filter_by(file_path=path).one_or_none()
+    El commit se agrupa aguas arriba (`DB_COMMIT_BATCH`) para no escribir en
+    disco por cada track individual.
+    """
+    path = result.path
+
     if track is None:
-        meta = read_metadata(path)
+        if result.meta is None:
+            raise ValueError(f"Metadatos ilegibles para nuevo track: {path}")
+        meta = result.meta
         track = Track(
             file_path=path,
             folder_id=folder.id,
@@ -87,110 +159,149 @@ def _upsert_track(
             duration_sec=meta.duration_sec,
             embedded_bpm=meta.embedded_bpm,
             embedded_key=meta.embedded_key,
-            # Nuevo: guardar género leído (fallback a nombre de carpeta si está vacío)
             genre=meta.genre or folder.name,
-            file_modified_at=mtime,
+            file_modified_at=result.mtime,
         )
         db.add(track)
-        db.flush()
-        _cache_artwork_once(path)
-        return track
-
-    # Actualizar metadatos si el archivo cambió o el usuario pidió re-escaneo
-    if track.file_modified_at != mtime or force_meta:
-        meta = read_metadata(path)
+    elif result.meta is not None:
+        meta = result.meta
         track.title = meta.title
         track.artist = meta.artist
         track.album = meta.album
         track.duration_sec = meta.duration_sec
         track.embedded_bpm = meta.embedded_bpm
         track.embedded_key = meta.embedded_key
-        track.file_modified_at = mtime
+        track.file_modified_at = result.mtime
         # Género real de las etiquetas; si el archivo no define uno, se usa el
         # nombre de la carpeta contenedora (nunca "Desconocido").
         if meta.genre:
             track.genre = meta.genre
         elif not track.genre:
-            track.genre = folder.name  # fallback a nombre de carpeta
-        track.analyzed = False if not force_meta else track.analyzed
+            track.genre = folder.name
+        # force (re-escaneo manual) conserva el análisis existente; un cambio
+        # real del archivo (mtime distinto) fuerza el re-análisis.
+        track.analyzed = False if not force else track.analyzed
         track.has_error = False
         track.error_message = None
-        _cache_artwork_once(path, force=force_meta)
 
-    return track
+    if result.analysis is not None:
+        r = result.analysis
+        if r.error:
+            track.has_error = True
+            track.error_message = r.error
+            track.analyzed = True
+        else:
+            track.bpm = r.bpm
+            track.musical_key = r.musical_key
+            track.camelot_key = r.camelot_key
+            # Fallback: tonalidad original de las etiquetas del archivo
+            # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
+            if not track.camelot_key and track.embedded_key:
+                music, camelot = embedded_key_to_camelot(track.embedded_key)
+                track.musical_key = track.musical_key or music
+                track.camelot_key = camelot
+            track.loudness_db = r.loudness_db
+            track.spectral_centroid = r.spectral_centroid
+            track.energy = r.energy
+            track.analyzed = True
+            track.has_error = False
+            track.error_message = None
+            # Escritorio: escribir la key detectada en el ID3 del MP3
+            if id3_enabled and path.lower().endswith(".mp3") and r.camelot_key:
+                write_camelot_id3(path, r.camelot_key)
+
+    if result.artwork is not None:
+        data, mime = result.artwork
+        try:
+            store_embedded(path, data, mime)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Carátula de %s no cacheable: %s", path, exc)
 
 
 def run_scan(db: Session, job: ScanJob, folder: Folder, force: bool = False) -> None:
-    """Ejecuta el escaneo + análisis de una carpeta (llamado desde un thread)."""
+    """Ejecuta el escaneo + análisis de una carpeta (llamado desde un thread).
+
+    Descubre los archivos, planifica el trabajo por archivo (una sola consulta
+    masiva de estado, no N), analiza en paralelo con el pool de workers y
+    persiste los resultados en lotes.
+    """
     job.status = "running"
     db.commit()
 
     try:
         files = discover_audio_files(folder.path)
-        job.total_files = len(files)
-        db.commit()
 
-        if force:
-            # Re-escaneo manual: NO se re-analiza BPM de archivos intactos (los
-            # resultados existentes se conservan); el worker re-lee las etiquetas
-            # (mutagen) y re-extrae las carátulas vía force_meta en _upsert_track.
-            db.commit()
+        # 1) Estado actual en UNA consulta masiva (no una por track).
+        existing = {
+            t.file_path: t for t in db.query(Track).filter_by(folder_id=folder.id).all()
+        }
+        id3_enabled = _id3_enabled(db)
 
-        for idx, file_path in enumerate(files):
-            if _job_cancelled(job):
-                break
+        # 2) Planificación: qué necesita cada archivo (meta / análisis / arte).
+        work_items: list[_FileWork] = []
+        for file_path in files:
+            path = str(file_path)
             try:
                 mtime = os.path.getmtime(file_path)
-                track = _upsert_track(db, folder, str(file_path), mtime, force_meta=force)
-                # Commit inmediato tras registrar el track: la pesada detección
-                # de BPM/clave corre SIN transacción SQLite abierta. El escáner
-                # jamás retiene el lock de escritura más de unos milisegundos,
-                # así que el Generador de Sets y el frontend nunca sufren
-                # "database is locked" mientras se escanea.
-                db.commit()
-                if track is not None and not track.analyzed:
-                    result = analyze_file(str(file_path), embedded_bpm=track.embedded_bpm)
-                    if result.error:
-                        track.has_error = True
-                        track.error_message = result.error
-                        track.analyzed = True
-                    else:
-                        track.bpm = result.bpm
-                        track.musical_key = result.musical_key
-                        track.camelot_key = result.camelot_key
-                        # Fallback: tonalidad original de las etiquetas del archivo
-                        # (TKEY/INITIALKEY en MP3, AIFF, WAV, FLAC y M4A)
-                        if not track.camelot_key and track.embedded_key:
-                            music, camelot = embedded_key_to_camelot(track.embedded_key)
-                            track.musical_key = track.musical_key or music
-                            track.camelot_key = camelot
-                        track.loudness_db = result.loudness_db
-                        track.spectral_centroid = result.spectral_centroid
-                        track.energy = result.energy
-                        track.analyzed = True
-                        track.has_error = False
-                        track.error_message = None
-                        # Escritorio: escribir la key detectada en el ID3 del MP3
-                        _tag_track_id3(db, str(file_path), result.camelot_key)
-                    # Persistir el resultado del track de inmediato: commit por
-                    # track, nunca transacciones largas que bloqueen SQLite.
-                    db.commit()
+            except OSError:
+                logger.warning("Track inaccesible (mtime): %s", path)
+                continue
+
+            track = existing.get(path)
+            if track is None:
+                needs_meta = True
+                needs_analysis = True
+                embedded_bpm: float | None = None
+            elif force:
+                # Re-escaneo manual: relee tags y arte, pero NO re-analiza BPM
+                # de archivos ya analizados (los resultados se conservan).
+                needs_meta = True
+                needs_analysis = not track.analyzed
+                embedded_bpm = track.embedded_bpm
+            else:
+                changed = track.file_modified_at != mtime
+                needs_meta = changed
+                needs_analysis = changed or not track.analyzed
+                embedded_bpm = track.embedded_bpm
+
+            extract_art = force or get_cached(path) is None
+            work_items.append(
+                _FileWork(path, mtime, needs_meta, needs_analysis, embedded_bpm, extract_art)
+            )
+
+        job.total_files = len(work_items)
+        db.commit()
+
+        # 3) Análisis concurrente + escritura en lote de resultados.
+        processed = 0
+        pool = _get_pool()
+        futures = {pool.submit(_process_file, w): w for w in work_items}
+
+        for fut in as_completed(futures):
+            if _job_cancelled(job):
+                for f in futures:
+                    f.cancel()
+                break
+            work = futures[fut]
+            try:
+                result = fut.result()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Track fallido %s: %s", file_path, exc)
+                logger.warning("Worker de %s reventó: %s", work.path, exc)
+                result = _FileResult(work.path, work.mtime, None, None, None)
+
+            try:
+                _apply_result(db, folder, existing.get(work.path), result, force, id3_enabled)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Track fallido %s: %s", work.path, exc)
                 try:
                     db.rollback()
                 except Exception:  # noqa: BLE001
                     pass
 
-            job.processed_files = idx + 1
-
-            # Prioridad de procesos: cede el GIL y el scheduler de forma
-            # cooperativa tras cada track. El análisis corre en un hilo daemon
-            # en segundo plano; esta cesión garantiza que las peticiones de
-            # gestión de sets (crear/abrir/eliminar) del threadpool de FastAPI
-            # obtengan turno de CPU y bloqueos SQLite sin quedarse encoladas
-            # detrás del motor de análisis durante escaneos masivos.
-            time.sleep(0)
+            processed += 1
+            job.processed_files = processed
+            if processed % DB_COMMIT_BATCH == 0:
+                db.commit()
 
         db.commit()
         folder.last_scanned_at = job.started_at
@@ -211,20 +322,11 @@ def _job_cancelled(job: ScanJob) -> bool:
     return job.status == "cancelled"
 
 
-def _should_write_id3(db: Session, file_path: str) -> bool:
-    """¿Etiquetar ID3 del archivo original? Solo escritorio + opción activa,
-    y únicamente MP3 (TKEY/COMM de ID3v2). La versión web nunca toca archivos."""
-    if not file_path.lower().endswith(".mp3"):
-        return False
+def _id3_enabled(db: Session) -> bool:
+    """¿Etiquetar ID3 de los archivos originales? Solo escritorio + opción
+    activa, y únicamente MP3. La versión web nunca toca archivos."""
     s = get_all_settings(db)
     return bool(s.get("write_id3_keys")) and bool(s.get("is_desktop"))
-
-
-def _tag_track_id3(db: Session, file_path: str, camelot_key: str | None) -> None:
-    """Escribe la tonalidad detectada en TKEY/COMM del MP3 (integridad de audio
-    garantizada por mutagen: solo se reescribe el bloque de tags)."""
-    if camelot_key and _should_write_id3(db, file_path):
-        write_camelot_id3(file_path, camelot_key)
 
 
 def start_scan(db: Session, folder: Folder, force: bool = False) -> ScanJob:
@@ -237,7 +339,9 @@ def start_scan(db: Session, folder: Folder, force: bool = False) -> ScanJob:
     db.refresh(job)
 
     def _worker():
-        thread_db = Session(db.get_bind())
+        # expire_on_commit=False: los tracks precargados en `existing` no se
+        # recargan de la BD tras cada commit por lote (evita SELECTs por track).
+        thread_db = Session(db.get_bind(), expire_on_commit=False)
         try:
             folder_db = thread_db.get(Folder, folder.id)
             job_db = thread_db.get(ScanJob, job.id)

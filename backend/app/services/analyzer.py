@@ -253,7 +253,18 @@ def embedded_key_to_camelot(text: str) -> tuple[str, str | None]:
 def _load_mono(path: str) -> tuple[np.ndarray, float]:
     import librosa
 
-    y, sr = librosa.load(path, sr=SAMPLE_RATE, mono=True, duration=ANALYSIS_MAX_SEC)
+    # Decodificación optimizada para velocidad: downsample a 22050 Hz MONO
+    # (suficiente para BPM/key/energía) y resampleo `soxr_mq` (calidad media,
+    # mucho más rápido que el soxr_hq por defecto y sin pérdida relevante para
+    # las features musicales que extraemos). El recorte a ANALYSIS_MAX_SEC
+    # acota aún más el trabajo por archivo.
+    y, sr = librosa.load(
+        path,
+        sr=SAMPLE_RATE,
+        mono=True,
+        duration=ANALYSIS_MAX_SEC,
+        res_type="soxr_mq",
+    )
     if len(y) == 0:
         raise ValueError("Audio vacío o ilegible")
     return y, float(sr)
