@@ -106,3 +106,10 @@ class SettingsUpdate(BaseModel):
 
 class ExportRequest(BaseModel):
     destination: str | None = None
+
+
+class TrackKeyUpdate(BaseModel):
+    """Edición manual de la tonalidad: Camelot ('8A'), nota+modo ('A minor')
+    o acordes ('Am')."""
+
+    key: str = Field(min_length=1, max_length=32)

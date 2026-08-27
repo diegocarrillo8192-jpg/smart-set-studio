@@ -2,6 +2,7 @@ import type {
   DJSet,
   EnergyProfile,
   Folder,
+  ReanalyzeJob,
   RecommendationsResponse,
   ScanJob,
   Settings,
@@ -1044,6 +1045,28 @@ export const api = {
   /** Recomendador en vivo: top N de compatibilidad armónica+BPM del seed. */
   getRecommendations: (trackId: number) =>
     request<RecommendationsResponse>(`/tracks/${trackId}/recommendations`),
+  /** Edición manual de la key del track (Camelot '8A', nota 'A minor' o 'Am'). */
+  updateTrackKey: (id: number, key: string) => {
+    if (isWeb()) {
+      ensureWebStoreLoaded();
+      const t = webTracks.find((x) => x.id === id);
+      if (!t) return Promise.reject(new Error("Track no encontrado"));
+      t.musical_key = key;
+      t.camelot_key = camelotFromString(key);
+      t.embedded_key = key;
+      saveWebStore();
+      notifyWebTracksChanged();
+      return Promise.resolve({ ...t });
+    }
+    return request<Track>(`/tracks/${id}/key`, {
+      method: "PATCH",
+      body: JSON.stringify({ key }),
+    });
+  },
+  /** Re-análisis rápido de Key en toda la biblioteca (solo escritorio). */
+  reanalyzeKeys: () => request<ReanalyzeJob>("/tracks/reanalyze-key", { method: "POST" }),
+  reanalyzeKeysStatus: (jobId: number) =>
+    request<ReanalyzeJob>(`/tracks/reanalyze-key/status?job_id=${jobId}`),
 
   // Sets
   generateSet: (payload: {

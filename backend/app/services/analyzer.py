@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 22050
 ANALYSIS_MAX_SEC = 90  # se analizan los primeros N segundos para velocidad
+KEY_ANALYSIS_MAX_SEC = 45  # re-análisis rápido de key: menos audio, aún preciso
 HOP_LENGTH = 512
 
 
@@ -86,6 +87,94 @@ def _mp4_text(audio, key: str) -> str:
         return ""
 
 
+# Mapeo de la rueda Serato (código 0-23) -> Camelot. Serato guarda la key en
+# un byte dentro del GEOB "Serato Analysis"; el índice sigue el círculo de
+# quintas (mayor en la cara bemol, menor en la sostenida), igual que Camelot.
+SERATO_KEY_TO_CAMELOT = (
+    "8B", "5A", "3B", "12A", "10B", "7A", "5B", "2A",
+    "12B", "9A", "7B", "4A", "2B", "11A", "9B", "6A",
+    "4B", "1A", "11B", "8A", "6B", "3A", "1B", "10A",
+)
+
+
+def _id3_txxx(audio, *descriptions: str) -> str:
+    """Primer valor de un frame TXXX cuyo descriptor coincida (case-insensitive).
+
+    Mixed In Key y Rekordbox escriben 'InitialKey'/'KEY' como TXXX cuando no
+    usan TKEY/INITIALKEY.
+    """
+    try:
+        for frame in audio.getall("TXXX"):
+            try:
+                desc = (str(frame.desc) if frame.desc is not None else "").strip().lower()
+            except Exception:
+                continue
+            if desc not in descriptions:
+                continue
+            try:
+                parts = [str(t) for t in frame.text if str(t).strip()]
+            except Exception:
+                continue
+            if parts:
+                return parts[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _zlib_inflate(data: bytes) -> bytes:
+    """Descomprime un GEOB Serato si viene comprimido; '' si no aplica."""
+    try:
+        import zlib
+
+        return zlib.decompress(data)
+    except Exception:
+        return b""
+
+
+def _serato_key_code(payload: bytes) -> int | None:
+    """Escanea el payload binario del GEOB 'Serato *' buscando el campo KEY.
+
+    Formato de campo: 4 bytes de identificador ('KEY'+0x00/0x20) + 4 bytes de
+    longitud big-endian + datos (la key es el primer byte, 0-23).
+    """
+    idx = payload.find(b"KEY")
+    while idx != -1:
+        if idx + 8 <= len(payload) and idx + 8 + 1 <= len(payload):
+            length = int.from_bytes(payload[idx + 4 : idx + 8], "big")
+            if 1 <= length <= 4:
+                code = payload[idx + 8]
+                if 0 <= code < 24:
+                    return code
+        idx = payload.find(b"KEY", idx + 1)
+    return None
+
+
+def _serato_key(audio) -> str:
+    """Tonalidad desde el GEOB 'Serato Analysis/Markers' (byte 0-23 -> Camelot)."""
+    try:
+        for frame in audio.getall("GEOB"):
+            try:
+                desc = (str(frame.desc) if frame.desc is not None else "").strip().lower()
+            except Exception:
+                continue
+            if "serato" not in desc:
+                continue
+            try:
+                data = bytes(frame.data)
+            except Exception:
+                continue
+            for payload in (data, _zlib_inflate(data)):
+                if not payload:
+                    continue
+                code = _serato_key_code(payload)
+                if code is not None:
+                    return SERATO_KEY_TO_CAMELOT[code]
+    except Exception:
+        pass
+    return ""
+
+
 def read_metadata(file_path: str) -> TrackMetadata:
     """Lee metadatos robustos con mutagen: ID3, FLAC/OGG (Vorbis), MP4/M4A, APE.
 
@@ -126,7 +215,15 @@ def read_metadata(file_path: str) -> TrackMetadata:
                 genre = _id3_text(audio, "TCON")
                 year = _id3_text(audio, "TDRC")[:4] or _id3_text(audio, "TYER")
                 bpm_raw = _id3_text(audio, "TBPM")
-                embedded_key = _id3_text(audio, "TKEY")
+                # Prioridad de fuentes de tonalidad: TKEY (Rekordbox/Traktor/
+                # Mixed In Key), INITIALKEY (ID3v2.4), TXXX 'InitialKey'/'KEY'
+                # y, por último, el GEOB propietario de Serato.
+                embedded_key = (
+                    _id3_text(audio, "TKEY")
+                    or _id3_text(audio, "INITIALKEY")
+                    or _id3_txxx(audio, "initialkey", "initial key", "key")
+                    or _serato_key(audio)
+                )
             elif is_mp4:
                 title = _mp4_text(audio, "\xa9nam")
                 artist = _mp4_text(audio, "\xa9ART") or _mp4_text(audio, "aART")
@@ -228,6 +325,17 @@ def embedded_key_to_camelot(text: str) -> tuple[str, str | None]:
             return f"{note} {mode}", code
         except ValueError:
             return "", code
+    # Notación Open Key de Traktor: '8m' (menor) / '8d' (mayor) == 8A / 8B.
+    import re
+
+    op = re.match(r"^\s*(\d{1,2})\s*([md])\s*$", text, re.IGNORECASE)
+    if op:
+        num = int(op.group(1))
+        if 1 <= num <= 12:
+            code = normalize_camelot(f"{num}{'A' if op.group(2).lower() == 'm' else 'B'}")
+            if code:
+                note, mode = camelot_to_note(code)
+                return f"{note} {mode}", code
     note = text.strip().split()[0]
     body = note
     mode = "major"
@@ -244,25 +352,25 @@ def embedded_key_to_camelot(text: str) -> tuple[str, str | None]:
     code = note_to_camelot(body, mode)
     if not code:
         return "", None
-    return f"{note} {mode}", code
+    return f"{body} {mode}", code
 
 
 # ---------------------------------------------------------------------------
 # Librosa: BPM, key y energía
 # ---------------------------------------------------------------------------
-def _load_mono(path: str) -> tuple[np.ndarray, float]:
+def _load_mono(path: str, duration: float = ANALYSIS_MAX_SEC) -> tuple[np.ndarray, float]:
     import librosa
 
     # Decodificación optimizada para velocidad: downsample a 22050 Hz MONO
     # (suficiente para BPM/key/energía) y resampleo `soxr_mq` (calidad media,
     # mucho más rápido que el soxr_hq por defecto y sin pérdida relevante para
-    # las features musicales que extraemos). El recorte a ANALYSIS_MAX_SEC
-    # acota aún más el trabajo por archivo.
+    # las features musicales que extraemos). El recorte de duración acota aún
+    # más el trabajo por archivo.
     y, sr = librosa.load(
         path,
         sr=SAMPLE_RATE,
         mono=True,
-        duration=ANALYSIS_MAX_SEC,
+        duration=duration,
         res_type="soxr_mq",
     )
     if len(y) == 0:
@@ -328,13 +436,27 @@ def estimate_bpm(y: np.ndarray, sr: float, embedded_bpm: float | None = None) ->
 def estimate_key(y: np.ndarray, sr: float) -> tuple[str | None, str | None]:
     """Detección de tonalidad vía chroma + correlación de Krumhansl-Schmuckler.
 
+    Separa primero la componente armónica de la percusiva con HPSS (los kicks y
+    drums ensucian el espectro con ruido de banda ancha que corrompe el
+    chromagrama), calcula `chroma_cqt` solo sobre la señal armónica y elige el
+    par (raíz, modo) con mayor correlación contra las matrices de K-S.
+
     Devuelve (nota, código Camelot) o (None, None) si no hay confianza.
     """
     try:
         import librosa
 
-        chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=HOP_LENGTH)
+        y_harm, _ = librosa.effects.hpss(y)
+        if y_harm.size == 0 or float(np.max(np.abs(y_harm))) < 1e-6:
+            y_harm = y
+        try:
+            chroma = librosa.feature.chroma_cqt(y=y_harm, sr=sr, hop_length=HOP_LENGTH)
+        except Exception:
+            chroma = librosa.feature.chroma_stft(y=y_harm, sr=sr, hop_length=HOP_LENGTH)
         chroma_mean = chroma.mean(axis=1)
+        norm = float(np.linalg.norm(chroma_mean))
+        if norm > 1e-9:
+            chroma_mean = chroma_mean / norm
 
         best_score = -np.inf
         best = (None, None)
@@ -427,3 +549,30 @@ def analyze_file(path: str, embedded_bpm: float | None = None) -> AnalysisResult
             loudness_db=None, spectral_centroid=None, energy=None,
             error=str(exc),
         )
+
+
+def analyze_key_only(path: str) -> tuple[str | None, str | None]:
+    """Re-análisis rápido EXCLUSIVO de tonalidad (sin BPM ni waveform).
+
+    PRIORIDAD 1 — metadatos: si el archivo ya trae la key (TKEY/INITIALKEY/
+    Rekordbox/Serato/Traktor), se usa tal cual y NO se toca el audio.
+    FALLBACK — motor armónico: HPSS + chroma_cqt + Krumhansl-Schmuckler sobre
+    los primeros `KEY_ANALYSIS_MAX_SEC` segundos.
+
+    Devuelve (musical_key, camelot_key) o (None, None) si todo falla.
+    """
+    try:
+        meta = read_metadata(path)
+        if meta.embedded_key:
+            music, camelot = embedded_key_to_camelot(meta.embedded_key)
+            if camelot:
+                return music, camelot
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Metadatos ilegibles para key de %s: %s", path, exc)
+
+    try:
+        y, sr = _load_mono(path, duration=KEY_ANALYSIS_MAX_SEC)
+        return estimate_key(y, sr)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Re-análisis de key falló en %s: %s", path, exc)
+        return None, None

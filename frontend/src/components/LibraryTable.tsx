@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AudioLines, Disc2, Disc3, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
+import { AudioLines, Disc2, Disc3, KeyRound, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
 import type { Track } from "../types";
-import { api, prefetchArtworks } from "../api";
+import { api, isWeb, prefetchArtworks } from "../api";
 import { fmtBpm } from "../lib/format";
 import { CoverThumb } from "./Artwork";
 import EnergyBar from "./EnergyBar";
@@ -59,6 +59,9 @@ export default function LibraryTable({
   const [minEnergy, setMinEnergy] = useState("");
   const [maxEnergy, setMaxEnergy] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+  const [editingKeyId, setEditingKeyId] = useState<number | null>(null);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [reanalyzeLabel, setReanalyzeLabel] = useState("Re-analizar Keys");
 
   /** Lookup O(1) de los IDs en reproducción para evitar `Array.includes` O(n)
    *  dentro del map de cada fila de la tabla. */
@@ -121,6 +124,55 @@ export default function LibraryTable({
     onSetCompatibleWith(null);
   };
 
+  /** Guarda la key editada manualmente (Camelot '8A' / nota 'A minor' / 'Am')
+   *  y actualiza la fila en el estado local sin recargar toda la lista. */
+  const saveKey = async (id: number, key: string) => {
+    try {
+      const updated = await api.updateTrackKey(id, key);
+      setTracks((prev) => prev.map((t) => (t.id === id ? updated : t)));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  /** Re-análisis rápido de Key (solo escritorio): sin BPM ni waveform. */
+  const startReanalyze = async () => {
+    setReanalyzing(true);
+    setReanalyzeLabel("Re-analizando…");
+    try {
+      const job = await api.reanalyzeKeys();
+      const jobId = job.job_id ?? 0;
+      if (!jobId) {
+        setReanalyzing(false);
+        setReanalyzeLabel("Re-analizar Keys");
+        await load();
+        return;
+      }
+      const poll = async () => {
+        try {
+          const s = await api.reanalyzeKeysStatus(jobId);
+          setReanalyzeLabel(`Keys: ${s.processed}/${s.total}`);
+          if (s.status === "done" || s.status === "error") {
+            setReanalyzing(false);
+            setReanalyzeLabel("Re-analizar Keys");
+            await load();
+            return;
+          }
+        } catch {
+          setReanalyzing(false);
+          setReanalyzeLabel("Re-analizar Keys");
+          return;
+        }
+        window.setTimeout(poll, 1000);
+      };
+      void poll();
+    } catch (e) {
+      console.error(e);
+      setReanalyzing(false);
+      setReanalyzeLabel("Re-analizar Keys");
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       {/* Barra de herramientas */}
@@ -145,6 +197,20 @@ export default function LibraryTable({
         >
           <SlidersHorizontal size={13} /> Filtros {filtersActive && <span className="rounded-full bg-violet-500 px-1 text-[9px] text-white">ON</span>}
         </button>
+        {!isWeb() && (
+          <button
+            onClick={() => void startReanalyze()}
+            disabled={reanalyzing}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
+              reanalyzing
+                ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200"
+                : "border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
+            }`}
+            title="Re-analizar solo la Key de toda la biblioteca (sin BPM ni waveform)"
+          >
+            <KeyRound size={13} className={reanalyzing ? "animate-spin" : ""} /> {reanalyzeLabel}
+          </button>
+        )}
       </div>
 
       {/* Filtros */}
@@ -327,16 +393,42 @@ export default function LibraryTable({
 <td className="hidden max-w-40 truncate px-2 py-1.5 text-slate-400 md:table-cell">{t.artist}</td>
               <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? "Desconocido"}</td>
               <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
-                <td className="px-2 py-1.5 text-center">
-                  <span
-                    className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm ${
-                      t.camelot_key?.endsWith("B")
-                        ? "border-violet-400/40 bg-gradient-to-br from-violet-500/35 to-violet-500/5 text-violet-200 shadow-violet-500/20"
-                        : "border-cyan-400/40 bg-gradient-to-br from-cyan-500/35 to-cyan-500/5 text-cyan-200 shadow-cyan-500/20"
-                    }`}
-                  >
-                    {t.camelot_key ?? "-"}
-                  </span>
+                <td
+                  className="px-2 py-1.5 text-center"
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                >
+                  {editingKeyId === t.id ? (
+                    <select
+                      autoFocus
+                      value={t.camelot_key ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setEditingKeyId(null);
+                        if (v) void saveKey(t.id, v);
+                      }}
+                      onBlur={() => setEditingKeyId(null)}
+                      aria-label="Editar tonalidad"
+                      className="rounded border border-violet-500/60 bg-slate-900 px-1 py-0.5 font-mono text-[10px] font-black text-violet-200 outline-none"
+                    >
+                      <option value="">-</option>
+                      {CAMELOT_CODES.map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <button
+                      onClick={() => setEditingKeyId(t.id)}
+                      title="Clic para editar la tonalidad (ajusta a oído)"
+                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm transition hover:ring-1 hover:ring-white/30 ${
+                        t.camelot_key?.endsWith("B")
+                          ? "border-violet-400/40 bg-gradient-to-br from-violet-500/35 to-violet-500/5 text-violet-200 shadow-violet-500/20"
+                          : "border-cyan-400/40 bg-gradient-to-br from-cyan-500/35 to-cyan-500/5 text-cyan-200 shadow-cyan-500/20"
+                      }`}
+                    >
+                      {t.camelot_key ?? "-"}
+                    </button>
+                  )}
                 </td>
                 <td className="px-2 py-1.5"><EnergyBar value={t.energy} /></td>
                 <td className="hidden max-w-28 truncate px-2 py-1.5 text-slate-500 lg:table-cell">{t.folder_name}</td>

@@ -27,6 +27,7 @@ from .analyzer import (
     AnalysisResult,
     TrackMetadata,
     analyze_file,
+    analyze_key_only,
     embedded_key_to_camelot,
     read_metadata,
 )
@@ -352,3 +353,102 @@ def start_scan(db: Session, folder: Folder, force: bool = False) -> ScanJob:
 
     threading.Thread(target=_worker, daemon=True, name=f"scan-{folder.id}").start()
     return job
+
+
+# ---------------------------------------------------------------------------
+# Re-análisis rápido de TONALIDAD (solo Key) sobre toda la biblioteca
+# ---------------------------------------------------------------------------
+# A diferencia del escaneo completo, este proceso omite BPM y waveform: para
+# cada track lee los metadatos (TKEY/INITIALKEY/Rekordbox/Serato/Traktor) y,
+# solo si no hay key embebida, aplica el motor armónico HPSS+chroma. Con una
+# biblioteca ya etiquetada (típico en DJ) el pase completo toma segundos.
+_key_jobs: dict[int, dict] = {}
+_key_jobs_lock = threading.Lock()
+_key_job_seq = 0
+
+
+def _process_key_only(path: str) -> tuple[str | None, str | None]:
+    try:
+        return analyze_key_only(path)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _flush_key_results(db: Session, tracks: list[Track], results: dict[str, tuple[str | None, str | None]]) -> None:
+    """Aplica las tonalidades re-analizadas a los tracks y hace commit en lote."""
+    by_path = {t.file_path: t for t in tracks}
+    for path, (music, camelot) in results.items():
+        track = by_path.get(path)
+        if track is None or not camelot:
+            continue
+        track.musical_key = music
+        track.camelot_key = camelot
+        track.has_error = False
+        track.error_message = None
+    db.commit()
+
+
+def _run_reanalyze_keys(db: Session, job_id: int) -> None:
+    job = _key_jobs[job_id]
+    job["status"] = "running"
+    try:
+        tracks = db.query(Track).all()
+        job["total"] = len(tracks)
+        if not tracks:
+            job["status"] = "done"
+            job["message"] = "Sin tracks para re-analizar"
+            return
+
+        pool = _get_pool()
+        futures = {pool.submit(_process_key_only, t.file_path): t.file_path for t in tracks}
+        results: dict[str, tuple[str | None, str | None]] = {}
+        processed = 0
+        for fut in as_completed(futures):
+            path = futures[fut]
+            try:
+                results[path] = fut.result()
+            except Exception:  # noqa: BLE001
+                results[path] = (None, None)
+            processed += 1
+            job["processed"] = processed
+            if processed % DB_COMMIT_BATCH == 0:
+                _flush_key_results(db, tracks, results)
+                results = {}
+
+        if results:
+            _flush_key_results(db, tracks, results)
+        job["status"] = "done"
+        job["message"] = f"{processed} keys re-analizadas"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Re-análisis de keys fallido")
+        job["status"] = "error"
+        job["message"] = str(exc)
+    finally:
+        db.close()
+
+
+def start_reanalyze_keys(db: Session) -> int:
+    """Lanza el re-análisis de Key en un hilo daemon y devuelve el job id."""
+    global _key_job_seq
+    with _key_jobs_lock:
+        _key_job_seq += 1
+        job_id = _key_job_seq
+        _key_jobs[job_id] = {
+            "status": "pending",
+            "total": 0,
+            "processed": 0,
+            "message": "",
+        }
+
+    thread_db = Session(db.get_bind(), expire_on_commit=False)
+    threading.Thread(
+        target=_run_reanalyze_keys,
+        args=(thread_db, job_id),
+        daemon=True,
+        name=f"reanalyze-keys-{job_id}",
+    ).start()
+    return job_id
+
+
+def reanalyze_keys_status(job_id: int) -> dict | None:
+    return _key_jobs.get(job_id)

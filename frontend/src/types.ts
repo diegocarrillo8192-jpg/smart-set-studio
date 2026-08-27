@@ -151,3 +151,12 @@ export interface RecommendationsResponse {
   seed: Track;
   recommendations: Recommendation[];
 }
+
+/** Estado del job de re-análisis rápido de Key (backend). */
+export interface ReanalyzeJob {
+  job_id?: number;
+  status: string;
+  total: number;
+  processed: number;
+  message: string;
+}

@@ -10,8 +10,10 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Folder, Track
-from ..schemas import TrackOut
+from ..schemas import TrackKeyUpdate, TrackOut
 from ..services.camelot import normalize_camelot, relation
+from ..services.analyzer import embedded_key_to_camelot
+from ..services.scanner import reanalyze_keys_status, start_reanalyze_keys
 from ..services import artwork_cache as art
 from ..config import AUDIO_EXTENSIONS
 
@@ -177,6 +179,56 @@ def list_tracks(
 
     rows = query.all()
     return [_serialize(t, f) for t, f in rows]
+
+
+@router.post("/tracks/reanalyze-key")
+def reanalyze_keys(db: Session = Depends(get_db)):
+    """Re-analiza EXCLUSIVAMENTE la tonalidad (Key) de toda la biblioteca.
+
+    Omite BPM y waveform: lee los metadatos (TKEY/INITIALKEY/Rekordbox/Serato/
+    Traktor) y solo si no hay key embebida aplica el motor armónico HPSS+
+    chroma_cqt. Corre en background; devuelve el id del job para consultar el
+    progreso con GET /tracks/reanalyze-key/status.
+    """
+    job_id = start_reanalyze_keys(db)
+    return {"job_id": job_id, **reanalyze_keys_status(job_id)}
+
+
+@router.get("/tracks/reanalyze-key/status")
+def reanalyze_keys_status_endpoint(job_id: int, db: Session = Depends(get_db)):
+    status = reanalyze_keys_status(job_id)
+    if status is None:
+        raise HTTPException(404, "Job de re-análisis no encontrado")
+    return status
+
+
+@router.patch("/tracks/{track_id}/key", response_model=TrackOut)
+def update_track_key(track_id: int, payload: TrackKeyUpdate, db: Session = Depends(get_db)):
+    """Edición manual de la tonalidad de un track (el usuario ajusta a oído).
+
+    Acepta Camelot ('8A'), nota+modo ('A minor') o acordes ('Am'); normaliza y
+    actualiza tanto `musical_key` como `camelot_key`.
+    """
+    row = (
+        db.query(Track, Folder.name)
+        .outerjoin(Folder, Track.folder_id == Folder.id)
+        .filter(Track.id == track_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(404, "Track no encontrado")
+    track, folder_name = row
+
+    musical, camelot = embedded_key_to_camelot(payload.key)
+    if not camelot:
+        raise HTTPException(
+            400,
+            "Clave inválida. Usa notación Camelot (8A), nota+modo (A minor) o acordes (Am).",
+        )
+    track.musical_key = musical
+    track.camelot_key = camelot
+    db.commit()
+    return _serialize(track, folder_name)
 
 
 @router.get("/tracks/{track_id}", response_model=TrackOut)
