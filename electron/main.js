@@ -381,3 +381,19 @@ ipcMain.handle("dialog:selectFolder", async (_event, purpose) => {
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
 });
+
+ipcMain.handle("dialog:selectAudioFiles", async () => {
+  // Importación individual: uno o varios archivos de audio sueltos (no carpeta).
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Selecciona archivos de audio",
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "Audio (MP3 · WAV · AIFF · FLAC · M4A/AAC · OGG · OPUS)",
+        extensions: ["mp3", "wav", "aiff", "aif", "flac", "m4a", "aac", "ogg", "opus"],
+      },
+    ],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths;
+});

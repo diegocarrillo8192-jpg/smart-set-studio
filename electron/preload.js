@@ -10,6 +10,7 @@ function readToken() {
 contextBridge.exposeInMainWorld("smartSet", {
   selectFolder: () => ipcRenderer.invoke("dialog:selectFolder", "import"),
   selectFolderForExport: () => ipcRenderer.invoke("dialog:selectFolder", "export"),
+  selectAudioFiles: () => ipcRenderer.invoke("dialog:selectAudioFiles"),
   isDesktop: true,
   token: readToken(),
 });

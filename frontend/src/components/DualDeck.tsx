@@ -156,7 +156,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
             track={deckATrack}
             handle={audioEngine.deckA}
             accent="#06b6d4"
-            otherBpm={deckBTrack?.bpm ?? null}
+            masterBpm={deckATrack?.bpm ?? null}
             active={activeDeck === "A"}
             onActivate={() => onActivateDeck?.("A")}
             onPlayingChange={(playing) => onDeckPlayingChange?.("A", playing)}
@@ -179,7 +179,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
             track={deckBTrack}
             handle={audioEngine.deckB}
             accent="#8b5cf6"
-            otherBpm={deckATrack?.bpm ?? null}
+            masterBpm={deckATrack?.bpm ?? null}
             active={activeDeck === "B"}
             onActivate={() => onActivateDeck?.("B")}
             onPlayingChange={(playing) => onDeckPlayingChange?.("B", playing)}

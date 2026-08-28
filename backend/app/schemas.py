@@ -113,3 +113,9 @@ class TrackKeyUpdate(BaseModel):
     o acordes ('Am')."""
 
     key: str = Field(min_length=1, max_length=32)
+
+
+class ImportTracksRequest(BaseModel):
+    """Importación individual de archivos de audio (rutas locales absolutas)."""
+
+    paths: list[str] = Field(min_length=1)

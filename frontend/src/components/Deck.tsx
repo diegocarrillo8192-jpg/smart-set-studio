@@ -13,7 +13,8 @@ interface Props {
   track: Track | null;
   handle: DeckHandle | null;
   accent: string;
-  otherBpm?: number | null;
+  /** BPM del deck maestro (Deck A): objetivo de tempo/fase del SYNC. */
+  masterBpm?: number | null;
   /** Destacado neón al ser el deck activo (micro-interacción de cambio de deck). */
   active?: boolean;
   onActivate?: () => void;
@@ -40,7 +41,7 @@ export default function Deck({
   track,
   handle,
   accent,
-  otherBpm,
+  masterBpm,
   active,
   onActivate,
   disabled,
@@ -119,15 +120,33 @@ export default function Deck({
     else el.pause();
   };
 
-  /** SYNC: iguala de inmediato el BPM de este deck con el del opuesto. */
+  /** SYNC: iguala de inmediato el tempo (y alinea la fase de beat) de este
+   *  deck con el deck maestro (Deck A). */
   const toggleSync = () => {
-    if (!el || !track?.bpm || !otherBpm) return;
+    if (!el || !track?.bpm || !masterBpm) return;
     onActivate?.();
     const next = !sync;
     setSync(next);
-    if (next) audioEngine.setSync(name, otherBpm / track.bpm);
-    else audioEngine.clearSync(name);
+    if (next) {
+      audioEngine.setSync(name, masterBpm / track.bpm);
+      audioEngine.alignPhase(name, track.bpm, masterBpm);
+    } else {
+      audioEngine.clearSync(name);
+    }
   };
+
+  // Re-sincronización DINÁMICA: si el BPM del deck maestro (Deck A) cambia
+  // (se carga un track nuevo) mientras el SYNC está activo, se reaplica el
+  // tempo y la fase para no perder la alineación. Solo depende de `masterBpm`:
+  // el cambio de track PROPIO ya resetea el SYNC en el efecto anterior y no
+  // debe re-sincronizarse solo.
+  useEffect(() => {
+    if (sync && track?.bpm && masterBpm) {
+      audioEngine.setSync(name, masterBpm / track.bpm);
+      audioEngine.alignPhase(name, track.bpm, masterBpm);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [masterBpm]);
 
   /** FILTER (Low Kill): switch que corta/activa los graves con un pasa-altos. */
   const toggleFilter = () => {
@@ -281,16 +300,16 @@ export default function Deck({
           {cue !== null && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)]" />}
         </button>
 
-        {/* SYNC: iguala el BPM con el deck opuesto */}
+        {/* SYNC: iguala el BPM (y alinea la fase) con el deck maestro (A) */}
         <button
           onClick={toggleSync}
-          disabled={!el || !track || !otherBpm || !track.bpm}
+          disabled={!el || !track || !masterBpm || !track.bpm}
           title={
             sync
-              ? "Sincronizado — clic para volver al tempo original"
-              : otherBpm
-                ? `SYNC: igualar BPM con el deck ${name === "A" ? "B" : "A"} (${fmtBpm(otherBpm)})`
-                : "Carga un track en el deck opuesto para usar SYNC"
+              ? "Sincronizado con Deck A (maestro) — clic para volver al tempo original"
+              : masterBpm
+                ? `SYNC: igualar BPM y fase con Deck A (maestro) (${fmtBpm(masterBpm)})`
+                : "Carga un track en Deck A para usar SYNC"
           }
           className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[10px] font-black tracking-widest transition active:scale-95 disabled:opacity-30 ${
             sync

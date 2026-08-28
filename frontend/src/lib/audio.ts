@@ -114,6 +114,32 @@ export class AudioEngine {
     return true;
   }
 
+  /**
+   * Alinea la fase de beat del deck `name` con el deck maestro (A), sin tocar
+   * el playbackRate: desplaza el punto de reproducción del esclavo para que su
+   * pulso (periodo = 60/BPM) coincida con el pulso actual del maestro. Así
+   * ambas canciones se pre-escuchan compaginadas, sin desfase de beat.
+   * Devuelve el desplazamiento aplicado en segundos (0 si no hay nada que
+   * corregir o los BPM no son válidos).
+   */
+  alignPhase(name: "A" | "B", ownBpm: number, masterBpm: number): number {
+    const slave = this.deck(name);
+    const master = this.deckA; // el deck maestro es siempre A
+    if (!slave || !master || slave === master) return 0;
+    if (!ownBpm || !masterBpm || ownBpm <= 0 || masterBpm <= 0) return 0;
+    const slavePeriod = 60 / ownBpm;
+    const masterPeriod = 60 / masterBpm;
+    const slavePhase = ((slave.el.currentTime % slavePeriod) + slavePeriod) % slavePeriod;
+    const masterPhase = ((master.el.currentTime % masterPeriod) + masterPeriod) % masterPeriod;
+    let shift = masterPhase - slavePhase;
+    // Camino más corto dentro de un beat (evita saltos de casi un beat entero).
+    if (shift > slavePeriod / 2) shift -= slavePeriod;
+    else if (shift < -slavePeriod / 2) shift += slavePeriod;
+    if (Math.abs(shift) < 0.005) return 0;
+    slave.el.currentTime += shift;
+    return shift;
+  }
+
   clearSync(name: "A" | "B"): void {
     const h = this.deck(name);
     if (!h) return;

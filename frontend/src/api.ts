@@ -1142,6 +1142,19 @@ export const api = {
     if (isWeb()) return Promise.resolve(payload);
     return request<Settings>("/settings", { method: "PUT", body: JSON.stringify(payload) });
   },
+
+  /** Importación individual de archivos de audio (solo escritorio). */
+  importAudioFiles: (paths: string[]) =>
+    request<{ imported: number; skipped: number; errors: { path: string; error: string }[] }>(
+      "/tracks/import",
+      { method: "POST", body: JSON.stringify({ paths }) }
+    ),
+  /** Renombrado físico de archivos a `[Key] - [Nombre].ext` (solo escritorio). */
+  renameWithKey: () =>
+    request<{ renamed: number; skipped: number; errors: { path: string; error: string }[] }>(
+      "/tracks/rename-with-key",
+      { method: "POST" }
+    ),
 };
 
 declare global {
@@ -1149,6 +1162,7 @@ declare global {
     smartSet?: {
       selectFolder: () => Promise<string | null>;
       selectFolderForExport: () => Promise<string | null>;
+      selectAudioFiles: () => Promise<string[] | null>;
       /** Siempre true cuando la app corre embebida en Electron (escritorio). */
       isDesktop: true;
       /** Secreto de bucle local para autenticar el backend (solo escritorio). */

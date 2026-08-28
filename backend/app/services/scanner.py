@@ -452,3 +452,103 @@ def start_reanalyze_keys(db: Session) -> int:
 
 def reanalyze_keys_status(job_id: int) -> dict | None:
     return _key_jobs.get(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Importación individual de archivos de audio (sin carpeta completa)
+# ---------------------------------------------------------------------------
+# El botón "Cargar Audio" (desktop) selecciona uno o varios archivos sueltos
+# mediante el diálogo nativo de Electron; estos se procesan y analizan de
+# inmediato y se agregan a la tabla general (folder_id = NULL: no pertenecen a
+# ninguna carpeta, pero sí son reproducibles y están indexados).
+def import_single_files(db: Session, paths: list[str]) -> dict:
+    """Importa y analiza archivos individuales. Devuelve un resumen.
+
+    - `imported`: número de tracks nuevos insertados.
+    - `skipped`: rutas ya indexadas (no se duplican).
+    - `errors`: lista de {path, error} para archivos que no se pudieron leer.
+    """
+    normalized: list[str] = []
+    for raw in paths:
+        if not raw or not raw.strip():
+            continue
+        p = str(Path(raw.strip()).expanduser())
+        if Path(p).is_file():
+            normalized.append(p)
+
+    if not normalized:
+        return {"imported": 0, "skipped": 0, "errors": []}
+
+    existing = {
+        t.file_path
+        for t in db.query(Track).filter(Track.file_path.in_(normalized)).all()
+    }
+    id3_enabled = _id3_enabled(db)
+
+    imported = 0
+    skipped = 0
+    errors: list[dict] = []
+
+    for path in normalized:
+        if path in existing:
+            skipped += 1
+            continue
+        try:
+            meta = read_metadata(path)
+            analysis = analyze_file(path, embedded_bpm=meta.embedded_bpm)
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"path": path, "error": str(exc)})
+            continue
+
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+
+        track = Track(
+            file_path=path,
+            folder_id=None,
+            title=meta.title,
+            artist=meta.artist,
+            album=meta.album,
+            duration_sec=meta.duration_sec,
+            embedded_bpm=meta.embedded_bpm,
+            embedded_key=meta.embedded_key,
+            genre=meta.genre or "Archivos sueltos",
+            file_modified_at=mtime,
+        )
+
+        if analysis is not None:
+            if analysis.error:
+                track.has_error = True
+                track.error_message = analysis.error
+                track.analyzed = True
+            else:
+                track.bpm = analysis.bpm
+                track.musical_key = analysis.musical_key
+                track.camelot_key = analysis.camelot_key
+                if not track.camelot_key and track.embedded_key:
+                    music, camelot = embedded_key_to_camelot(track.embedded_key)
+                    track.musical_key = track.musical_key or music
+                    track.camelot_key = camelot
+                track.loudness_db = analysis.loudness_db
+                track.spectral_centroid = analysis.spectral_centroid
+                track.energy = analysis.energy
+                track.analyzed = True
+                if id3_enabled and path.lower().endswith(".mp3") and track.camelot_key:
+                    write_camelot_id3(path, track.camelot_key)
+
+        db.add(track)
+        db.flush()
+        imported += 1
+
+        try:
+            artwork = extract_embedded(path)
+            if artwork is not None:
+                data, mime = artwork
+                store_embedded(path, data, mime)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Carátula de %s no cacheable: %s", path, exc)
+
+    db.commit()
+    return {"imported": imported, "skipped": skipped, "errors": errors}

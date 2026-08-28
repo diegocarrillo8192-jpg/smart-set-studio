@@ -5,15 +5,16 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Folder, Track
-from ..schemas import TrackKeyUpdate, TrackOut
+from ..schemas import ImportTracksRequest, TrackKeyUpdate, TrackOut
 from ..services.camelot import normalize_camelot, relation
 from ..services.analyzer import embedded_key_to_camelot
-from ..services.scanner import reanalyze_keys_status, start_reanalyze_keys
+from ..services.scanner import import_single_files, reanalyze_keys_status, start_reanalyze_keys
+from ..services.renamer import rename_with_key
 from ..services import artwork_cache as art
 from ..config import AUDIO_EXTENSIONS
 
@@ -200,6 +201,53 @@ def reanalyze_keys_status_endpoint(job_id: int, db: Session = Depends(get_db)):
     if status is None:
         raise HTTPException(404, "Job de re-análisis no encontrado")
     return status
+
+
+@router.post("/tracks/import")
+def import_tracks(payload: ImportTracksRequest, db: Session = Depends(get_db)):
+    """Importa y analiza archivos de audio individuales (sin carpeta completa).
+
+    Los archivos ya indexados se omiten. Los nuevos se agregan a la tabla
+    general con `folder_id = NULL` (no pertenecen a ninguna carpeta pero son
+    reproducibles y están indexados para streaming/carátula/recomendación).
+    """
+    return import_single_files(db, payload.paths)
+
+
+@router.post("/tracks/rename-with-key")
+def rename_tracks_with_key(db: Session = Depends(get_db)):
+    """Renombra físicamente los archivos a `[Key] - [Nombre].ext` (ej. "6A - Track.mp3").
+
+    Solo actúa sobre tracks con tonalidad Camelot detectada. Tras el renombrado
+    actualiza `file_path` en SQLite (y la clave de la caché de carátulas) para
+    que streaming y covers sigan funcionando. Devuelve el recuento de archivos
+    renombrados, omitidos y con error.
+    """
+    tracks = db.query(Track).filter(Track.camelot_key.isnot(None)).all()
+    renamed = 0
+    skipped = 0
+    errors: list[dict] = []
+    for track in tracks:
+        old_path = track.file_path
+        try:
+            new_path, changed = rename_with_key(old_path, track.camelot_key)
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"path": old_path, "error": str(exc)})
+            continue
+        if not changed:
+            skipped += 1
+            continue
+        track.file_path = new_path
+        try:
+            db.execute(
+                text("UPDATE artwork_cache SET path = :n WHERE path = :o"),
+                {"n": new_path, "o": old_path},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        renamed += 1
+    db.commit()
+    return {"renamed": renamed, "skipped": skipped, "errors": errors}
 
 
 @router.patch("/tracks/{track_id}/key", response_model=TrackOut)

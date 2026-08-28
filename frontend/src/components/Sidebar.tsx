@@ -205,16 +205,26 @@ export default function Sidebar({
     }
   };
 
-  /** Web: carga archivos de audio sueltos (sin seleccionar una carpeta). */
+  /** Carga archivos de audio sueltos (sin seleccionar una carpeta completa).
+   *  Escritorio: diálogo nativo multiarchivo → backend analiza e importa.
+   *  Web: <input multiple> → análisis de etiquetas en el navegador. */
   const addAudioFiles = async () => {
     setAdding(true);
     setError("");
     try {
-      const root = await pickAudioFiles();
-      if (root) {
-        // El análisis de etiquetas ya corrió en el navegador (webRegisterFolder);
-        // refrescar hace que carpetas y tracks aparezcan al instante.
-        onFoldersChanged();
+      if (window.smartSet?.selectAudioFiles) {
+        const paths = await window.smartSet.selectAudioFiles();
+        if (paths && paths.length > 0) {
+          await api.importAudioFiles(paths);
+          onFoldersChanged();
+        }
+      } else {
+        const root = await pickAudioFiles();
+        if (root) {
+          // El análisis de etiquetas ya corrió en el navegador (webRegisterFolder);
+          // refrescar hace que carpetas y tracks aparezcan al instante.
+          onFoldersChanged();
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -358,16 +368,14 @@ export default function Sidebar({
         >
           <FolderPlus size={14} /> Agregar Carpeta
         </button>
-        {isWeb() && (
-          <button
-            onClick={() => void addAudioFiles()}
-            disabled={adding}
-            className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
-            title="Selecciona archivos de audio sueltos (MP3/WAV/M4A…)"
-          >
-            <Music2 size={14} /> Cargar Audio
-          </button>
-        )}
+        <button
+          onClick={() => void addAudioFiles()}
+          disabled={adding}
+          className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
+          title="Selecciona archivos de audio sueltos (MP3/WAV/M4A…)"
+        >
+          <Music2 size={14} /> Cargar Audio
+        </button>
 
         <div className="space-y-1.5">
           {/* Vista global: colección completa */}

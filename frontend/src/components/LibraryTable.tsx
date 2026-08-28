@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AudioLines, Disc2, Disc3, KeyRound, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
+import { AudioLines, Disc2, Disc3, FileText, KeyRound, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
 import type { Track } from "../types";
 import { api, isWeb, prefetchArtworks } from "../api";
 import { fmtBpm } from "../lib/format";
@@ -62,6 +62,8 @@ export default function LibraryTable({
   const [editingKeyId, setEditingKeyId] = useState<number | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [reanalyzeLabel, setReanalyzeLabel] = useState("Re-analizar Keys");
+  const [renaming, setRenaming] = useState(false);
+  const [renameLabel, setRenameLabel] = useState("Renombrar con Key");
 
   /** Lookup O(1) de los IDs en reproducción para evitar `Array.includes` O(n)
    *  dentro del map de cada fila de la tabla. */
@@ -173,6 +175,25 @@ export default function LibraryTable({
     }
   };
 
+  /** Renombrado físico de archivos a `[Key] - [Nombre].ext` (solo escritorio). */
+  const startRename = async () => {
+    setRenaming(true);
+    setRenameLabel("Renombrando…");
+    try {
+      const res = await api.renameWithKey();
+      setRenameLabel(`Renombrados: ${res.renamed}`);
+      await load();
+      window.setTimeout(() => {
+        setRenaming(false);
+        setRenameLabel("Renombrar con Key");
+      }, 1800);
+    } catch (e) {
+      console.error(e);
+      setRenaming(false);
+      setRenameLabel("Renombrar con Key");
+    }
+  };
+
   return (
     <div className="flex h-full flex-col">
       {/* Barra de herramientas */}
@@ -198,18 +219,32 @@ export default function LibraryTable({
           <SlidersHorizontal size={13} /> Filtros {filtersActive && <span className="rounded-full bg-violet-500 px-1 text-[9px] text-white">ON</span>}
         </button>
         {!isWeb() && (
-          <button
-            onClick={() => void startReanalyze()}
-            disabled={reanalyzing}
-            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
-              reanalyzing
-                ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200"
-                : "border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
-            }`}
-            title="Re-analizar solo la Key de toda la biblioteca (sin BPM ni waveform)"
-          >
-            <KeyRound size={13} className={reanalyzing ? "animate-spin" : ""} /> {reanalyzeLabel}
-          </button>
+          <>
+            <button
+              onClick={() => void startReanalyze()}
+              disabled={reanalyzing}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
+                reanalyzing
+                  ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200"
+                  : "border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
+              }`}
+              title="Re-analizar solo la Key de toda la biblioteca (sin BPM ni waveform)"
+            >
+              <KeyRound size={13} className={reanalyzing ? "animate-spin" : ""} /> {reanalyzeLabel}
+            </button>
+            <button
+              onClick={() => void startRename()}
+              disabled={renaming}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
+                renaming
+                  ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-200"
+                  : "border-slate-700 text-slate-400 hover:border-emerald-500 hover:text-emerald-300"
+              }`}
+              title="Renombrar los archivos en disco como [Key] - [Nombre].ext (ej. 6A - Track.mp3)"
+            >
+              <FileText size={13} className={renaming ? "animate-pulse" : ""} /> {renameLabel}
+            </button>
+          </>
         )}
       </div>
 
