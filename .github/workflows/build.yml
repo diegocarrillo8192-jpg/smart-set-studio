@@ -95,7 +95,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: smart-set-architect-macos
-          path: release/*.dmg
+          path: |
+            release/*.dmg
+            release/*.zip
           if-no-files-found: error
 
   publish:
@@ -128,7 +130,16 @@ jobs:
         shell: bash
         run: |
           mv "installers/windows/Smart Set Architect - Setup.exe" "installers/windows/Smart-Set-Architect-Setup.exe"
-          mv "installers/macos"/*arm64.dmg "installers/macos/Smart-Set-Architect-arm64.dmg"
+          for f in installers/macos/*.dmg; do
+            [ -e "$f" ] || continue
+            mv "$f" "installers/macos/Smart-Set-Architect.dmg"
+            break
+          done
+          for f in installers/macos/*.zip; do
+            [ -e "$f" ] || continue
+            mv "$f" "installers/macos/Smart-Set-Architect.zip"
+            break
+          done
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
@@ -137,4 +148,5 @@ jobs:
           files: |
             installers/windows/*.exe
             installers/macos/*.dmg
+            installers/macos/*.zip
           fail_on_unmatched_files: true

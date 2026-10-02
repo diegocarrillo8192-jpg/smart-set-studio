@@ -160,3 +160,16 @@ export interface ReanalyzeJob {
   processed: number;
   message: string;
 }
+
+/** Hot cue de la consola DJ (posición en beats de canción). */
+export interface DjCue {
+  index: number;
+  beat: number;
+}
+
+/** Datos DJ persistidos de la consola: BPM/beatgrid detectados + hot cues. */
+export interface DjData {
+  bpm: number | null;
+  beatgrid_offset: number | null;
+  hot_cues: DjCue[];
+}

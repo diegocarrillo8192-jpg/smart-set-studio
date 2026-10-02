@@ -40,9 +40,15 @@ export default function SettingsModal({ open, onClose }: Props) {
   useEffect(() => {
     if (open) {
       api.getSettings().then(setSettings).catch(console.error);
-      setSaved(false);
     }
   }, [open]);
+
+  /** Cierre normal: reinicia el badge "Guardado ✓" desde el propio evento,
+   *  sin ajustar estado por cambio de prop en un efecto. */
+  const close = () => {
+    setSaved(false);
+    onClose();
+  };
 
   if (!open || !settings) return null;
 
@@ -53,7 +59,7 @@ export default function SettingsModal({ open, onClose }: Props) {
     try {
       await api.updateSettings(settings);
       setSaved(true);
-      setTimeout(onClose, 700);
+      setTimeout(close, 700);
     } catch (e) {
       console.error(e);
     } finally {
@@ -68,17 +74,25 @@ export default function SettingsModal({ open, onClose }: Props) {
     "w-24 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-right text-xs text-slate-200 focus:border-violet-500 focus:outline-none";
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Ajustes del Motor de Mezcla"
-        className="w-full max-w-lg rounded-2xl border border-slate-700 bg-panel-2 p-5 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    // <dialog> nativo (semántica de diálogo sin role manual). `max-w-none`/
+    // `max-h-none` anulan los límites UA para comportarse como overlay.
+    <dialog
+      open
+      aria-label="Ajustes del Motor de Mezcla"
+      className="fixed inset-0 z-50 grid max-h-none max-w-none place-items-center overflow-y-auto border-0 bg-black/60 p-4"
+    >
+      {/* Botón hoja a pantalla completa: clic fuera cierra (y da ruta de
+          teclado). Es hermano —no padre— del diálogo: sin anidar controles. */}
+      <button
+        type="button"
+        onClick={close}
+        aria-label="Cerrar ajustes"
+        className="absolute inset-0 cursor-default"
+      />
+      <div className="relative w-full max-w-lg rounded-2xl border border-slate-700 bg-panel-2 p-5 shadow-2xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-sm font-bold uppercase tracking-widest text-white">Ajustes del Motor de Mezcla</h2>
-          <button onClick={onClose} aria-label="Cerrar ajustes" className="rounded p-1 text-slate-400 hover:text-white">
+          <button onClick={close} aria-label="Cerrar ajustes" className="rounded p-1 text-slate-400 hover:text-white">
             <X size={16} />
           </button>
         </div>
@@ -201,17 +215,14 @@ export default function SettingsModal({ open, onClose }: Props) {
 
       {/* Diálogo sutil de confirmación: reset de caché (sin window.confirm) */}
       {confirmReset && (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm"
-          onMouseDown={(e) => {
-            e.stopPropagation();
-            setConfirmReset(false);
-          }}
-        >
-          <div
-            className="w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm">
+          <button
+            type="button"
+            onClick={() => setConfirmReset(false)}
+            aria-label="Cancelar"
+            className="absolute inset-0 cursor-default"
+          />
+          <div className="relative w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70">
             <h3 className="text-sm font-bold text-slate-100">Resetear caché web</h3>
             <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
               Se borrarán las cachés locales del NAVEGADOR (carátulas, metadatos y almacenamiento
@@ -220,19 +231,13 @@ export default function SettingsModal({ open, onClose }: Props) {
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setConfirmReset(false);
-                }}
+                onClick={() => setConfirmReset(false)}
                 className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
               >
                 Cancelar
               </button>
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void resetWeb();
-                }}
+                onClick={() => void resetWeb()}
                 className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
               >
                 <Eraser size={12} /> Borrar caché
@@ -241,6 +246,6 @@ export default function SettingsModal({ open, onClose }: Props) {
           </div>
         </div>
       )}
-    </div>
+    </dialog>
   );
 }

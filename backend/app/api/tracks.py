@@ -1,4 +1,5 @@
 """API de tracks: búsqueda, filtros, streaming y análisis de audio."""
+import json
 import logging
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..models import Folder, Track
-from ..schemas import ImportTracksRequest, TrackKeyUpdate, TrackOut
+from ..schemas import DjDataOut, DjDataUpdate, ImportTracksRequest, TrackKeyUpdate, TrackOut
 from ..services.camelot import normalize_camelot, relation
 from ..services.analyzer import embedded_key_to_camelot
 from ..services.scanner import import_single_files, reanalyze_keys_status, start_reanalyze_keys
@@ -88,6 +89,19 @@ SORTABLE = {
     "camelot_key": Track.camelot_key,
     "duration_sec": Track.duration_sec,
 }
+
+
+def _parse_dj_cues(raw: str | None) -> list[dict]:
+    """Deserializa los hot cues persistidos en JSON, tolerante a datos rotos."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict)]
 
 
 def _serialize(track: Track, folder_name: str | None = None) -> TrackOut:
@@ -279,6 +293,39 @@ def update_track_key(track_id: int, payload: TrackKeyUpdate, db: Session = Depen
     return _serialize(track, folder_name)
 
 
+@router.get("/tracks/{track_id}/dj", response_model=DjDataOut)
+def get_track_dj(track_id: int, db: Session = Depends(get_db)):
+    """Datos DJ persistidos de la consola (BPM/beatgrid detectados por el motor
+    de la consola + hot cues fijados por el usuario)."""
+    track = db.get(Track, track_id)
+    if not track:
+        raise HTTPException(404, "Track no encontrado")
+    return DjDataOut(
+        bpm=track.dj_bpm,
+        beatgrid_offset=track.dj_beatgrid_offset,
+        hot_cues=_parse_dj_cues(track.dj_hot_cues),
+    )
+
+
+@router.put("/tracks/{track_id}/dj", response_model=DjDataOut)
+def put_track_dj(track_id: int, payload: DjDataUpdate, db: Session = Depends(get_db)):
+    """Guarda los datos DJ de un track (análisis BPM/beatgrid + hot cues)."""
+    track = db.get(Track, track_id)
+    if not track:
+        raise HTTPException(404, "Track no encontrado")
+    track.dj_bpm = payload.bpm
+    track.dj_beatgrid_offset = payload.beatgrid_offset
+    track.dj_hot_cues = (
+        json.dumps([c.model_dump() for c in payload.hot_cues]) if payload.hot_cues else None
+    )
+    db.commit()
+    return DjDataOut(
+        bpm=track.dj_bpm,
+        beatgrid_offset=track.dj_beatgrid_offset,
+        hot_cues=payload.hot_cues,
+    )
+
+
 @router.get("/tracks/{track_id}", response_model=TrackOut)
 def get_track(track_id: int, db: Session = Depends(get_db)):
     row = db.query(Track, Folder.name).outerjoin(Folder, Track.folder_id == Folder.id).filter(Track.id == track_id).first()
@@ -300,7 +347,7 @@ def track_recommendations(track_id: int, db: Session = Depends(get_db), limit: i
     if not (seed.analyzed and seed.camelot_key and seed.bpm):
         return {"seed": _serialize(seed), "recommendations": []}
 
-    from ..services.camelot import camelot_number, camelot_mode, normalize_camelot
+    from ..services.camelot import camelot_mode, camelot_number, normalize_camelot, wheel_step
     from ..services.settings import get_all_settings
 
     settings = get_all_settings(db)
@@ -315,21 +362,26 @@ def track_recommendations(track_id: int, db: Session = Depends(get_db), limit: i
         key = normalize_camelot(t.camelot_key)
         if not key or not t.bpm:
             continue
-        # Puntuación armónica (misma escala que el generador de sets)
+        # Puntuación armónica (misma escala que el generador de sets, con
+        # distancias circulares reales: 12<->1 son vecinos directos).
         if key == seed_key:
             harmonic = 100
             rel_key, rel_label = "same", "Perfect Match"
         else:
             rel_key, rel_label = relation(seed.camelot_key, t.camelot_key)
+            step = wheel_step(camelot_number(seed_key), camelot_number(key))
+            same_face = camelot_mode(seed_key) == camelot_mode(key)
             if rel_key == "same":
                 harmonic = 100
             elif rel_key == "mode":
                 harmonic = 90 if allow_mode else 0
             elif rel_key == "neighbor":
-                num = camelot_number(seed_key)
-                harmonic = 75 if abs(camelot_number(key) - num) <= radius else 40
+                harmonic = 75  # vecino ±1 (circular): siempre dentro del radio >= 1
             elif rel_key == "boost":
                 harmonic = 85
+            elif same_face and abs(step) == 2:
+                # Vecino de segundo grado: solo si el radio configurado lo permite
+                harmonic = 40 if radius >= 2 else 0
             else:
                 harmonic = 0
         if harmonic == 0:

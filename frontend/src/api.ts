@@ -1,5 +1,6 @@
 import type {
   DJSet,
+  DjData,
   EnergyProfile,
   Folder,
   ReanalyzeJob,
@@ -71,6 +72,31 @@ export function registerLocalFiles(files: File[]): void {
     }
   }
 }
+
+/** Revoca todas las Blob URLs locales y limpia los Map de archivos/caché. */
+export function disposeLocalFiles(): void {
+  for (const url of blobUrlCache.values()) URL.revokeObjectURL(url);
+  blobUrlCache.clear();
+  localFiles.clear();
+}
+
+/** Revoca las Blob URLs de carátulas asociadas al cache. */
+function disposeArtworkBlobUrls(): void {
+  for (const url of artworkCache.values()) {
+    if (url && url.startsWith("blob:")) URL.revokeObjectURL(url);
+  }
+  artworkCache.clear();
+}
+
+// Fin de sesión: las Blob URLs del registro local (audio + carátulas) son
+// recursos de por vida de la página. Aquí se revocan EXPLÍCITAMENTE al
+// cerrar/recargar (el navegador las libera igual, pero el ciclo queda
+// cerrado de forma determinista y auditable). `pagehide` cubre también
+// bfcache y navegación hacia atrás.
+window.addEventListener("pagehide", () => {
+  disposeLocalFiles();
+  disposeArtworkBlobUrls();
+});
 
 // --- Extracción de carátulas embebidas en el navegador (versión web) ---------
 // Los metadatos de imagen viven en los primeros bytes del archivo: leemos solo
@@ -312,6 +338,17 @@ export async function pickMusicFolder(): Promise<string | null> {
   return registered;
 }
 
+/** Crea (o reemplaza) la Blob URL estable de un archivo local. La URL
+ *  anterior de la misma ranura se revoca AQUÍ (cierre create→revoke); el
+ *  barrido final lo completa disposeLocalFiles() al desechar el registro
+ *  (re-registro de carpeta o cierre de página). */
+function ensureLocalBlobUrl(rel: string, file: File): void {
+  const previousUrl = blobUrlCache.get(rel);
+  if (previousUrl) URL.revokeObjectURL(previousUrl);
+  const url = URL.createObjectURL(file);
+  blobUrlCache.set(rel, url);
+}
+
 /** Blob URL estable si existe un archivo local para este path de track, si no null. */
 export function localUrlFor(path: string): string | null {
   const norm = path.replace(/\\/g, "/").toLowerCase();
@@ -320,9 +357,8 @@ export function localUrlFor(path: string): string | null {
     if (norm === relN || norm.endsWith(`/${relN}`)) {
       const cached = blobUrlCache.get(rel);
       if (cached) return cached;
-      const url = URL.createObjectURL(file);
-      blobUrlCache.set(rel, url);
-      return url;
+      ensureLocalBlobUrl(rel, file);
+      return blobUrlCache.get(rel) ?? null;
     }
   }
   return null;
@@ -608,10 +644,20 @@ function notifyWebTracksChanged(): void {
 }
 
 async function analyzeWebTracks(files: File[], folderId: number): Promise<void> {
+  // Procesamiento secuencial por lotes con cesión del hilo principal entre
+  // lotes. Se encadena con reduce (sin `await` dentro de un bucle): cada
+  // tramo depende del anterior y preserva el throttling original.
+  const chunks: File[][] = [];
   for (let i = 0; i < files.length; i += WEB_ANALYSIS_BATCH_SIZE) {
-    await analyzeWebChunk(files.slice(i, i + WEB_ANALYSIS_BATCH_SIZE), folderId);
-    if (i + WEB_ANALYSIS_BATCH_SIZE < files.length) await yieldToMain();
+    chunks.push(files.slice(i, i + WEB_ANALYSIS_BATCH_SIZE));
   }
+  await chunks.reduce<Promise<void>>(
+    (chain, chunk, idx) =>
+      chain
+        .then(() => analyzeWebChunk(chunk, folderId))
+        .then(() => (idx < chunks.length - 1 ? yieldToMain() : undefined)),
+    Promise.resolve()
+  );
 }
 
 async function analyzeWebChunk(files: File[], folderId: number): Promise<void> {
@@ -946,7 +992,7 @@ export async function getTrackArtwork(track: Track): Promise<string | null | und
       }
       // Evitar crecimiento ilimitado con bibliotecas grandes (misma filosofía
       // que el caché del backend): reciclar el mapa al superar el tope.
-      if (artworkCache.size >= 600) artworkCache.clear();
+      if (artworkCache.size >= 600) disposeArtworkBlobUrls();
       // No pisar una carátula ya extraída localmente en web. Los negativos
       // solo se cachean cuando el servidor los confirmó (404); los fallos
       // transitorios quedan sin caché para poder reintentarse.
@@ -966,6 +1012,41 @@ export async function getTrackArtwork(track: Track): Promise<string | null | und
     }).finally(() => artworkInFlight.delete(key));
   artworkInFlight.set(key, pending);
   return pending;
+}
+
+// --- Persistencia de datos DJ (BPM/beatgrid + hot cues) en modo web ---------
+// Sin backend local, los datos DJ de la consola se guardan en localStorage
+// (clave por ruta de archivo). En escritorio se usa la API REST /tracks/{id}/dj.
+
+const WEB_DJ_KEY = "smartset.dj_data.v1";
+
+function webDjStore(): Record<string, DjData> {
+  try {
+    const raw = localStorage.getItem(WEB_DJ_KEY);
+    if (raw) return JSON.parse(raw) as Record<string, DjData>;
+  } catch {
+    /* almacenamiento no disponible */
+  }
+  return {};
+}
+
+function webDjKey(path: string): string {
+  return path.replace(/\\/g, "/").toLowerCase();
+}
+
+function webGetDjData(path: string): DjData | null {
+  const store = webDjStore();
+  return store[webDjKey(path)] ?? null;
+}
+
+function webPutDjData(path: string, data: DjData): void {
+  const store = webDjStore();
+  store[webDjKey(path)] = data;
+  try {
+    localStorage.setItem(WEB_DJ_KEY, JSON.stringify(store));
+  } catch {
+    /* cuota llena: los datos viven solo en la sesión actual */
+  }
 }
 
 export const api = {
@@ -1067,6 +1148,22 @@ export const api = {
   reanalyzeKeys: () => request<ReanalyzeJob>("/tracks/reanalyze-key", { method: "POST" }),
   reanalyzeKeysStatus: (jobId: number) =>
     request<ReanalyzeJob>(`/tracks/reanalyze-key/status?job_id=${jobId}`),
+  /** Datos DJ persistidos de la consola (BPM/beatgrid + hot cues). */
+  getDjData: (track: Track) => {
+    if (isWeb()) return Promise.resolve(webGetDjData(track.file_path));
+    return request<DjData>(`/tracks/${track.id}/dj`);
+  },
+  /** Guarda los datos DJ de la consola (análisis BPM/beatgrid + hot cues). */
+  putDjData: (track: Track, data: DjData) => {
+    if (isWeb()) {
+      webPutDjData(track.file_path, data);
+      return Promise.resolve(data);
+    }
+    return request<DjData>(`/tracks/${track.id}/dj`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  },
 
   // Sets
   generateSet: (payload: {

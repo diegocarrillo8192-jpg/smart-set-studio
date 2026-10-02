@@ -4,7 +4,7 @@ import type { Track } from "../types";
 import { audioEngine } from "../lib/audio";
 import { api, markWebCacheUnhealthy } from "../api";
 import Deck from "./Deck";
-import Crossfader, { CrossfaderHeader } from "./Crossfader";
+import { MixiMixer } from "./mixi/MixiMixer";
 
 interface Props {
   deckATrack: Track | null;
@@ -46,17 +46,18 @@ function DropOverlay({ deck, accent }: { deck: string; accent: string }) {
  * Controles directos por plato (SYNC/FILTER) y crossfader con curva de mute.
  */
 export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActivateDeck, activeDeck, onDeckPlayingChange }: Props) {
-  const audioARef = useRef<HTMLAudioElement>(null);
-  const audioBRef = useRef<HTMLAudioElement>(null);
   const boundRef = useRef(false);
   const [dragOver, setDragOver] = useState<"A" | "B" | null>(null);
 
-  // Vincular los <audio> al grafo Web Audio (idempotente, seguro con StrictMode)
+  // Enlazar los decks al grafo Web Audio (idempotente, seguro con StrictMode).
+  // Los <audio> los crea el propio motor fuera del árbol React: son fuentes
+  // del grafo (crossOrigin obligatorio para MediaElementSource), no
+  // reproductores con interfaz.
   useEffect(() => {
-    if (boundRef.current || !audioARef.current || !audioBRef.current) return;
+    if (boundRef.current) return;
     try {
-      const a = audioEngine.bindDeck("A", audioARef.current);
-      const b = audioEngine.bindDeck("B", audioBRef.current);
+      const a = audioEngine.bindDeck("A");
+      const b = audioEngine.bindDeck("B");
       if (!a || !b) return;
       boundRef.current = true;
     } catch (err) {
@@ -72,6 +73,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
   useEffect(() => {
     if (!deckATrack || !boundRef.current) return;
     const el = audioEngine.deckA!.el;
+    audioEngine.setDeckMeta("A", { originalBpm: deckATrack.bpm ?? 0, gridOff: 0 });
     el.pause();
     el.currentTime = 0;
     const tryPath = () => {
@@ -94,6 +96,7 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
   useEffect(() => {
     if (!deckBTrack || !boundRef.current) return;
     const el = audioEngine.deckB!.el;
+    audioEngine.setDeckMeta("B", { originalBpm: deckBTrack.bpm ?? 0, gridOff: 0 });
     el.pause();
     el.currentTime = 0;
     const tryPath = () => {
@@ -134,13 +137,6 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-1.5 p-2">
-      {/* Audio elements ocultos — crossOrigin es OBLIGATORIO para que Web Audio
-          (MediaElementSource) reciba el audio por CORS en vez de silencio.
-          Son fuentes del grafo de audio (display:none), no reproductores con
-          interfaz: aria-hidden para excluirlos del árbol de accesibilidad. */}
-      <audio ref={audioARef} crossOrigin="anonymous" preload="auto" className="hidden" aria-hidden="true" />
-      <audio ref={audioBRef} crossOrigin="anonymous" preload="auto" className="hidden" aria-hidden="true" />
-
       <div className="flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-300">
           <Radio size={13} className="text-cyan-400" /> Reproductor
@@ -149,14 +145,16 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
 
       {/* DECK A | CROSSFADER | DECK B — en móvil se apilan en columna
           (A arriba, crossfader en medio, B abajo) para uso con el pulgar */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_200px_minmax(0,1fr)]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_260px_minmax(0,1fr)]">
         <div {...dropZone("A")} className={`relative min-h-0 rounded-xl ${dragOver === "A" ? "ring-2 ring-cyan-400/80" : ""}`}>
           <Deck
+            key={`deck-A-${deckATrack?.id ?? "empty"}`}
             name="A"
             track={deckATrack}
             handle={audioEngine.deckA}
             accent="#06b6d4"
-            masterBpm={deckATrack?.bpm ?? null}
+            masterDeck={deckBTrack ? "B" : null}
+            masterBpm={deckBTrack?.bpm ?? null}
             active={activeDeck === "A"}
             onActivate={() => onActivateDeck?.("A")}
             onPlayingChange={(playing) => onDeckPlayingChange?.("A", playing)}
@@ -164,21 +162,19 @@ export default function DualDeck({ deckATrack, deckBTrack, onDropTrack, onActiva
           {dragOver === "A" && <DropOverlay deck="A" accent="#06b6d4" />}
         </div>
 
-        {/* Crossfader único, aislado en el centro */}
-        <div className="flex min-h-0 flex-col items-center justify-center gap-2 rounded-xl border border-slate-800/60 bg-white/[0.03] p-3 shadow-lg shadow-black/40 backdrop-blur-md">
-          <CrossfaderHeader />
-          <Crossfader
-            position={audioEngine.getCrossfader()}
-            onChange={(pos) => audioEngine.setCrossfader(pos)}
-          />
+        {/* Mixer central estilo MIXI: EQ 3 bandas + gain + faders + crossfader */}
+        <div className="min-h-0 overflow-y-auto rounded-xl border border-slate-800/60 bg-white/[0.03] shadow-lg shadow-black/40 backdrop-blur-md">
+          <MixiMixer />
         </div>
 
         <div {...dropZone("B")} className={`relative min-h-0 rounded-xl ${dragOver === "B" ? "ring-2 ring-violet-400/80" : ""}`}>
           <Deck
+            key={`deck-B-${deckBTrack?.id ?? "empty"}`}
             name="B"
             track={deckBTrack}
             handle={audioEngine.deckB}
             accent="#8b5cf6"
+            masterDeck={deckATrack ? "A" : null}
             masterBpm={deckATrack?.bpm ?? null}
             active={activeDeck === "B"}
             onActivate={() => onActivateDeck?.("B")}

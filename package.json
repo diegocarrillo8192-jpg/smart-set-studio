@@ -11,7 +11,7 @@
     "dev": "concurrently -k -n BACKEND,FRONTEND,ELECTRON -c blue,magenta,green \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:electron\"",
     "dev:backend": "cd backend && ..\\.venv\\Scripts\\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --reload",
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:electron": "npx electron .",
+    "dev:electron": "wait-on -t 120000 http://127.0.0.1:5173 && electron .",
     "build": "npm run build:frontend",
     "build:frontend": "cd frontend && npm run build",
     "backend:install": "python -m venv .venv && .\\.venv\\Scripts\\pip install -r backend\\requirements.txt",
@@ -28,7 +28,8 @@
     "concurrently": "^9.1.0",
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
-    "react-doctor": "^0.9.12"
+    "react-doctor": "^0.9.12",
+    "wait-on": "^9.5.1"
   },
   "build": {
     "appId": "com.smartsetstudio.app",

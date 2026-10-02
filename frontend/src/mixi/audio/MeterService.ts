@@ -1,0 +1,75 @@
+/*
+ * Compatibility implementation of MIXI's MeterService for the vendored UI.
+ * One shared RAF loop feeds all VU meters by reading levels from the façade
+ * (which delegates to Smart Set Studio's native engine).
+ * MIXI is licensed under the PolyForm Noncommercial License 1.0.0.
+ */
+
+import { MixiEngine } from './MixiEngine';
+
+export interface MeterLevels {
+  A: number;
+  B: number;
+  master: number;
+  masterL: number;
+  masterR: number;
+  frame: number;
+}
+
+type MeterCallback = (levels: MeterLevels) => void;
+
+class MeterServiceImpl {
+  private rafId = 0;
+  private lastUpdate = 0;
+  private running = false;
+  private callbacks = new Set<MeterCallback>();
+
+  readonly levels: MeterLevels = { A: 0, B: 0, master: 0, masterL: 0, masterR: 0, frame: 0 };
+
+  subscribe(cb: MeterCallback): () => void {
+    this.callbacks.add(cb);
+    if (!this.running) this.start();
+    return () => {
+      this.callbacks.delete(cb);
+      if (this.callbacks.size === 0) this.stop();
+    };
+  }
+
+  private start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.rafId = requestAnimationFrame((t) => this.tick(t));
+  }
+
+  private stop(): void {
+    this.running = false;
+    cancelAnimationFrame(this.rafId);
+  }
+
+  private tick(now: number): void {
+    if (!this.running) return;
+    this.rafId = requestAnimationFrame((t) => this.tick(t));
+    if (now - this.lastUpdate < 33) return;
+    this.lastUpdate = now;
+
+    const engine = MixiEngine.getInstance();
+    if (engine.isInitialized) {
+      this.levels.A = engine.getLevel('A');
+      this.levels.B = engine.getLevel('B');
+      this.levels.master = engine.getMasterLevel();
+      this.levels.masterL = engine.getMasterLevelL();
+      this.levels.masterR = engine.getMasterLevelR();
+    } else {
+      this.levels.A = 0;
+      this.levels.B = 0;
+      this.levels.master = 0;
+      this.levels.masterL = 0;
+      this.levels.masterR = 0;
+    }
+    this.levels.frame++;
+
+    for (const cb of this.callbacks) cb(this.levels);
+  }
+}
+
+export const MeterService = new MeterServiceImpl();

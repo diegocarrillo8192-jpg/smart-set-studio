@@ -1,0 +1,460 @@
+﻿/*
+ * Copyright (c) 2026 Fabrizio Salmi. All rights reserved.
+ *
+ * This file is part of MIXI.
+ * MIXI is licensed under the PolyForm Noncommercial License 1.0.0.
+ * You may not use this file for commercial purposes without explicit permission.
+ * For commercial licensing, contact: fabrizio.salmi@gmail.com
+ */
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Mixi â€“ Waveform Overview (Static Full-Track Bar)
+//
+// A thin horizontal bar showing the ENTIRE track compressed
+// into a single strip.  A moving cursor shows the current
+// playback position.
+//
+// Unlike the scrolling WaveformDisplay, this is drawn ONCE
+// when waveform data arrives, then only the cursor is updated
+// per frame â€” extremely cheap.
+//
+// Click anywhere on the bar to seek to that position.
+//
+// Estructura modular (mismo archivo, tres capas con una sola responsabilidad):
+//   Â· <StaticWaveformLayer />  â€” barra de progreso/minimapa: pinta la onda
+//     completa UNA vez por cambio de datos (efecto sin RAF).
+//   Â· <OverviewOverlayCanvas /> â€” capa dinÃ¡mica: cursor, marcadores (drops,
+//     hot cues, loop), viewport y aviso de final a 30 FPS con huella de
+//     estado (frames ociosos saltados) y pausa en background.
+//   Â· <WaveformOverviewBase /> â€” contenedor: mide el ancho y posee la
+//     interacciÃ³n de seek/arrastre (listeners de ventana perezosos).
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+import { useEffect, useRef, useState, useCallback, memo, type FC } from 'react';
+import { useMixiStore } from '../../store/mixiStore';
+import { MixiEngine } from '../../audio/MixiEngine';
+import type { DeckId } from '../../types';
+import { CUE_COLORS, themeVar } from '../../theme';
+
+// â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const COLOR_PLAYED = 'rgba(0, 0, 0, 0.3)';
+
+/** Colores leÃ­dos UNA vez por efecto (themeVar lee CSS vars del DOM). */
+interface OverlayColors {
+  cursor: string;
+  drop: string;
+  clrA: string;
+  clrB: string;
+  loop: string;
+}
+
+/** Campos del estado del deck que pinta la capa dinÃ¡mica. */
+interface OverlayDeckState {
+  bpm: number;
+  originalBpm: number;
+  firstBeatOffset: number;
+  dropBeats: number[];
+  hotCues: (number | null)[];
+  activeLoop: { start: number; end: number; lengthInBeats: number } | null;
+}
+
+interface WaveformOverviewProps {
+  deckId: DeckId;
+  height?: number;
+  /** Shared zoom ref from WaveformDisplay â€” used for dynamic viewport */
+  zoomRef?: React.RefObject<number>;
+}
+
+// â”€â”€ Capa 1: barra de progreso / minimapa (pintada UNA vez por datos) â”€â”€
+
+const StaticWaveformLayer: FC<{ deckId: DeckId; width: number; height: number }> = ({
+  deckId,
+  width,
+  height,
+}) => {
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);
+  const waveformData = useMixiStore((s) => s.decks[deckId].waveformData);
+
+  useEffect(() => {
+    // Static layer: paint the waveform ONCE into the background canvas (on data
+    // change). The dynamic cursor/markers live on a separate overlay canvas, so
+    // we no longer re-blit the whole waveform (putImageData) every frame. (#17)
+    const canvas = bgCanvasRef.current;
+    if (!canvas || !waveformData || waveformData.length === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const ctx = canvas.getContext('2d', { alpha: false })!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Mono overview tinted with deck color â€” clean, readable silhouette
+    const deckColor = deckId === 'A'
+      ? themeVar('clr-a', '#00f0ff')
+      : themeVar('clr-b', '#a855f7');
+    const COLOR_BG = themeVar('wave-bg', '#111');
+
+    // Clear
+    ctx.fillStyle = COLOR_BG;
+    ctx.fillRect(0, 0, width, height);
+
+    const halfH = height / 2;
+    const pointsPerPixel = waveformData.length / width;
+
+    // Single-color mono bar: max energy across all bands, tinted with deck color at 50%
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = deckColor;
+    for (let x = 0; x < width; x++) {
+      const startIdx = Math.floor(x * pointsPerPixel);
+      const endIdx = Math.min(Math.floor((x + 1) * pointsPerPixel), waveformData.length);
+      // Min-Max decimation: peak energy across all bands
+      let maxE = 0;
+      for (let i = startIdx; i < endIdx; i++) {
+        const e = Math.max(waveformData[i].low, waveformData[i].mid, waveformData[i].high);
+        if (e > maxE) maxE = e;
+      }
+      const h = maxE * halfH;
+      ctx.fillRect(x, halfH - h, 1, h * 2);
+    }
+    ctx.globalAlpha = 1;
+  }, [waveformData, width, height, deckId]);
+
+  return (
+    <canvas
+      ref={bgCanvasRef}
+      className="absolute inset-0 w-full h-full rounded-lg shadow-[inset_0_1px_4px_rgba(0,0,0,0.5)] pointer-events-none"
+    />
+  );
+};
+
+// â”€â”€ Capa 2: marcadores + cursor + viewport (30 FPS, ociosa si no cambia) â”€â”€
+
+interface OverviewOverlayCanvasProps {
+  deckId: DeckId;
+  width: number;
+  height: number;
+  externalZoomRef?: React.RefObject<number>;
+  isDraggingRef: React.MutableRefObject<boolean>;
+  onMouseDown: (e: React.MouseEvent<HTMLCanvasElement>) => void;
+}
+
+const OverviewOverlayCanvas: FC<OverviewOverlayCanvasProps> = ({
+  deckId,
+  width,
+  height,
+  externalZoomRef,
+  isDraggingRef,
+  onMouseDown,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    // Transparent overlay (no willReadFrequently â†’ GPU-backed): each frame we
+    // clearRect + draw thin rects instead of blitting the whole waveform.
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    const ctx = canvas.getContext('2d', { alpha: true })!;
+    const engine = MixiEngine.getInstance();
+    const colors: OverlayColors = {
+      cursor: themeVar('wave-playhead', '#fff'),
+      drop: themeVar('wave-drop', '#ff0044'),
+      clrA: themeVar('clr-a', '#00f0ff'),
+      clrB: themeVar('clr-b', '#a855f7'),
+      loop: themeVar('wave-loop', '74, 222, 128'),
+    };
+
+    let lastFrame = 0;
+    let hidden = false;
+    const onVis = () => {
+      hidden = document.hidden;
+      if (!hidden) lastFrame = 0;
+    };
+    document.addEventListener('visibilitychange', onVis);
+
+    /** Huella barata del estado visible: si no cambió (deck en pausa, sin
+     *  arrastre), el frame se salta por completo — cero trabajo de GPU/CPU
+     *  en reposo. */
+    let lastFp = '';
+
+    function tick() {
+      const now = performance.now();
+      if (hidden || now - lastFrame <= 33) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      lastFrame = now;
+
+      const state = useMixiStore.getState().decks[deckId];
+      const dur = state.duration;
+      const playing = dur > 0 && engine.isInitialized && state.isPlaying;
+      const currentTime = engine.isInitialized ? engine.getCurrentTime(deckId) : 0;
+      const loop = state.activeLoop;
+      const fp = [
+        playing ? 'p' : 's',
+        playing ? (currentTime * 30) | 0 : (currentTime * 4) | 0,
+        loop ? `${loop.start.toFixed(3)}|${loop.end.toFixed(3)}` : '0',
+        state.dropBeats.length,
+        state.hotCues.length ? 'c' : '0',
+        externalZoomRef?.current ?? 1,
+        isDraggingRef.current ? 1 : 0,
+        width,
+      ].join('|');
+      if (fp === lastFp) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      lastFp = fp;
+
+      // Clear the transparent overlay (the static waveform shows through from
+      // the bg canvas behind) — no full-canvas putImageData blit.
+      ctx.clearRect(0, 0, width * dpr, height * dpr);
+
+      ctx.save();
+      ctx.scale(dpr, dpr);
+
+      if (dur > 0 && engine.isInitialized) {
+        paintOverlayFrame(ctx, state, {
+          deckId,
+          width,
+          height,
+          dur,
+          currentTime,
+          zoom: externalZoomRef?.current ?? 1,
+        }, colors);
+      }
+
+      ctx.restore();
+
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [deckId, width, height, externalZoomRef, isDraggingRef]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      onMouseDown={onMouseDown}
+      className="absolute inset-0 w-full h-full rounded-lg cursor-crosshair"
+    />
+  );
+};
+
+/** Dibujo puro de la capa dinámica (marcadores, loop, viewport, cursor y
+ *  aviso de final). Lógica idéntica a la versión monolítica, extraída para
+ *  que cada subcomponente tenga una sola responsabilidad. */
+function paintOverlayFrame(
+  ctx: CanvasRenderingContext2D,
+  state: OverlayDeckState,
+  view: { deckId: DeckId; width: number; height: number; dur: number; currentTime: number; zoom: number },
+  colors: OverlayColors,
+): void {
+  const { deckId, width, height, dur, currentTime, zoom } = view;
+  // Rejilla/drop markers en TIEMPO DE FUENTE: BPM original (nunca el efectivo).
+  const bpm = state.originalBpm > 0 ? state.originalBpm : state.bpm;
+  const offset = state.firstBeatOffset;
+
+  // ── Drop markers (red ticks) ─────────────────────────────
+  if (bpm > 0 && state.dropBeats.length > 0) {
+    const beatPeriod = 60 / bpm;
+    for (let i = 0; i < Math.min(state.dropBeats.length, 4); i++) {
+      const dropTime = offset + state.dropBeats[i] * beatPeriod;
+      const dx = Math.floor((dropTime / dur) * width);
+      ctx.fillStyle = i === 0 ? colors.drop : colors.drop + '88';
+      ctx.fillRect(dx, 0, 2, height);
+    }
+  }
+
+  // ── Hot cue markers (coloured ticks) ────────────────────
+  const CUE_C = CUE_COLORS;
+  for (let i = 0; i < state.hotCues.length; i++) {
+    const t = state.hotCues[i];
+    if (t === null) continue;
+    const cx = Math.floor((t / dur) * width);
+    ctx.fillStyle = CUE_C[i] || '#fff';
+    ctx.fillRect(cx, 0, 2, height);
+  }
+
+  // ── Loop region (green overlay) ─────────────────────────
+  const loopActive = state.activeLoop;
+  if (loopActive) {
+    const lx1 = Math.floor((loopActive.start / dur) * width);
+    const lx2 = Math.floor((loopActive.end / dur) * width);
+    ctx.fillStyle = `rgba(${colors.loop}, 0.25)`;
+    ctx.fillRect(lx1, 0, lx2 - lx1, height);
+  }
+
+  // ── Played region ───────────────────────────────────────
+  const progress = currentTime / dur;
+  const cursorX = Math.floor(progress * width);
+
+  ctx.fillStyle = COLOR_PLAYED;
+  ctx.fillRect(0, 0, cursorX, height);
+
+  // ── Viewport rectangle (what's visible in main waveform)
+  // Estimate ~4s visible window, playhead at 1/3
+  // viewSec scales with zoom: at zoom 1 = ~4s, zoom 0.25 = ~16s, zoom 4 = ~1s
+  const viewSec = 4 / zoom;
+  const viewStartT = Math.max(0, currentTime - viewSec / 3);
+  const viewEndT = Math.min(dur, currentTime + (viewSec * 2) / 3);
+  const vx1 = Math.floor((viewStartT / dur) * width);
+  const vx2 = Math.floor((viewEndT / dur) * width);
+  const deckCol = deckId === 'A' ? colors.clrA : colors.clrB;
+  // Viewport fill
+  ctx.fillStyle = `${deckCol}08`;
+  ctx.fillRect(vx1, 0, vx2 - vx1, height);
+  // Viewport border lines — white handles on left/right edges
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+  ctx.fillRect(vx1, 0, 1, height);
+  ctx.fillRect(vx2, 0, 1, height);
+
+  // ── Cursor line with deck-colour glow ───────────────────
+  ctx.fillStyle = `${deckCol}33`;
+  ctx.fillRect(cursorX - 2, 0, 5, height);
+  ctx.fillStyle = colors.cursor;
+  ctx.fillRect(cursorX, 0, 1, height);
+
+  // ── Track ending warning (< 30s) ────────────────────────
+  const remaining = dur - currentTime;
+  if (remaining > 0 && remaining < 30) {
+    // Pulsing red border — intensity varies with time
+    const pulse = 0.3 + 0.3 * Math.sin(performance.now() / 300);
+    ctx.strokeStyle = `rgba(239, 68, 68, ${pulse})`;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(0, 0, width, height);
+  }
+}
+
+// â”€â”€ Contenedor: mide el ancho y posee la interacciÃ³n (seek / arrastre) â”€â”€
+
+const WaveformOverviewBase: FC<WaveformOverviewProps> = ({
+  deckId,
+  height = 16,
+  zoomRef: externalZoomRef,
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(400);
+  /** Viewport drag state */
+  const isDraggingRef = useRef(false);
+  const dragOffsetRef = useRef(0);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const duration = useMixiStore((s) => s.decks[deckId].duration);
+
+  // Tear down any in-flight viewport drag on unmount so the window
+  // mousemove/mouseup listeners can't leak.
+  useEffect(() => () => { dragCleanupRef.current?.(); }, []);
+
+  // â”€â”€ Measure container width â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    // #49: Debounce resize to avoid blank canvas flicker.
+    let timer: ReturnType<typeof setTimeout>;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) {
+        const rounded = Math.floor(w);
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          setWidth((prev) => Math.abs(prev - rounded) > 2 ? rounded : prev);
+        }, 200);
+      }
+    });
+    ro.observe(el);
+    return () => { clearTimeout(timer); ro.disconnect(); };
+  }, []);
+
+  // â”€â”€ Click to seek / viewport drag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (e.button !== 0) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const progress = x / rect.width;
+      const clickTime = progress * duration;
+
+      const engine = MixiEngine.getInstance();
+      if (!engine.isInitialized) return;
+
+      const currentTime = engine.getCurrentTime(deckId);
+      const zoom = externalZoomRef?.current ?? 1;
+      const viewSec = 4 / zoom;
+      const viewStart = currentTime - viewSec / 3;
+      const viewEnd = currentTime + (viewSec * 2) / 3;
+      const isInsideViewport = clickTime >= viewStart && clickTime <= viewEnd;
+
+      if (!isInsideViewport) {
+        // Click outside viewport: instant seek
+        engine.seek(deckId, Math.max(0, Math.min(duration, clickTime)));
+        return;
+      }
+
+      // Drag mode: remember offset from cursor to current playback time
+      isDraggingRef.current = true;
+      dragOffsetRef.current = currentTime - clickTime;
+      let lastSeek = 0;
+
+      const onMouseMove = (me: MouseEvent) => {
+        if (!isDraggingRef.current) return;
+        const now = performance.now();
+        if (now - lastSeek < 66) return; // throttle to ~15Hz
+        lastSeek = now;
+        const mx = me.clientX - rect.left;
+        const mp = mx / rect.width;
+        const targetTime = mp * duration + dragOffsetRef.current;
+        engine.seek(deckId, Math.max(0, Math.min(duration, targetTime)));
+      };
+
+      const cleanup = () => {
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+        dragCleanupRef.current = null;
+      };
+      const onMouseUp = () => {
+        isDraggingRef.current = false;
+        cleanup();
+      };
+
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+      // Remember the teardown so an unmount mid-drag can't leak the listeners
+      // (and keep firing seek() against a stale deck). (#19)
+      dragCleanupRef.current = cleanup;
+    },
+    [deckId, duration, externalZoomRef],
+  );
+
+  return (
+    <div ref={containerRef} className="relative w-full" style={{ height }}>
+      {/* Static waveform layer (painted once on data change) */}
+      <StaticWaveformLayer deckId={deckId} width={width} height={height} />
+      {/* Transparent overlay: cursor / markers / viewport, cleared each frame */}
+      <OverviewOverlayCanvas
+        deckId={deckId}
+        width={width}
+        height={height}
+        externalZoomRef={externalZoomRef}
+        isDraggingRef={isDraggingRef}
+        onMouseDown={handleMouseDown}
+      />
+    </div>
+  );
+};
+
+// Memoised: the overview canvas shouldn't reconcile on unrelated parent
+// re-renders (panic flash / vfx / update banner).
+export const WaveformOverview = memo(WaveformOverviewBase);

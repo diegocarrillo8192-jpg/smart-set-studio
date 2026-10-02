@@ -3,7 +3,13 @@
  * logo neón y título). Es un timer PURO (2s + fade 700ms), totalmente
  * independiente del backend: mientras el logo se muestra, Python arranca en
  * silencio por debajo y la biblioteca se carga al desvanecerse — sin banners.
+ *
+ * El logo viaja como Data URL inline (ver ../assets/logo) con decoding="sync":
+ * se decodifica durante el layout y pinta en el PRIMER fotograma junto con el
+ * contenedor y su glow — jamás se ve el recuadro vacío esperando al PNG.
  */
+import { LOGO_DATA_URL } from "../assets/logo";
+
 interface Props {
   leaving: boolean;
 }
@@ -19,10 +25,11 @@ export default function SplashScreen({ leaving }: Props) {
         <div className="relative">
           <div className="animate-splash-ring absolute inset-0 rounded-full border-2" />
           <img
-            src="logo.png"
-            alt=""
+            src={LOGO_DATA_URL}
+            alt="Smart Set Architect"
             draggable="false"
-            className="animate-splash-logo relative h-28 w-28 rounded-[26px] object-cover shadow-[0_0_40px_rgba(139,92,246,0.35)] md:h-32 md:w-32"
+            decoding="sync"
+            className="animate-splash-logo relative z-[1] h-28 w-28 rounded-[26px] object-cover shadow-[0_0_40px_rgba(139,92,246,0.35)] md:h-32 md:w-32"
           />
         </div>
         <h1 className="animate-splash-title select-none text-sm font-bold uppercase text-slate-200">

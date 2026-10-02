@@ -64,16 +64,17 @@ body,
   }
 }
 
-/* Splash de marca: entrada suave del logo (fade-in + zoom + brillo neón) */
+/* Splash de marca: entrada suave del logo (glow + zoom), visible desde el
+   primer fotograma para que nunca se vea un logo distinto al oficial. */
 @keyframes splash-logo {
   0% {
-    opacity: 0;
-    transform: scale(0.82);
-    filter: drop-shadow(0 0 0 rgba(139, 92, 246, 0));
+    opacity: 1;
+    transform: scale(0.96);
+    filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.3));
   }
   55% {
     opacity: 1;
-    transform: scale(1.04);
+    transform: scale(1.03);
     filter: drop-shadow(0 0 26px rgba(139, 92, 246, 0.75));
   }
   100% {
@@ -173,4 +174,21 @@ input[type="radio"] {
   .app-shell {
     display: none;
   }
+}
+
+/* --- Escritorio (Electron): título nativo oculto (titleBarStyle hidden) ----
+   La franja de 40px superior corresponde al overlay de controles de ventana
+   (área no-cliente): el contenido se desplaza por debajo y la topbar de la
+   consola queda como único branding. La topbar actúa como zona de arrastre
+   de la ventana (sus controles quedan excluidos con no-drag). */
+html.is-desktop .app-shell {
+  padding-top: 40px;
+}
+
+html.is-desktop .mixi-topbar {
+  -webkit-app-region: drag;
+}
+
+html.is-desktop .mixi-topbar * {
+  -webkit-app-region: no-drag;
 }

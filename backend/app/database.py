@@ -48,6 +48,9 @@ def init_db() -> None:
     _ensure_column("tracks", "genre", "VARCHAR(255)")
     _ensure_column("tracks", "file_modified_at", "DATETIME")
     _ensure_column("tracks", "analyzed_at", "DATETIME")
+    _ensure_column("tracks", "dj_bpm", "REAL")
+    _ensure_column("tracks", "dj_beatgrid_offset", "REAL")
+    _ensure_column("tracks", "dj_hot_cues", "TEXT")
 
     # Backfill de géneros: los tracks indexados antes de existir la columna
     # `genre` quedaron NULL; se rellenan con el nombre de la carpeta contenedora.

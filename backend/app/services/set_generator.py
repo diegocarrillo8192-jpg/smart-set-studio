@@ -1,20 +1,21 @@
 """Motor de curaduría: genera sets armónicos con progresión de energía (Rueda Camelot).
 
 Reglas (PRD §4, optimización de calidad):
-  1. Mezcla armónica: misma clave (> misma tonalidad), vecinos ±1, cambio de
-     modo, y Energy Boost (+2) solo para subir intensidad. Los saltos
-     disonantes se penalizan; como último recurso se acepta un "cruce de
-     respaldo" (radio ±2) en vez de cortar el set.
+  1. Mezcla armónica: misma clave (> misma tonalidad), vecinos ±1 (rueda
+     circular 12<->1), cambio de modo, y Energy Boost (+2) solo para subir
+     intensidad. Los saltos disonantes se penalizan de forma graduada; como
+     último recurso se acepta un "cruce de respaldo" (radio ±2) en vez de
+     cortar el set, y nunca se encadenan dos cruces de respaldo seguidos.
   2. BPM: variación máxima ±2/±3 BPM absolutos entre tracks consecutivos;
-     en perfiles de alta energía el tempo avanza en rampa acumulativa
-     (+1 BPM cada 4 tracks en zona alta) sin saltos bruscos.
+     en perfiles de alta energía el tempo avanza en rampa suave anclada al
+     tempo real de la cadena (no al arranque) sin saltos bruscos.
   3. Curvas de energía reales por estructura (Warm-Up 3→7, Peak constante
-     8.6–9.8, Storytelling intro→clímax→outro).
-   4. Sin duplicados (ni en el set ni en los sets recientes), diversificación de
-      artistas y razón lógica de cada cruce en la playlist (ej.
-      "Transición Armónica Directa 10A → 10A (+0 BPM)").
-   5. Variedad entre generaciones: arranque aleatorio, pool Top-K (5..8) y
-      jitter del 5-10% en la puntuación de compatibilidad.
+     9.2–9.8 sin discontinuidades, Storytelling intro→clímax→outro).
+    4. Sin duplicados (ni en el set ni en los sets recientes), diversificación de
+       artistas y razón lógica de cada cruce en la playlist (ej.
+       "Transición Armónica Directa 10A → 10A (+0 BPM)").
+    5. Variedad entre generaciones: arranque aleatorio, pool Top-K (5..8) y
+       jitter del 3-6% en la puntuación de compatibilidad.
 """
 import math
 import random
@@ -27,10 +28,12 @@ from sqlalchemy.orm import Session
 
 from ..models import Folder, Set, SetItem, Track
 from .camelot import (
+    camelot_mode,
     camelot_number,
     is_compatible,
     normalize_camelot,
     relation,
+    wheel_step,
 )
 
 ENERGY_PROFILES = {
@@ -77,10 +80,12 @@ def _curve_warmup(t: float) -> float:
 
 def _curve_peak_hour(t: float) -> float:
     if t < 0.15:
-        # Entrada rápida a la zona alta
-        return _clamp(6.5 + (10.0 - 6.5) * (t / 0.15) ** 1.2)
-    # Energía alta constante (8.6..9.8) con fluctuaciones de tensión sutiles
-    return _clamp(8.6 + 1.2 * math.sin(math.pi * (t - 0.15) / 0.85) ** 0.5)
+        # Entrada rápida a la zona alta (6.5 -> 9.2): aterriza exactamente en
+        # el valor de arranque del sostén, sin salto ni caída de energía.
+        return _clamp(6.5 + (9.2 - 6.5) * (t / 0.15) ** 1.2)
+    # Energía alta sostenida 9.2..9.8 con cresta central y cierre en 9.2:
+    # función continua con la entrada (sin discontinuidad en t=0.15).
+    return _clamp(9.2 + 0.6 * math.sin(math.pi * (t - 0.15) / 0.85))
 
 
 def _curve_storytelling(t: float) -> float:
@@ -123,19 +128,32 @@ def _bpm_score(candidate_bpm: float | None, expected_bpm: float | None) -> float
 
 
 def _harmonic_score(current: str, candidate: str, profile: str) -> float:
-    rel, _label = relation(current, candidate)
+    """Compatibilidad armónica 0..100 con distancias circulares reales.
+
+    Jerarquía: misma clave > Energy Boost (+2, en perfiles explosivos) >
+    cambio de modo > vecino ±1 > vecino de respaldo ±2 > disonancia
+    graduada por distancia. Cruzar de cara (menor<->mayor con números
+    distintos) penaliza extra: nunca es una mezcla armónica.
+    """
+    cur = normalize_camelot(current)
+    cand = normalize_camelot(candidate)
+    rel, _label = relation(cur, cand)
     if rel == "same":
         return 100.0
     if rel == "mode":
         return 85.0
     if rel == "neighbor":
-        # Vecinos de segundo grado (respaldo) penalizados frente a ±1
-        diff = abs(camelot_number(candidate) - camelot_number(current))
-        return 78.0 if diff == 1 else 55.0
+        return 78.0
     if rel == "boost":
         # El perfil explosivo favorece los saltos +2 (subir intensidad)
         return 95.0 if profile == "energy_boost" else 62.0
-    return 25.0  # cruce de respaldo: se acepta, pero muy penalizado
+
+    # Sin relación directa: penalización continua por distancia circular.
+    step = wheel_step(camelot_number(cur), camelot_number(cand))
+    dist = min(abs(step), 6)
+    cross = camelot_mode(cur) != camelot_mode(cand)
+    base = 55.0 if dist == 2 else max(10.0, 50.0 - dist * 8.0)
+    return base * (0.7 if cross else 1.0)
 
 
 def _energy_score(candidate_energy: int | None, desired: float) -> float:
@@ -162,12 +180,15 @@ def _transition_reason(
     if rel == "mode":
         return rel, f"Cambio de Modo {current} → {nxt} ({delta_str})"
     if rel == "neighbor":
-        diff = abs(camelot_number(nxt) - camelot_number(current))
-        kind = "Vecino Armónico" if diff == 1 else "Vecino de Respaldo"
-        return rel, f"{kind} {current} → {nxt} ({delta_str})"
+        return rel, f"Vecino Armónico {current} → {nxt} ({delta_str})"
     if rel == "boost":
         return rel, f"Energy Boost +2 {current} → {nxt} ({delta_str})"
-    return "fallback", f"Cruce de Respaldo {current} → {nxt} ({delta_str})"
+    # Sin relación estricta: distinguir el respaldo de segundo grado (±2,
+    # misma cara) del cruce disonante (distancia mayor o cambio de cara).
+    step = wheel_step(camelot_number(current), camelot_number(nxt))
+    same_face = camelot_mode(current) == camelot_mode(nxt)
+    kind = "Vecino de Respaldo" if same_face and abs(step) == 2 else "Cruce de Respaldo"
+    return "fallback", f"{kind} {current} → {nxt} ({delta_str})"
 
 
 def _pick_start(
@@ -233,6 +254,9 @@ def generate_set(
     legacy_pct = float(settings.get("max_bpm_variation_pct", 0.0))
     max_bpm_diff: float | None = float(settings["max_bpm_diff_bpm"]) if "max_bpm_diff_bpm" in settings else None
     allow_mode = bool(settings.get("allow_mode_change", True))
+    # Radio armónico estricto configurable (1 = solo vecinos ±1; 2 = permite
+    # también vecinos de segundo grado como mezclas "aceptables").
+    harmonic_radius = max(1, min(2, int(settings.get("harmonic_radius", 1) or 1)))
 
     if energy_profile not in CURVES:
         raise ValueError(f"Perfil de energía desconocido: {energy_profile}")
@@ -285,15 +309,15 @@ def generate_set(
     total_sec = current.duration_sec or 180.0
     start_bpm = current.bpm or 120.0
 
-    # --- Selección greedy con rampa de tempo acumulativa ---
-    bpm_ramp = 0.0          # aumento acumulativo en zona de alta energía
-    RAMP_PER_TRACK = 1.0 / 4  # +1 BPM cada 4 tracks en zona alta (perfil pro)
+    # --- Selección greedy con rampa de tempo anclada a la cadena real ---
+    RAMP_PER_TRACK = 1.0 / 4  # +0.25 BPM por track en zona alta (perfil pro)
     pos = 1
     last_was_fallback = False   # anti-disonancia: nunca encadenar cruces de respaldo
     recent_artists: deque[str] = deque(maxlen=3)  # ventana para diversificar
     if current.artist:
         recent_artists.append(current.artist.strip().lower())
     prev_prev_key: str | None = None  # para penalizar alternancias de modo 8A→8B→8A
+    mode_ok = allow_mode or energy_profile == "energy_boost"
     while total_sec < target_secs:
         fraction = min(1.0, total_sec / max(target_secs, 1.0))
         desired = curve(fraction)
@@ -301,10 +325,11 @@ def generate_set(
         cur_bpm = current.bpm
 
         # Rampa progresiva: en perfiles de aceleración, si la curva exige
-        # energía alta (>= 8), el tempo esperado sube de forma acumulativa.
-        if energy_profile in ("peak_hour", "energy_boost") and desired >= 8.0:
-            bpm_ramp += RAMP_PER_TRACK
-        expected_bpm = round(start_bpm + bpm_ramp, 1)
+        # energía alta (>= 8), el tempo objetivo sube suavemente (+0.25 BPM)
+        # RESPECTO AL TEMPO REAL del track actual: la meta nunca se desacopla
+        # de la cadena (sin deriva ni saltos).
+        ramping = energy_profile in ("peak_hour", "energy_boost") and desired >= 8.0
+        expected_bpm = round((cur_bpm or start_bpm) + (RAMP_PER_TRACK if ramping else 0.0), 1)
 
         # Filtro duro: transición fluida de BPM (máx ±2/±3 BPM absolutos).
         def _bpm_ok(t: Track) -> bool:
@@ -337,15 +362,12 @@ def generate_set(
         if not candidates:
             break
 
-        # Paso 1: solo transiciones armónicas estrictas (radio 1, modo si permitido)
+        # Paso 1: solo transiciones armónicas estrictas (radio configurado;
+        # modo permitido salvo que el usuario lo desactive).
         strict = [
             t
             for t in candidates
-            if is_compatible(
-                cur_key, t.camelot_key,
-                radius=1,
-                allow_mode=allow_mode or energy_profile == "energy_boost",
-            )
+            if is_compatible(cur_key, t.camelot_key, radius=harmonic_radius, allow_mode=mode_ok)
         ]
 
         # Anti-disonancia: tras un cruce de respaldo, el siguiente DEBE ser
@@ -357,13 +379,19 @@ def generate_set(
             best_pool = strict
         else:
             # Paso 2 (respaldo): vecinos de radio 2 — sin romper aún el set
+            # (respeta igualmente la preferencia de cambio de modo del usuario).
             if not strict:
-                strict = [
-                    t for t in candidates
-                    if is_compatible(cur_key, t.camelot_key, radius=2, allow_mode=True)
+                backup = [
+                    t
+                    for t in candidates
+                    if is_compatible(cur_key, t.camelot_key, radius=2, allow_mode=mode_ok)
                 ]
-            # Paso 3: última opción única: cualquier track sin usar (nunca 2 seguidos)
-            best_pool = strict or candidates
+            else:
+                backup = []
+            # Paso 3: última opción única: cualquier track sin usar (nunca 2
+            # respaldos seguidos; el scoring castiga la disonancia de forma
+            # graduada para que siga siendo la opción menos dañina).
+            best_pool = strict or backup or candidates
 
         def _score(t: Track) -> float:
             harmonic = _harmonic_score(cur_key, t.camelot_key, energy_profile)
@@ -382,9 +410,9 @@ def generate_set(
                 artist_s = 0.0
             # Anti-alternancia de modo: 8A→8B→8A ya fue EXCLUIDO en el filtro duro
             base = 0.40 * harmonic + 0.30 * bpm_s + 0.24 * energy_s + 0.06 * artist_s
-            # Jitter del 5-10%: fluctuación aleatoria del ranking para que cada
+            # Jitter del 3-6%: fluctuación aleatoria del ranking para que cada
             # generación varíe sin romper la jerarquía de compatibilidad.
-            jitter = rng.uniform(0.05, 0.10) * rng.choice((-1, 1))
+            jitter = rng.uniform(0.03, 0.06) * rng.choice((-1, 1))
             return base * (1.0 + jitter)
 
         # Pool Top-K (5..8): elige aleatoriamente entre los mejores candidatos
@@ -400,11 +428,11 @@ def generate_set(
         pos += 1
         if (nxt.artist or "").strip().lower():
             recent_artists.append(nxt.artist.strip().lower())
-        # ¿Este cruce fue un respaldo? (no estricto ni radio-1)
+        # ¿Este cruce fue un respaldo? (no estricto según el radio configurado)
         allowed_strict = is_compatible(
             cur_key, nxt.camelot_key,
-            radius=1,
-            allow_mode=allow_mode or energy_profile == "energy_boost",
+            radius=harmonic_radius,
+            allow_mode=mode_ok,
         )
         last_was_fallback = not allowed_strict
         # prev_prev para el siguiente cruce: el track de hace 2 posiciones

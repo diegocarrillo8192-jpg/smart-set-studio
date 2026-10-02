@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .camelot import KS_MAJOR, KS_MINOR, NOTE_NAMES, note_to_camelot
+from .camelot import KS_MAJOR, KS_MINOR, NOTE_NAMES, NOTE_PC, note_to_camelot
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +87,14 @@ def _mp4_text(audio, key: str) -> str:
         return ""
 
 
-# Mapeo de la rueda Serato (código 0-23) -> Camelot. Serato guarda la key en
-# un byte dentro del GEOB "Serato Analysis"; el índice sigue el círculo de
-# quintas (mayor en la cara bemol, menor en la sostenida), igual que Camelot.
+# Mapeo del byte de tonalidad de Serato (0-23) -> Camelot.
+# Serato numera las 24 claves sobre el círculo de quintas: 0-11 son las
+# mayores (C, G, D, A, E, B, F#, C#, F, Bb, Eb, Ab) y 12-23 las menores
+# (Am, Em, Bm, F#m, C#m, G#m, Ebm, Bbm, Fm, Cm, Gm, Dm), igual que la
+# numeración Camelot.
 SERATO_KEY_TO_CAMELOT = (
-    "8B", "5A", "3B", "12A", "10B", "7A", "5B", "2A",
-    "12B", "9A", "7B", "4A", "2B", "11A", "9B", "6A",
-    "4B", "1A", "11B", "8A", "6B", "3A", "1B", "10A",
+    "8B", "9B", "10B", "11B", "12B", "1B", "2B", "3B", "7B", "6B", "5B", "4B",
+    "8A", "9A", "10A", "11A", "12A", "1A", "2A", "3A", "4A", "5A", "6A", "7A",
 )
 
 
@@ -150,8 +151,50 @@ def _serato_key_code(payload: bytes) -> int | None:
     return None
 
 
+def _serato_key_json(audio) -> str:
+    """Tonalidad desde el GEOB 'Key' en JSON (Serato DJ Pro moderno).
+
+    Serato DJ Pro 2.x+ guarda la key en un GEOB cuyo descriptor es 'Key' y
+    cuyo contenido es JSON codificado en base64:
+    ``{"key":"9A","source":"mixedinkey","algorithm":94}``.
+    """
+    try:
+        for frame in audio.getall("GEOB"):
+            try:
+                desc = (str(frame.desc) if frame.desc is not None else "").strip().lower()
+            except Exception:
+                continue
+            if desc != "key":
+                continue
+            try:
+                data = bytes(frame.data)
+            except Exception:
+                continue
+            import base64
+            import json
+
+            try:
+                text = base64.b64decode(data).decode("utf-8", "replace")
+                payload = json.loads(text)
+            except Exception:
+                continue
+            key = payload.get("key")
+            if isinstance(key, str) and key.strip():
+                code = key.strip().upper()
+                if code.endswith(("A", "B")) and code[:-1].isdigit():
+                    return code
+    except Exception:
+        pass
+    return ""
+
+
 def _serato_key(audio) -> str:
-    """Tonalidad desde el GEOB 'Serato Analysis/Markers' (byte 0-23 -> Camelot)."""
+    """Tonalidad desde el GEOB 'Serato Analysis/Markers' (byte 0-23 -> Camelot).
+
+    Formato legacy (Serato Scratch Live / Serato DJ 1.x): campo 'KEY' de 4
+    bytes de identificador + 4 bytes de longitud big-endian + datos (la key
+    es el primer byte, 0-23, sobre el círculo de quintas).
+    """
     try:
         for frame in audio.getall("GEOB"):
             try:
@@ -185,7 +228,13 @@ def read_metadata(file_path: str) -> TrackMetadata:
     from mutagen import File
     from mutagen.id3 import ID3Tags
 
-    audio = File(file_path, easy=False)
+    # Un archivo corrupto (MPEG inválido, tags rotos...) no debe reventar la
+    # lectura: se devuelven metadatos por defecto y el error queda en el log.
+    try:
+        audio = File(file_path, easy=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Archivo ilegible para metadatos %s: %s", file_path, exc)
+        audio = None
     duration = None
     title = artist = album = ""
     embedded_bpm: float | None = None
@@ -209,20 +258,24 @@ def read_metadata(file_path: str) -> TrackMetadata:
 
         try:
             if is_id3:
-                title = _id3_text(audio, "TIT2")
-                artist = _id3_text(audio, "TPE1") or _id3_text(audio, "TPE2")
-                album = _id3_text(audio, "TALB")
-                genre = _id3_text(audio, "TCON")
-                year = _id3_text(audio, "TDRC")[:4] or _id3_text(audio, "TYER")
-                bpm_raw = _id3_text(audio, "TBPM")
+                # `tags` es el ID3Tags real: tiene getall() (TXXX/GEOB), que
+                # WAVE/AIFF no exponen en el objeto File de mutagen.
+                title = _id3_text(tags, "TIT2")
+                artist = _id3_text(tags, "TPE1") or _id3_text(tags, "TPE2")
+                album = _id3_text(tags, "TALB")
+                genre = _id3_text(tags, "TCON")
+                year = _id3_text(tags, "TDRC")[:4] or _id3_text(tags, "TYER")
+                bpm_raw = _id3_text(tags, "TBPM")
                 # Prioridad de fuentes de tonalidad: TKEY (Rekordbox/Traktor/
                 # Mixed In Key), INITIALKEY (ID3v2.4), TXXX 'InitialKey'/'KEY'
-                # y, por último, el GEOB propietario de Serato.
+                # y, por último, los GEOB propietarios de Serato (JSON moderno
+                # primero, byte legacy del círculo de quintas después).
                 embedded_key = (
-                    _id3_text(audio, "TKEY")
-                    or _id3_text(audio, "INITIALKEY")
-                    or _id3_txxx(audio, "initialkey", "initial key", "key")
-                    or _serato_key(audio)
+                    _id3_text(tags, "TKEY")
+                    or _id3_text(tags, "INITIALKEY")
+                    or _id3_txxx(tags, "initialkey", "initial key", "key")
+                    or _serato_key_json(tags)
+                    or _serato_key(tags)
                 )
             elif is_mp4:
                 title = _mp4_text(audio, "\xa9nam")
@@ -378,68 +431,200 @@ def _load_mono(path: str, duration: float = ANALYSIS_MAX_SEC) -> tuple[np.ndarra
     return y, float(sr)
 
 
+def _librosa_tempo():
+    """Devuelve la función tempo() disponible (librosa.feature.rhythm o beat)."""
+    try:
+        from librosa.feature.rhythm import tempo  # librosa >= 0.10
+
+        return tempo
+    except (ImportError, AttributeError):  # librosa < 0.10
+        import librosa
+
+        return librosa.beat.tempo
+
+
+def _tempo_from_envelope(onset_env: np.ndarray, sr: float) -> float | None:
+    """Estimación robusta de BPM desde el onset envelope (anti double/half-time).
+
+    La ambigüedad de octava (el doble o la mitad del tempo real) es el fallo
+    clásico de los detectores de BPM: patrones de bombo/plato repetidos cada
+    dos beats generan periodicidad más fuerte en el doble del periodo real.
+
+    Estrategia:
+    1. Varios arranques de `tempo()` (prior 60/90/120/150 BPM) generan
+       candidatos en octavas distintas (el DP es multiestable).
+    2. Cada candidato (y sus mitades/dobles) se evalúa con el beat tracker
+       y se puntúa por:
+       - Contraste de onset sobre la rejilla (mean onset en beats / mean),
+       - Periodicidad de autocorrelación normalizada en ese lag,
+       - Prior de convención DJ (70-190 BPM domina; mitades/dobles extremos
+         solo ganan si la evidencia es claramente superior).
+    3. El periodo ganador se refina con interpolación parabólica.
+    """
+    import librosa
+
+    n = len(onset_env)
+    if n < 16:
+        return None
+    fps = sr / HOP_LENGTH
+
+    # Autocorrelación normalizada por solape (comparable entre lags)
+    ac = librosa.autocorrelate(onset_env, max_size=n)
+    acn = ac / np.maximum(n - np.arange(len(ac)), 1.0)
+
+    def ac_strength(tempo: float) -> float:
+        lag = int(round(60.0 / tempo * fps))
+        if lag < 2 or lag > len(acn) - 2:
+            return 0.0
+        return float(acn[lag - 1 : lag + 2].max())
+
+    def grid_contrast(tempo: float) -> tuple[float, float]:
+        est, beats = librosa.beat.beat_track(
+            onset_envelope=onset_env,
+            sr=sr,
+            hop_length=HOP_LENGTH,
+            start_bpm=tempo,
+            tightness=100,
+        )
+        t = float(np.atleast_1d(est)[0])
+        frames = np.round(beats).astype(int)
+        frames = frames[(frames >= 0) & (frames < n)]
+        if len(frames) < 8:
+            return t, 0.0
+        contrast = float(onset_env[frames].mean() / (onset_env.mean() + 1e-9))
+        return t, contrast
+
+    def prior(tempo: float) -> float:
+        if 70 <= tempo <= 190:
+            return 1.0
+        if 190 < tempo <= 230 or 40 <= tempo < 70:
+            return 0.55
+        return 0.3
+
+    tempo_fn = _librosa_tempo()
+    candidates: set[float] = set()
+    for start in (60, 90, 120, 150):
+        try:
+            est = tempo_fn(
+                onset_envelope=onset_env,
+                sr=sr,
+                hop_length=HOP_LENGTH,
+                aggregate=np.median,
+                start_bpm=start,
+            )
+            t = float(np.atleast_1d(est)[0])
+            if 30 <= t <= 300:
+                candidates.add(round(t, 1))
+        except Exception:
+            continue
+    if not candidates:
+        return None
+
+    # Familias de octava: cada candidato genera su mitad y su doble
+    family: set[float] = set()
+    for t in candidates:
+        for f in (t / 2, t, t * 2):
+            if 35 <= f <= 300:
+                family.add(round(f, 1))
+
+    best_tempo: float | None = None
+    best_score = -np.inf
+    for cand in family:
+        try:
+            t, contrast = grid_contrast(cand)
+        except Exception:
+            continue
+        if not (35 <= t <= 300) or contrast <= 0:
+            continue
+        score = contrast * (0.4 + 0.15 * ac_strength(t)) * prior(t)
+        if score > best_score:
+            best_score, best_tempo = score, t
+    if best_tempo is None:
+        return None
+
+    # Guardia anti-ruido: en audio sin ritmo (ruido/silencio) la autocorrelación
+    # normalizada es plana (~1.0); en música real el pico del periodo supera
+    # claramente ese piso. Sin periodicidad real no se devuelve tempo.
+    baseline = float(np.median(acn))
+    if ac_strength(best_tempo) < max(1.6, baseline * 1.4):
+        return None
+
+    # Interpolación parabólica del pico de autocorrelación (precisión sub-muestra)
+    lag0 = 60.0 / best_tempo * fps
+    i0 = int(round(lag0))
+    if 2 <= i0 < len(acn) - 1:
+        y0, y1, y2 = acn[i0 - 1], acn[i0], acn[i0 + 1]
+        denom = y0 - 2 * y1 + y2
+        if abs(denom) > 1e-12:
+            lag0 += max(-0.5, min(0.5, 0.5 * (y0 - y2) / denom))
+    tempo = 60.0 / (lag0 / fps)
+    if 40 <= tempo <= 300:
+        return round(tempo, 1)
+    return round(best_tempo, 1)
+
+
 def estimate_bpm(y: np.ndarray, sr: float, embedded_bpm: float | None = None) -> float | None:
-    """Estima el BPM con beat tracking; prioriza el BPM embebido si es razonable."""
+    """Estima el BPM; prioriza el BPM embebido si es razonable.
+
+    Sin BPM embebido se usa el detector calibrado de `_tempo_from_envelope`,
+    que evalúa candidatos en varias octavas y resuelve la ambigüedad
+    double-time/half-time con contraste de rejilla + autocorrelación
+    normalizada + prior de convención DJ (70-190 BPM).
+    """
     if embedded_bpm and 60 <= embedded_bpm <= 220:
         return round(embedded_bpm, 1)
 
     import librosa
 
     try:
-        onset_env = librosa.onset.onset_strength(
-            y=y, sr=sr, hop_length=HOP_LENGTH
-        )
-        if onset_env.size < 16:
-            return None
-        try:
-            from librosa.feature.rhythm import tempo as _tempo_fn
-        except ImportError:  # librosa < 0.10
-            _tempo_fn = librosa.beat.tempo
-        coarse = _tempo_fn(
-            onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH,
-            aggregate=np.mean,
-        )
-        coarse_val = float(np.atleast_1d(coarse)[0])
-        if not (30 <= coarse_val <= 240):
-            return None
-
-        # Refinamiento fino vía autocorrelación del onset envelope
-        ac = librosa.autocorrelate(onset_env, max_size=len(onset_env))
-        center_lag = 60.0 / coarse_val * (sr / HOP_LENGTH)
-        lo = max(2, int(center_lag * 0.80))
-        hi = int(center_lag * 1.20) + 1
-        if hi > len(ac) - 1:
-            hi = len(ac) - 1
-        if hi <= lo:
-            return round(coarse_val, 1)
-
-        window = ac[lo:hi]
-        idx = int(np.argmax(window))
-        lag = lo + idx
-
-        # Interpolación parabólica para precisión sub-muestra
-        if 1 <= idx < len(window) - 1:
-            y0, y1, y2 = window[idx - 1], window[idx], window[idx + 1]
-            denom = (y0 - 2 * y1 + y2)
-            if abs(denom) > 1e-12:
-                delta = 0.5 * (y0 - y2) / denom
-                lag += max(-0.5, min(0.5, delta))
-
-        tempo = 60.0 / (lag * HOP_LENGTH / sr)
-        if 40 <= tempo <= 240:
-            return round(tempo, 1)
-        return round(coarse_val, 1)
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+        return _tempo_from_envelope(onset_env, sr)
     except Exception:
         return None
+
+
+KEY_MIN_CORRELATION = 0.35   # confianza mínima para aceptar una tonalidad
+KEY_MODE_TIE_MARGIN = 0.05   # margen para desempatar paralelas/relativas
+
+
+def _relative_of(note: str, mode: str) -> tuple[str, str]:
+    """Par relativo de una tonalidad: mayor -> menor relativa (raíz -3),
+    menor -> mayor relativa (raíz +3 semitonos)."""
+    idx = NOTE_PC[note]
+    if mode == "major":
+        return NOTE_NAMES[(idx - 3) % 12], "minor"
+    return NOTE_NAMES[(idx + 3) % 12], "major"
+
+
+def _mode_vote(chroma_mean: np.ndarray, note: str, mode: str) -> bool:
+    """¿El cromagrama respalda el modo del candidato?
+
+    Compara la energía en la tercera mayor vs la tercera menor de la raíz:
+    el tercer grado es el discriminador más fiable entre mayor y menor
+    cuando los perfiles K-S están empatados (típico entre relativos).
+    """
+    idx = NOTE_PC[note]
+    maj3 = float(chroma_mean[(idx + 4) % 12])
+    min3 = float(chroma_mean[(idx + 3) % 12])
+    return (maj3 >= min3) if mode == "major" else (min3 >= maj3)
 
 
 def estimate_key(y: np.ndarray, sr: float) -> tuple[str | None, str | None]:
     """Detección de tonalidad vía chroma + correlación de Krumhansl-Schmuckler.
 
-    Separa primero la componente armónica de la percusiva con HPSS (los kicks y
-    drums ensucian el espectro con ruido de banda ancha que corrompe el
-    chromagrama), calcula `chroma_cqt` solo sobre la señal armónica y elige el
-    par (raíz, modo) con mayor correlación contra las matrices de K-S.
+    Separación armónico/percursivo con HPSS (los kicks ensucian el croma con
+    ruido de banda ancha), `chroma_cqt` solo sobre la señal armónica (promedio
+    temporal normalizado, robusto a octavas: el croma pliega todas las octavas)
+    y selección del par (raíz, modo) de mayor correlación contra los perfiles
+    K-S de las 24 tonalidades.
+
+    Calibración anti-confusión mayor/menor relativo:
+    - Si el segundo candidato (paralelo o relativo) queda a menos de
+      `KEY_MODE_TIE_MARGIN`, un voto del tercer grado (mayor vs menor) sobre el
+      cromagrama decide el modo.
+    - Si la correlación del ganador no alcanza `KEY_MIN_CORRELATION` (ruido,
+      silencio, audio sin pitch claro), no se devuelve tonalidad: un nulo es
+      preferible a una key falsa que corrompa las mezclas armónicas.
 
     Devuelve (nota, código Camelot) o (None, None) si no hay confianza.
     """
@@ -458,24 +643,33 @@ def estimate_key(y: np.ndarray, sr: float) -> tuple[str | None, str | None]:
         if norm > 1e-9:
             chroma_mean = chroma_mean / norm
 
-        best_score = -np.inf
-        best = (None, None)
+        scores: list[tuple[str, str, float]] = []
         for shift in range(12):
-            profile_major = np.roll(KS_MAJOR, shift)
-            profile_minor = np.roll(KS_MINOR, shift)
-            for mode, profile in (("major", profile_major), ("minor", profile_minor)):
-                score = np.corrcoef(chroma_mean, profile)[0, 1]
-                if np.isnan(score):
-                    score = -np.inf
-                if score > best_score:
-                    best_score = score
-                    root_pc = (shift) % 12
-                    note = NOTE_NAMES[root_pc]
-                    best = (note, mode)
+            for mode, profile in (("major", KS_MAJOR), ("minor", KS_MINOR)):
+                prof = np.roll(profile, shift)
+                corr = float(np.corrcoef(chroma_mean, prof)[0, 1])
+                if np.isnan(corr):
+                    corr = -np.inf
+                scores.append((NOTE_NAMES[shift], mode, corr))
+        scores.sort(key=lambda item: -item[2])
 
-        note, mode = best
-        camelot = note_to_camelot(note, mode)
-        return f"{note} {mode}", camelot
+        best_note, best_mode, best_score = scores[0]
+        if best_score < KEY_MIN_CORRELATION:
+            return None, None
+
+        if len(scores) > 1:
+            n2, m2, s2 = scores[1]
+            if best_score - s2 < KEY_MODE_TIE_MARGIN:
+                relative = _relative_of(best_note, best_mode)
+                parallel = n2 == best_note and m2 != best_mode
+                if (n2, m2) == relative or parallel:
+                    vote_best = _mode_vote(chroma_mean, best_note, best_mode)
+                    vote_alt = _mode_vote(chroma_mean, n2, m2)
+                    if not vote_best and vote_alt:
+                        best_note, best_mode = n2, m2
+
+        camelot = note_to_camelot(best_note, best_mode)
+        return f"{best_note} {best_mode}", camelot
     except Exception:
         return None, None
 

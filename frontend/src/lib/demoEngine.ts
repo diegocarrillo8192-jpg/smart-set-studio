@@ -147,26 +147,29 @@ export function parseFilenameMetadata(name: string): {
   return out;
 }
 
-/** Duración real por metadatos del navegador (<audio> de BLOB), sin backend. */
+/** Duración real por metadatos del navegador (<audio> de BLOB), sin backend.
+ *  La liberación de la Blob URL está garantizada en TODOS los caminos de
+ *  salida: el temporizador la revoca en el peor caso (los metadatos nunca
+ *  llegan) y el finally la libera apenas el sondeo termina. */
 export async function probeAudioDuration(file: File, timeoutMs = 8000): Promise<number | null> {
-  return new Promise<number | null>((resolve) => {
-    const url = URL.createObjectURL(file);
-    const el = new Audio();
-    let settled = false;
-    const done = (v: number | null) => {
-      if (settled) return;
-      settled = true;
-      URL.revokeObjectURL(url);
-      resolve(v);
-    };
-    el.preload = "metadata";
-    el.onloadedmetadata = () => {
-      done(Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null);
-    };
-    el.onerror = () => done(null);
-    el.src = url;
-    window.setTimeout(() => done(null), timeoutMs);
-  });
+  const url = URL.createObjectURL(file);
+  // Red de seguridad: si el sondeo termina por timeout sin metadatos, esta
+  // revocación programada cierra el ciclo aunque el finally nunca corra.
+  window.setTimeout(() => URL.revokeObjectURL(url), timeoutMs + 1000);
+  try {
+    return await new Promise<number | null>((resolve) => {
+      const el = new Audio();
+      el.preload = "metadata";
+      el.onloadedmetadata = () => {
+        resolve(Number.isFinite(el.duration) && el.duration > 0 ? el.duration : null);
+      };
+      el.onerror = () => resolve(null);
+      el.src = url;
+      window.setTimeout(() => resolve(null), timeoutMs);
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +387,18 @@ export interface ParsedAudioFile {
   coverUrl: string | null;
 }
 
+/** Bytes de la carátula → Data URL (base64). Sin Blob URL de por medio:
+ *  nada que revocar y el <img> puede usarla directamente. */
+function coverDataUrl(data: Uint8Array, format?: string): string {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < data.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, Array.from(data.subarray(i, Math.min(i + chunk, data.length))));
+  }
+  const mime = format && /^image\//i.test(format) ? format : "image/jpeg";
+  return `data:${mime};base64,${btoa(bin)}`;
+}
+
 /** Etiquetas + duración + carátula de un File, todo en el navegador.
  *  Prioridad ABSOLUTA a las etiquetas ID3/MP4 internas (common.initialKey /
  *  common.key para tonalidad, common.bpm, common.artists/common.artist y
@@ -478,7 +493,7 @@ export async function parseAudioFile(file: File): Promise<ParsedAudioFile> {
     duration_sec,
     coverUrl:
       picture && picture.data && picture.data.length > 0
-        ? URL.createObjectURL(new Blob([picture.data], { type: picture.format }))
+        ? coverDataUrl(picture.data, picture.format)
         : null,
   };
 }
@@ -525,17 +540,47 @@ export function estimateEnergy(t: { bpm: number | null; title?: string | null })
 // Generador de set "demo" en pantalla (equivalente ligero del backend)
 // ---------------------------------------------------------------------------
 
-function wedgeNum(c: string | null | undefined): number | null {
-  const m = String(c ?? "").match(/^(\d{1,2})[AB]$/);
-  return m ? Number(m[1]) : null;
+function wedgeKey(c: string | null | undefined): { num: number; letter: string } | null {
+  const m = String(c ?? "").match(/^(\d{1,2})([AB])$/i);
+  if (!m) return null;
+  const num = Number(m[1]);
+  if (num < 1 || num > 12) return null;
+  return { num, letter: m[2].toUpperCase() };
 }
 
-const PROFILE_ENERGY: Record<EnergyProfile, number> = {
-  warmup: 3,
-  peak_hour: 7.5,
-  storytelling: 5,
-  energy_boost: 9,
-};
+/** Paso circular firmado en la rueda (1..12): +1 = subir una cuña, -1 = bajar.
+ *  Respeta el borde: 12→1 es +1 y 1→12 es -1, nunca 11. */
+function wedgeStep(na: number, nb: number): number {
+  const step = ((nb - na) % 12 + 12) % 12;
+  return step <= 6 ? step : step - 12;
+}
+
+/** Curva objetivo de energía 1..10 por perfil (mismo diseño que el backend). */
+function demoCurve(profile: EnergyProfile): (t: number) => number {
+  const clamp = (v: number) => Math.max(1, Math.min(10, v));
+  switch (profile) {
+    case "warmup":
+      return (t) => clamp(2.8 + 4.4 * Math.pow(t, 1.25));
+    case "peak_hour":
+      return (t) =>
+        t < 0.15
+          ? clamp(6.5 + (9.2 - 6.5) * Math.pow(t / 0.15, 1.2))
+          : clamp(9.2 + 0.6 * Math.sin((Math.PI * (t - 0.15)) / 0.85));
+    case "storytelling":
+      return (t) => {
+        if (t < 0.1) return clamp(1.2 + 10 * t);
+        if (t < 0.3) return clamp(2.2 + 4 * ((t - 0.1) / 0.2));
+        if (t < 0.75) return clamp(4.2 + 5 * Math.pow((t - 0.3) / 0.45, 1.2));
+        if (t < 0.9) return clamp(9.2 - 0.4 * ((t - 0.75) / 0.15));
+        return clamp(8.8 - 4.8 * ((t - 0.9) / 0.1));
+      };
+    default:
+      return (t) => clamp(3.5 + 6 * Math.pow(t, 1.1) + 0.6 * Math.sin(t * Math.PI * 3));
+  }
+}
+
+const MAX_BPM_PCT = 2.5; // puerta dura de BPM entre tracks consecutivos
+const RAMP_PER_TRACK = 0.25; // +0.25 BPM por track en zona alta (perfil pro)
 
 export interface DemoGenerateOptions {
   duration_min: number;
@@ -566,19 +611,34 @@ export function generateDemoSet(
     if (folderIdSet.size === 0 || folderIdSet.has(Number(enriched.folder_id))) pool.push(enriched);
   }
 
-  const target = Math.max(3, Math.min(MAX_TRACKS_IN_SET, Math.round(o.duration_min / 4)));
-  const energyTarget = PROFILE_ENERGY[o.energy_profile] ?? 5;
+  const targetSecs = Math.max(3, o.duration_min) * 60;
+  const curve = demoCurve(o.energy_profile);
+  const rampingProfile = o.energy_profile === "peak_hour" || o.energy_profile === "energy_boost";
+
+  // BPM dominante de la biblioteca (mediana) para anclar el arranque.
+  const bpms = pool
+    .map((t) => t.bpm)
+    .filter((b): b is number => b !== null && b > 0)
+    .sort((a, b) => a - b);
+  const medianBpm = bpms.length > 0 ? bpms[Math.floor(bpms.length / 2)] : null;
 
   const used = new Set<number>();
   const chain: Track[] = [];
+
+  const startEnergy = curve(0);
   const pickStart = (): Track | null => {
-    if (o.seed_track_id !== null && pool.some((t) => t.id === o.seed_track_id)) {
-      return pool.find((t) => t.id === o.seed_track_id) ?? null;
+    if (o.seed_track_id !== null) {
+      const seed = pool.find((t) => t.id === o.seed_track_id);
+      if (seed) return seed;
     }
+    // Track inicial: energía cercana al arranque de la curva + BPM cercano
+    // al dominante de la biblioteca (sin saltos de tempo ya en el slot 1).
     let best: Track | null = null;
     let bestScore = Infinity;
     for (const t of pool) {
-      const score = Math.abs((t.energy ?? 5) - energyTarget);
+      const e = t.energy ?? 5;
+      const bpmPenalty = medianBpm && t.bpm ? Math.abs(t.bpm - medianBpm) * 0.02 : 0;
+      const score = Math.abs(e - startEnergy) + bpmPenalty;
       if (score < bestScore) {
         bestScore = score;
         best = t;
@@ -593,36 +653,81 @@ export function generateDemoSet(
     chain.push(start);
   }
 
-  while (chain.length < target) {
+  const recentArtists: string[] = [];
+  const recentArtistSet = new Set<string>();
+  if (start?.artist) {
+    const a0 = start.artist.trim().toLowerCase();
+    recentArtists.push(a0);
+    recentArtistSet.add(a0);
+  }
+
+  let totalSec = chain.reduce((acc, t) => acc + Math.max(0, t.duration_sec ?? 240), 0);
+
+  while (chain.length < MAX_TRACKS_IN_SET && totalSec < targetSecs) {
     const prev = chain[chain.length - 1];
+    const prevKey = wedgeKey(prev.camelot_key ?? null);
+    const prevPrevKey = chain.length >= 2 ? wedgeKey(chain[chain.length - 2].camelot_key ?? null) : null;
+    const fraction = Math.min(1, totalSec / Math.max(targetSecs, 1));
+    const desired = curve(fraction);
+    // Rampa de tempo anclada al track actual (nunca se desacopla de la cadena)
+    const rampTarget = (prev.bpm ?? medianBpm ?? 120) + (rampingProfile && desired >= 8 ? RAMP_PER_TRACK : 0);
+
     let best: Track | null = null;
     let bestScore = -Infinity;
     for (const t of pool) {
       if (used.has(t.id)) continue;
+      const tKey = wedgeKey(t.camelot_key ?? null);
       let score = 0;
-      // Compatibilidad Camelot: misma cuña (modo o igual) / vecino ±1 / +2 boost
-      const na = wedgeNum(prev?.camelot_key ?? null);
-      const nb = wedgeNum(t.camelot_key ?? null);
-      if (na !== null && nb !== null) {
-        const step = Math.min(Math.abs(na - nb), 12 - Math.abs(na - nb));
-        if (step === 0) score += prev?.camelot_key === t.camelot_key ? 2.2 : 1.6; // misma clave / cambio de modo
-        else if (step === 1) score += 1;
-        else if (step === 2 && o.energy_profile === "energy_boost") score += 1; // salto +2
-        else score -= 1;
+
+      // 1) Compatibilidad Camelot ESTRICTA: misma cuña, cambio de modo,
+      //    vecino ±1 SOLO en la misma cara de la rueda, Energy Boost +2
+      //    ascendente. Todo lo demás penaliza de forma graduada por distancia.
+      if (prevKey && tKey) {
+        const step = wedgeStep(prevKey.num, tKey.num);
+        if (prevKey.num === tKey.num) {
+          score += prevKey.letter === tKey.letter ? 2.2 : 1.6; // misma clave / cambio de modo
+        } else if (prevKey.letter === tKey.letter && (step === 1 || step === -1)) {
+          score += 1.0; // vecino armónico ±1 (circular 12<->1)
+        } else if (prevKey.letter === tKey.letter && step === 2 && o.energy_profile === "energy_boost") {
+          score += 1.2; // Energy Boost +2 (ascendente)
+        } else {
+          // Cruce no armónico: castigo severo y graduado (cambiar de cara duele más)
+          score -= Math.min(6, Math.abs(step)) * 1.2 + (prevKey.letter !== tKey.letter ? 1.2 : 0);
+        }
+        // Anti-alternancia de modo (8A→8B→8A): vaivén armónico a evitar
+        if (
+          prevPrevKey && prevKey &&
+          prevPrevKey.num === tKey.num && prevPrevKey.letter === tKey.letter &&
+          prevKey.num === tKey.num && prevKey.letter !== tKey.letter
+        ) {
+          score -= 2.0;
+        }
       }
-      // BPM dentro de ±2.5%
-      if (prev?.bpm && t.bpm) {
-        const diff = Math.abs(t.bpm - prev.bpm) / prev.bpm * 100;
-        score += diff <= 2.5 ? 3 : -2 * Math.min(4, diff / 2.5);
+
+      // 2) BPM: puerta dura ±2.5% (o cerca del objetivo de rampa)
+      if (prev.bpm && t.bpm) {
+        const pct = (Math.abs(t.bpm - prev.bpm) / prev.bpm) * 100;
+        if (pct <= MAX_BPM_PCT) score += 3.0;
+        else score -= 2 * Math.min(4, pct / MAX_BPM_PCT);
+        score -= Math.abs(t.bpm - rampTarget) * 0.08;
       }
-      // Energía acorde al perfil (no pegar saltos bruscos fuera del objetivo)
-      const energy = t.energy ?? 5;
-      score -= Math.abs(energy - energyTarget) * 0.35;
+
+      // 3) Energía acorde a la curva del perfil (no un objetivo plano)
+      score -= Math.abs((t.energy ?? 5) - desired) * 0.35;
+
+      // 4) Diversidad de artistas (ventana de los 3 últimos)
+      const artist = (t.artist ?? "").trim().toLowerCase();
+      if (artist) {
+        if (recentArtists.length > 0 && recentArtists[recentArtists.length - 1] === artist) score -= 0.8;
+        else if (recentArtistSet.has(artist)) score -= 0.4;
+      }
+
       // Semilla estable: rompe empates de forma determinista
       let h = 0;
       const nm = (t.title ?? "").toLowerCase();
       for (let i = 0; i < nm.length; i++) h = (h * 31 + nm.charCodeAt(i)) >>> 0;
       score += (h % 100) / 1000;
+
       if (score > bestScore) {
         bestScore = score;
         best = t;
@@ -631,32 +736,52 @@ export function generateDemoSet(
     if (!best) break; // pool agotado
     used.add(best.id);
     chain.push(best);
+    totalSec += Math.max(0, best.duration_sec ?? 240);
+    const a = (best.artist ?? "").trim().toLowerCase();
+    if (a) {
+      recentArtists.push(a);
+      if (recentArtists.length > 3) recentArtists.shift();
+      // El Set espeja la ventana (orden preservado en el array); se reconstruye
+      // aquí (max 3 elementos) para que la búsqueda del loop sea O(1).
+      recentArtistSet.clear();
+      for (const r of recentArtists) recentArtistSet.add(r);
+    }
   }
 
   const items = chain.map((t, i) => {
     const prev = chain[i - 1];
-    let relation: string = "fallback";
-    let label = "Cruce de Respaldo";
+    let relation: string = "start";
+    let label = "Intro armónica";
     if (prev) {
-      const na = wedgeNum(prev.camelot_key ?? null);
-      const nb = wedgeNum(t.camelot_key ?? null);
-      if (na !== null && nb !== null) {
-        const step = Math.min(Math.abs(na - nb), 12 - Math.abs(na - nb));
-        if (step === 0) {
-          if (prev.camelot_key === t.camelot_key) {
+      const pa = wedgeKey(prev.camelot_key ?? null);
+      const pb = wedgeKey(t.camelot_key ?? null);
+      const delta =
+        prev.bpm && t.bpm
+          ? ` (${t.bpm - prev.bpm >= 0 ? "+" : ""}${Math.round((t.bpm - prev.bpm) * 10) / 10} BPM)`
+          : "";
+      if (pa && pb) {
+        const step = wedgeStep(pa.num, pb.num);
+        if (pa.num === pb.num) {
+          if (pa.letter === pb.letter) {
             relation = "same";
-            label = "Perfect Match";
+            label = `Perfect Match ${prev.camelot_key} → ${t.camelot_key}${delta}`;
           } else {
             relation = "mode";
-            label = "Cambio de Modo";
+            label = `Cambio de Modo ${prev.camelot_key} → ${t.camelot_key}${delta}`;
           }
-        } else if (step === 1) {
+        } else if (pa.letter === pb.letter && (step === 1 || step === -1)) {
           relation = "neighbor";
-          label = "Vecino Armónico";
-        } else if (step === 2 && o.energy_profile === "energy_boost") {
+          label = `Vecino Armónico ${prev.camelot_key} → ${t.camelot_key}${delta}`;
+        } else if (pa.letter === pb.letter && step === 2 && o.energy_profile === "energy_boost") {
           relation = "boost";
-          label = "Energy Boost +2";
+          label = `Energy Boost +2 ${prev.camelot_key} → ${t.camelot_key}${delta}`;
+        } else {
+          relation = "fallback";
+          label = `Cruce de Respaldo ${prev.camelot_key} → ${t.camelot_key}${delta}`;
         }
+      } else {
+        relation = "fallback";
+        label = `Cruce de Respaldo${delta}`;
       }
     }
     return {
@@ -668,7 +793,7 @@ export function generateDemoSet(
     };
   });
 
-  const totalSec = chain.reduce((acc, t) => acc + Math.max(0, t.duration_sec ?? 240), 0);
+  const totalSecFinal = chain.reduce((acc, t) => acc + Math.max(0, t.duration_sec ?? 240), 0);
 
   return {
     id: -1,
@@ -676,7 +801,7 @@ export function generateDemoSet(
     duration_min: o.duration_min,
     energy_profile: o.energy_profile,
     folder_ids: o.folder_ids.join(","),
-    total_sec: totalSec,
+    total_sec: totalSecFinal,
     created_at: new Date().toISOString(),
     items,
   };

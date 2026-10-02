@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AudioWaveform } from "lucide-react";
 
 interface Props {
@@ -9,7 +9,8 @@ interface Props {
 /**
  * Crossfader de física fluida: el thumb se mueve por estilo directo (ref,
  * sin pasar por React state) durante el drag, con throttle rAF para notificar
- * al motor de audio. El estado local solo alimenta los indicadores visuales.
+ * al motor de audio. El pos se deriva de la prop (useMemo), evitando
+ * useEffect+setState.
  */
 export default function Crossfader({ position, onChange }: Props) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -17,19 +18,17 @@ export default function Crossfader({ position, onChange }: Props) {
   const posRef = useRef(position);
   const dragRef = useRef(false);
   const rafRef = useRef(0);
-  const [pos, setPos] = useState(position);
+  const pos = useMemo(() => position, [position]);
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     posRef.current = position;
-    setPos(position);
     if (thumbRef.current) thumbRef.current.style.left = `${position * 100}%`;
   }, [position]);
 
   const applyPos = (p: number) => {
     posRef.current = p;
     if (thumbRef.current) thumbRef.current.style.left = `${p * 100}%`;
-    setPos(p);
     if (rafRef.current === 0) {
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = 0;

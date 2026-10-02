@@ -255,16 +255,30 @@ def analyze_structure(path: str, bpm_hint: float | None = None) -> dict:
         for i in range(n_bars)
     ]
 
-    # Beatgrid fino (tiempos de los beats) para alinear frases y grid
+    # Beatgrid fino (tiempos de los beats) para alinear frases y grid.
+    # El BPM calibrado (anti double/half-time) se usa como prior del beat
+    # tracker para que la rejilla caiga en la octava correcta del tempo.
     import librosa
 
+    from .analyzer import estimate_bpm
+
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
+    bpm = bpm_hint or estimate_bpm(y, sr)
+    if bpm is not None and not (30 <= bpm <= 240):
+        bpm = None
+    start_bpm = bpm if bpm is not None else 120.0
     tempo, beats = librosa.beat.beat_track(
-        onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH, units="time"
+        onset_envelope=onset_env,
+        sr=sr,
+        hop_length=HOP_LENGTH,
+        start_bpm=start_bpm,
+        tightness=100,
+        units="time",
     )
     beats_arr = np.asarray(beats, dtype=float).flatten()
-    bpm = bpm_hint or (float(np.atleast_1d(tempo).mean()) if beats_arr.size else None)
-    if not (30 <= (bpm or 0) <= 240):
+    if bpm is None:
+        bpm = float(np.atleast_1d(tempo).mean()) if beats_arr.size else None
+    if bpm is not None and not (30 <= bpm <= 240):
         bpm = None
 
     # RMS por frame (para etiquetar frases por energía)

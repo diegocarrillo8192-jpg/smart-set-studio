@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AudioLines, Disc2, Disc3, FileText, KeyRound, Loader2, Music2, Play, Search, SlidersHorizontal } from "lucide-react";
 import type { Track } from "../types";
 import { api, isWeb, prefetchArtworks } from "../api";
@@ -37,6 +37,473 @@ function fmtDur(sec: number | null): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+interface ToolbarProps {
+  q: string;
+  onQChange: (value: string) => void;
+  showFilters: boolean;
+  onToggleFilters: () => void;
+  filtersActive: boolean;
+  reanalyzing: boolean;
+  reanalyzeLabel: string;
+  onReanalyze: () => void;
+  renaming: boolean;
+  renameLabel: string;
+  onRename: () => void;
+}
+
+/** Barra de herramientas: búsqueda, toggle de filtros y acciones de
+ *  escritorio (re-analizar Keys / renombrar con Key). */
+function Toolbar({
+  q,
+  onQChange,
+  showFilters,
+  onToggleFilters,
+  filtersActive,
+  reanalyzing,
+  reanalyzeLabel,
+  onReanalyze,
+  renaming,
+  renameLabel,
+  onRename,
+}: ToolbarProps) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-panel p-3">
+      <div className="relative min-w-56 flex-1">
+        <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+        <input
+          value={q}
+          onChange={(e) => onQChange(e.target.value)}
+          aria-label="Buscar en la biblioteca"
+          placeholder="Buscar por título, artista, key, folder..."
+          className="w-full rounded-lg border border-slate-700 bg-panel-2 py-1.5 pl-8 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
+        />
+      </div>
+      <button
+        onClick={onToggleFilters}
+        className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
+          filtersActive || showFilters
+            ? "border-violet-400/50 bg-violet-500/20 text-violet-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_12px_rgba(139,92,246,0.2)]"
+            : "border-slate-700 text-slate-400 hover:text-white hover:shadow-[0_0_10px_rgba(139,92,246,0.35)]"
+        }`}
+      >
+        <SlidersHorizontal size={13} /> Filtros {filtersActive && <span className="rounded-full bg-violet-500 px-1 text-[9px] text-white">ON</span>}
+      </button>
+      {!isWeb() && (
+        <>
+          <button
+            onClick={onReanalyze}
+            disabled={reanalyzing}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
+              reanalyzing
+                ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200"
+                : "border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
+            }`}
+            title="Re-analizar solo la Key de toda la biblioteca (sin BPM ni waveform)"
+          >
+            <KeyRound size={13} className={reanalyzing ? "animate-spin" : ""} /> {reanalyzeLabel}
+          </button>
+          <button
+            onClick={onRename}
+            disabled={renaming}
+            className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
+              renaming
+                ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-200"
+                : "border-slate-700 text-slate-400 hover:border-emerald-500 hover:text-emerald-300"
+            }`}
+            title="Renombrar los archivos en disco como [Key] - [Nombre].ext (ej. 6A - Track.mp3)"
+          >
+            <FileText size={13} className={renaming ? "animate-pulse" : ""} /> {renameLabel}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+interface FiltersPanelProps {
+  folders: { id: number; name: string }[];
+  folderId: number | null;
+  onFolderIdChange: (id: number | null) => void;
+  camelot: string;
+  onCamelotChange: (value: string) => void;
+  minBpm: string;
+  onMinBpmChange: (value: string) => void;
+  maxBpm: string;
+  onMaxBpmChange: (value: string) => void;
+  minEnergy: string;
+  onMinEnergyChange: (value: string) => void;
+  maxEnergy: string;
+  onMaxEnergyChange: (value: string) => void;
+  compatibleWith: Track | null;
+  onClearCompatibleWith: () => void;
+  filtersActive: boolean;
+  onResetFilters: () => void;
+}
+
+/** Panel de filtros: carpeta, Camelot, BPM, energía y compatibilidad. */
+function FiltersPanel({
+  folders,
+  folderId,
+  onFolderIdChange,
+  camelot,
+  onCamelotChange,
+  minBpm,
+  onMinBpmChange,
+  maxBpm,
+  onMaxBpmChange,
+  minEnergy,
+  onMinEnergyChange,
+  maxEnergy,
+  onMaxEnergyChange,
+  compatibleWith,
+  onClearCompatibleWith,
+  filtersActive,
+  onResetFilters,
+}: FiltersPanelProps) {
+  return (
+    <div className="flex flex-wrap items-end gap-3 border-b border-slate-800 bg-panel-2 px-3 py-2.5 text-xs">
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">Carpeta</span>
+        <select
+          value={folderId ?? ""}
+          onChange={(e) => onFolderIdChange(e.target.value ? Number(e.target.value) : null)}
+          className="rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        >
+          <option value="">Todos los tracks</option>
+          {folders.map((f) => (
+            <option key={f.id} value={f.id}>{f.name}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">Camelot</span>
+        <select
+          value={camelot}
+          onChange={(e) => onCamelotChange(e.target.value)}
+          className="rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        >
+          <option value="">Todas</option>
+          {CAMELOT_CODES.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">BPM desde</span>
+        <input
+          type="number"
+          value={minBpm}
+          onChange={(e) => onMinBpmChange(e.target.value)}
+          placeholder="90"
+          className="w-20 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">BPM hasta</span>
+        <input
+          type="number"
+          value={maxBpm}
+          onChange={(e) => onMaxBpmChange(e.target.value)}
+          placeholder="140"
+          className="w-20 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">Energía mín</span>
+        <input
+          type="number"
+          min={1}
+          max={10}
+          value={minEnergy}
+          onChange={(e) => onMinEnergyChange(e.target.value)}
+          placeholder="1"
+          className="w-16 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-[10px] uppercase text-slate-500">Energía máx</span>
+        <input
+          type="number"
+          min={1}
+          max={10}
+          value={maxEnergy}
+          onChange={(e) => onMaxEnergyChange(e.target.value)}
+          placeholder="10"
+          className="w-16 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
+        />
+      </label>
+      {compatibleWith && (
+        <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
+          <Music2 size={12} />
+          Compatibles con <b>{compatibleWith.camelot_key}</b> ({compatibleWith.title.slice(0, 18)})
+          <button onClick={onClearCompatibleWith} aria-label="Quitar filtro de compatibilidad" className="ml-1 font-bold text-emerald-400 hover:text-white">×</button>
+        </div>
+      )}
+      {filtersActive && (
+        <button onClick={onResetFilters} className="ml-auto rounded border border-slate-600 px-2 py-1 text-slate-300 hover:text-white">
+          Limpiar filtros
+        </button>
+      )}
+    </div>
+  );
+}
+
+interface TrackRowProps {
+  track: Track;
+  compatible: boolean;
+  playing: boolean;
+  editingKey: boolean;
+  onPlayPreview: (track: Track) => void;
+  onLoadToDeckA: (track: Track) => void;
+  onLoadToDeckB: (track: Track) => void;
+  onLoadToActiveDeck: (track: Track) => void;
+  onStartEditKey: (id: number) => void;
+  onSaveKey: (id: number, key: string) => void;
+  onCancelEditKey: () => void;
+}
+
+/** Fila de la tabla de la biblioteca: acciones rápidas, portada, título,
+ *  BPM, Key editable, energía, carpeta y duración. */
+function TrackRow({
+  track: t,
+  compatible,
+  playing,
+  editingKey,
+  onPlayPreview,
+  onLoadToDeckA,
+  onLoadToDeckB,
+  onLoadToActiveDeck,
+  onStartEditKey,
+  onSaveKey,
+  onCancelEditKey,
+}: TrackRowProps) {
+  return (
+    <tr
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/json", JSON.stringify(t));
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      onDoubleClick={() => onLoadToActiveDeck(t)}
+      className={`group cursor-default border-t border-slate-800/60 transition hover:bg-panel-2 ${
+        compatible ? "bg-emerald-500/10" : ""
+      } ${
+        playing
+          ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
+          : ""
+      }`}
+      title="Doble clic: cargar en el deck activo · arrastra a un Deck"
+    >
+      <td className="whitespace-nowrap px-2 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100 max-sm:opacity-100">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onPlayPreview(t);
+            }}
+            className="grid h-6 w-6 place-items-center rounded-full bg-panel-3 text-slate-300 transition hover:bg-violet-600 hover:text-white hover:shadow-[0_0_12px_rgba(139,92,246,0.7)]"
+            aria-label="Pre-escuchar"
+            title="Pre-escuchar (carga en Deck A y mueve el fader)"
+          >
+            <Play size={11} className="ml-0.5" />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onLoadToDeckA(t);
+            }}
+            className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500 hover:text-black hover:shadow-[0_0_12px_rgba(34,211,238,0.7)]"
+            aria-label="Cargar en Deck A"
+            title="Cargar en Deck A"
+          >
+            <Disc3 size={13} />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onLoadToDeckB(t);
+            }}
+            className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-violet-500 hover:text-black hover:shadow-[0_0_12px_rgba(167,139,250,0.7)]"
+            aria-label="Cargar en Deck B"
+            title="Cargar en Deck B"
+          >
+            <Disc2 size={13} />
+          </button>
+        </div>
+      </td>
+      <td className="max-w-56 truncate px-2 py-1.5 font-medium text-slate-100">
+        <div className="flex items-center gap-2">
+          <CoverThumb track={t} size={26} />
+          <span className="min-w-0 flex-1 truncate">
+            {t.title}
+            {!t.analyzed && (
+              <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-violet-300">
+                <Loader2 size={10} className="animate-spin" /> Analizando…
+              </span>
+            )}
+            {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
+          </span>
+          {playing && (
+            <AudioLines size={12} className="shrink-0 animate-pulse text-emerald-400" />
+          )}
+        </div>
+      </td>
+      <td className="hidden max-w-40 truncate px-2 py-1.5 text-slate-400 md:table-cell">{t.artist}</td>
+      <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? "Desconocido"}</td>
+      <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
+      <td
+        className="px-2 py-1.5 text-center"
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        {editingKey ? (
+          <select
+            autoFocus
+            value={t.camelot_key ?? ""}
+            onChange={(e) => {
+              const v = e.target.value;
+              onCancelEditKey();
+              if (v) void onSaveKey(t.id, v);
+            }}
+            onBlur={onCancelEditKey}
+            aria-label="Editar tonalidad"
+            className="rounded border border-violet-500/60 bg-slate-900 px-1 py-0.5 font-mono text-[10px] font-black text-violet-200 outline-none"
+          >
+            <option value="">-</option>
+            {CAMELOT_CODES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        ) : (
+          <button
+            onClick={() => onStartEditKey(t.id)}
+            title="Clic para editar la tonalidad (ajusta a oído)"
+            className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm transition hover:ring-1 hover:ring-white/30 ${
+              t.camelot_key?.endsWith("B")
+                ? "border-violet-400/40 bg-gradient-to-br from-violet-500/35 to-violet-500/5 text-violet-200 shadow-violet-500/20"
+                : "border-cyan-400/40 bg-gradient-to-br from-cyan-500/35 to-cyan-500/5 text-cyan-200 shadow-cyan-500/20"
+            }`}
+          >
+            {t.camelot_key ?? "-"}
+          </button>
+        )}
+      </td>
+      <td className="px-2 py-1.5"><EnergyBar value={t.energy} /></td>
+      <td className="hidden max-w-28 truncate px-2 py-1.5 text-slate-500 lg:table-cell">{t.folder_name}</td>
+      <td className="hidden px-2 py-1.5 text-right font-mono text-slate-400 sm:table-cell">{fmtDur(t.duration_sec)}</td>
+    </tr>
+  );
+}
+
+interface EmptyStateProps {
+  foldersCount: number;
+  filtersActive: boolean;
+}
+
+/** Estado vacío de la tabla según el motivo: sin carpetas, sin resultados
+ *  para los filtros o biblioteca sin analizar. */
+function EmptyState({ foldersCount, filtersActive }: EmptyStateProps) {
+  return (
+    <div className="grid h-full place-items-center p-8">
+      <div className="max-w-sm text-center">
+        <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-panel-2">
+          <Music2 size={24} className="text-slate-600" />
+        </div>
+        {foldersCount === 0 ? (
+          <>
+            <p className="text-sm font-semibold text-slate-300">No hay carpetas agregadas</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Haz clic en <b className="text-violet-400">"Agregar Carpeta"</b> en la barra lateral
+              para importar tu música y comenzar a analizarla.
+            </p>
+          </>
+        ) : filtersActive ? (
+          <>
+            <p className="text-sm font-semibold text-slate-300">Sin resultados para los filtros actuales</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Ajusta o limpia los filtros para ver más tracks.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-sm font-semibold text-slate-300">Tu biblioteca está vacía</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Usa el botón <b className="text-cyan-400">Escanear / Re-analizar</b> de tus carpetas
+              para analizar BPM, tonalidad y energía.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Re-análisis rápido de Key (solo escritorio): sin BPM ni waveform.
+ *  Polling cada 1s hasta que el job termina o falla. */
+async function reanalyzeKeysWithPolling(
+  load: () => Promise<void>,
+  setReanalyzing: (value: boolean) => void,
+  setReanalyzeLabel: (value: string) => void
+): Promise<void> {
+  setReanalyzing(true);
+  setReanalyzeLabel("Re-analizando…");
+  try {
+    const job = await api.reanalyzeKeys();
+    const jobId = job.job_id ?? 0;
+    if (!jobId) {
+      setReanalyzing(false);
+      setReanalyzeLabel("Re-analizar Keys");
+      await load();
+      return;
+    }
+    const poll = async () => {
+      try {
+        const s = await api.reanalyzeKeysStatus(jobId);
+        setReanalyzeLabel(`Keys: ${s.processed}/${s.total}`);
+        if (s.status === "done" || s.status === "error") {
+          setReanalyzing(false);
+          setReanalyzeLabel("Re-analizar Keys");
+          await load();
+          return;
+        }
+      } catch {
+        setReanalyzing(false);
+        setReanalyzeLabel("Re-analizar Keys");
+        return;
+      }
+      window.setTimeout(poll, 1000);
+    };
+    void poll();
+  } catch (e) {
+    console.error(e);
+    setReanalyzing(false);
+    setReanalyzeLabel("Re-analizar Keys");
+  }
+}
+
+/** Renombrado físico de archivos a `[Key] - [Nombre].ext` (solo escritorio). */
+async function renameLibraryWithKey(
+  load: () => Promise<void>,
+  setRenaming: (value: boolean) => void,
+  setRenameLabel: (value: string) => void
+): Promise<void> {
+  setRenaming(true);
+  setRenameLabel("Renombrando…");
+  try {
+    const res = await api.renameWithKey();
+    setRenameLabel(`Renombrados: ${res.renamed}`);
+    await load();
+    window.setTimeout(() => {
+      setRenaming(false);
+      setRenameLabel("Renombrar con Key");
+    }, 1800);
+  } catch (e) {
+    console.error(e);
+    setRenaming(false);
+    setRenameLabel("Renombrar con Key");
+  }
+}
+
 export default function LibraryTable({
   folders,
   folderId,
@@ -69,39 +536,66 @@ export default function LibraryTable({
    *  dentro del map de cada fila de la tabla. */
   const playingIds = useMemo(() => new Set(playingTrackIds), [playingTrackIds]);
 
-  const load = useCallback(async (attempt = 0) => {
-    setLoading(true);
-    try {
-      const result = await api.listTracks({
-        q: q || undefined,
-        folder_id: folderId ?? undefined,
-        camelot: camelot || undefined,
-        min_bpm: minBpm || undefined,
-        max_bpm: maxBpm || undefined,
-        min_energy: minEnergy || undefined,
-        max_energy: maxEnergy || undefined,
-        compatible_with: compatibleWith?.camelot_key ?? undefined,
-        sort: "artist",
-        limit: 1000,
-      });
-      setTracks(result);
-    } catch (e) {
-      // El backend puede tardar más que el renderer en arrancar (ventana
-      // instantánea + backend en paralelo): reintentar con margen amplio.
-      if (attempt < 8) {
-        setTimeout(() => void load(attempt + 1), 1200);
-      } else {
-        console.error(e);
+  /** Reintento pendiente tras un fallo (backend más lento que el renderer):
+   *  estado + efecto dueño del timer, así cada reintento nuevo cancela el
+   *  anterior y ningún setTimeout queda huérfano al desmontar o al cambiar
+   *  los filtros. */
+  const [retry, setRetry] = useState<{ attempt: number; nonce: number } | null>(null);
+
+  const load = useCallback(
+    async (attempt = 0) => {
+      if (attempt === 0) setRetry(null);
+      setLoading(true);
+      try {
+        const result = await api.listTracks({
+          q: q || undefined,
+          folder_id: folderId ?? undefined,
+          camelot: camelot || undefined,
+          min_bpm: minBpm || undefined,
+          max_bpm: maxBpm || undefined,
+          min_energy: minEnergy || undefined,
+          max_energy: maxEnergy || undefined,
+          compatible_with: compatibleWith?.camelot_key ?? undefined,
+          sort: "artist",
+          limit: 1000,
+        });
+        setTracks(result);
+      } catch (e) {
+        // El backend puede tardar más que el renderer en arrancar (ventana
+        // instantánea + backend en paralelo): reintentar con margen amplio.
+        if (attempt < 8) {
+          setRetry((r) => ({ attempt: attempt + 1, nonce: (r?.nonce ?? 0) + 1 }));
+        } else {
+          console.error(e);
+        }
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, [q, folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith, refreshKey]);
+    },
+    [q, folderId, camelot, minBpm, maxBpm, minEnergy, maxEnergy, compatibleWith]
+  );
 
   useEffect(() => {
     const t = setTimeout(load, 250);
     return () => clearTimeout(t);
   }, [load]);
+
+  // Recarga cuando cambia la biblioteca (refreshKey): fuera del useCallback
+  // porque `load` no lo consume. El guard evita la petición duplicada al montar.
+  const prevRefreshKey = useRef(refreshKey);
+  useEffect(() => {
+    if (refreshKey !== prevRefreshKey.current) {
+      prevRefreshKey.current = refreshKey;
+      void load(0);
+    }
+  }, [refreshKey, load]);
+
+  // El timer del reintento vive en este efecto: con cleanup garantizado.
+  useEffect(() => {
+    if (!retry) return;
+    const t = setTimeout(() => void load(retry.attempt), 1200);
+    return () => clearTimeout(t);
+  }, [retry, load]);
 
   // Precarga lazy de covers al cargar el listado (clic en carpeta/filtros):
   // los N primeros tracks piden su carátula por el endpoint CORS del backend
@@ -137,203 +631,47 @@ export default function LibraryTable({
     }
   };
 
-  /** Re-análisis rápido de Key (solo escritorio): sin BPM ni waveform. */
-  const startReanalyze = async () => {
-    setReanalyzing(true);
-    setReanalyzeLabel("Re-analizando…");
-    try {
-      const job = await api.reanalyzeKeys();
-      const jobId = job.job_id ?? 0;
-      if (!jobId) {
-        setReanalyzing(false);
-        setReanalyzeLabel("Re-analizar Keys");
-        await load();
-        return;
-      }
-      const poll = async () => {
-        try {
-          const s = await api.reanalyzeKeysStatus(jobId);
-          setReanalyzeLabel(`Keys: ${s.processed}/${s.total}`);
-          if (s.status === "done" || s.status === "error") {
-            setReanalyzing(false);
-            setReanalyzeLabel("Re-analizar Keys");
-            await load();
-            return;
-          }
-        } catch {
-          setReanalyzing(false);
-          setReanalyzeLabel("Re-analizar Keys");
-          return;
-        }
-        window.setTimeout(poll, 1000);
-      };
-      void poll();
-    } catch (e) {
-      console.error(e);
-      setReanalyzing(false);
-      setReanalyzeLabel("Re-analizar Keys");
-    }
-  };
-
-  /** Renombrado físico de archivos a `[Key] - [Nombre].ext` (solo escritorio). */
-  const startRename = async () => {
-    setRenaming(true);
-    setRenameLabel("Renombrando…");
-    try {
-      const res = await api.renameWithKey();
-      setRenameLabel(`Renombrados: ${res.renamed}`);
-      await load();
-      window.setTimeout(() => {
-        setRenaming(false);
-        setRenameLabel("Renombrar con Key");
-      }, 1800);
-    } catch (e) {
-      console.error(e);
-      setRenaming(false);
-      setRenameLabel("Renombrar con Key");
-    }
-  };
+  const startReanalyze = () => void reanalyzeKeysWithPolling(load, setReanalyzing, setReanalyzeLabel);
+  const startRename = () => void renameLibraryWithKey(load, setRenaming, setRenameLabel);
 
   return (
     <div className="flex h-full flex-col">
       {/* Barra de herramientas */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-panel p-3">
-        <div className="relative min-w-56 flex-1">
-          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            aria-label="Buscar en la biblioteca"
-            placeholder="Buscar por título, artista, key, folder..."
-            className="w-full rounded-lg border border-slate-700 bg-panel-2 py-1.5 pl-8 pr-3 text-sm text-slate-200 placeholder:text-slate-500 focus:border-violet-500 focus:outline-none"
-          />
-        </div>
-        <button
-          onClick={() => setShowFilters((v) => !v)}
-          className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition ${
-            filtersActive || showFilters
-              ? "border-violet-400/50 bg-violet-500/20 text-violet-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_12px_rgba(139,92,246,0.2)]"
-              : "border-slate-700 text-slate-400 hover:text-white hover:shadow-[0_0_10px_rgba(139,92,246,0.35)]"
-          }`}
-        >
-          <SlidersHorizontal size={13} /> Filtros {filtersActive && <span className="rounded-full bg-violet-500 px-1 text-[9px] text-white">ON</span>}
-        </button>
-        {!isWeb() && (
-          <>
-            <button
-              onClick={() => void startReanalyze()}
-              disabled={reanalyzing}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
-                reanalyzing
-                  ? "border-cyan-400/50 bg-cyan-500/20 text-cyan-200"
-                  : "border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
-              }`}
-              title="Re-analizar solo la Key de toda la biblioteca (sin BPM ni waveform)"
-            >
-              <KeyRound size={13} className={reanalyzing ? "animate-spin" : ""} /> {reanalyzeLabel}
-            </button>
-            <button
-              onClick={() => void startRename()}
-              disabled={renaming}
-              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${
-                renaming
-                  ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-200"
-                  : "border-slate-700 text-slate-400 hover:border-emerald-500 hover:text-emerald-300"
-              }`}
-              title="Renombrar los archivos en disco como [Key] - [Nombre].ext (ej. 6A - Track.mp3)"
-            >
-              <FileText size={13} className={renaming ? "animate-pulse" : ""} /> {renameLabel}
-            </button>
-          </>
-        )}
-      </div>
+      <Toolbar
+        q={q}
+        onQChange={setQ}
+        showFilters={showFilters}
+        onToggleFilters={() => setShowFilters((v) => !v)}
+        filtersActive={filtersActive}
+        reanalyzing={reanalyzing}
+        reanalyzeLabel={reanalyzeLabel}
+        onReanalyze={startReanalyze}
+        renaming={renaming}
+        renameLabel={renameLabel}
+        onRename={startRename}
+      />
 
       {/* Filtros */}
       {showFilters && (
-        <div className="flex flex-wrap items-end gap-3 border-b border-slate-800 bg-panel-2 px-3 py-2.5 text-xs">
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">Carpeta</span>
-            <select
-              value={folderId ?? ""}
-              onChange={(e) => onFolderIdChange(e.target.value ? Number(e.target.value) : null)}
-              className="rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            >
-              <option value="">Todos los tracks</option>
-              {folders.map((f) => (
-                <option key={f.id} value={f.id}>{f.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">Camelot</span>
-            <select
-              value={camelot}
-              onChange={(e) => setCamelot(e.target.value)}
-              className="rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            >
-              <option value="">Todas</option>
-              {CAMELOT_CODES.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">BPM desde</span>
-            <input
-              type="number"
-              value={minBpm}
-              onChange={(e) => setMinBpm(e.target.value)}
-              placeholder="90"
-              className="w-20 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">BPM hasta</span>
-            <input
-              type="number"
-              value={maxBpm}
-              onChange={(e) => setMaxBpm(e.target.value)}
-              placeholder="140"
-              className="w-20 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">Energía mín</span>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={minEnergy}
-              onChange={(e) => setMinEnergy(e.target.value)}
-              placeholder="1"
-              className="w-16 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-slate-500">Energía máx</span>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={maxEnergy}
-              onChange={(e) => setMaxEnergy(e.target.value)}
-              placeholder="10"
-              className="w-16 rounded border border-slate-700 bg-panel-3 px-2 py-1 text-slate-200"
-            />
-          </label>
-          {compatibleWith && (
-            <div className="flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-emerald-300">
-              <Music2 size={12} />
-              Compatibles con <b>{compatibleWith.camelot_key}</b> ({compatibleWith.title.slice(0, 18)})
-              <button onClick={() => onSetCompatibleWith(null)} aria-label="Quitar filtro de compatibilidad" className="ml-1 font-bold text-emerald-400 hover:text-white">×</button>
-            </div>
-          )}
-          {filtersActive && (
-            <button onClick={resetFilters} className="ml-auto rounded border border-slate-600 px-2 py-1 text-slate-300 hover:text-white">
-              Limpiar filtros
-            </button>
-          )}
-        </div>
+        <FiltersPanel
+          folders={folders}
+          folderId={folderId}
+          onFolderIdChange={onFolderIdChange}
+          camelot={camelot}
+          onCamelotChange={setCamelot}
+          minBpm={minBpm}
+          onMinBpmChange={setMinBpm}
+          maxBpm={maxBpm}
+          onMaxBpmChange={setMaxBpm}
+          minEnergy={minEnergy}
+          onMinEnergyChange={setMinEnergy}
+          maxEnergy={maxEnergy}
+          onMaxEnergyChange={setMaxEnergy}
+          compatibleWith={compatibleWith}
+          onClearCompatibleWith={() => onSetCompatibleWith(null)}
+          filtersActive={filtersActive}
+          onResetFilters={resetFilters}
+        />
       )}
 
       {/* Tabla */}
@@ -354,157 +692,26 @@ export default function LibraryTable({
           </thead>
           <tbody>
             {tracks.map((t) => (
-              <tr
+              <TrackRow
                 key={t.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData("application/json", JSON.stringify(t));
-                  e.dataTransfer.effectAllowed = "copy";
-                }}
-                onDoubleClick={() => onLoadToActiveDeck(t)}
-                className={`group cursor-default border-t border-slate-800/60 transition hover:bg-panel-2 ${
-                  compatibleWith?.id === t.id ? "bg-emerald-500/10" : ""
-                } ${
-                  playingIds.has(t.id)
-                    ? "bg-emerald-500/15 shadow-[inset_3px_0_0_4px_rgba(52,211,153,0.55)]"
-                    : ""
-                }`}
-                title="Doble clic: cargar en el deck activo · arrastra a un Deck"
-              >
-                <td className="whitespace-nowrap px-2 py-1.5" onDoubleClick={(e) => e.stopPropagation()}>
-                  <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100 max-sm:opacity-100">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPlayPreview(t);
-                      }}
-                      className="grid h-6 w-6 place-items-center rounded-full bg-panel-3 text-slate-300 transition hover:bg-violet-600 hover:text-white hover:shadow-[0_0_12px_rgba(139,92,246,0.7)]"
-                      aria-label="Pre-escuchar"
-                      title="Pre-escuchar (carga en Deck A y mueve el fader)"
-                    >
-                      <Play size={11} className="ml-0.5" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onLoadToDeckA(t);
-                      }}
-                      className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-cyan-500 hover:text-black hover:shadow-[0_0_12px_rgba(34,211,238,0.7)]"
-                      aria-label="Cargar en Deck A"
-                      title="Cargar en Deck A"
-                    >
-                      <Disc3 size={13} />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onLoadToDeckB(t);
-                      }}
-                      className="grid h-6 w-6 place-items-center rounded-full text-slate-300 transition hover:bg-violet-500 hover:text-black hover:shadow-[0_0_12px_rgba(167,139,250,0.7)]"
-                      aria-label="Cargar en Deck B"
-                      title="Cargar en Deck B"
-                    >
-                      <Disc2 size={13} />
-                    </button>
-                  </div>
-                </td>
-                <td className="max-w-56 truncate px-2 py-1.5 font-medium text-slate-100">
-                  <div className="flex items-center gap-2">
-                    <CoverThumb track={t} size={26} />
-                    <span className="min-w-0 flex-1 truncate">
-                      {t.title}
-                      {!t.analyzed && (
-                        <span className="ml-1.5 inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider text-violet-300">
-                          <Loader2 size={10} className="animate-spin" /> Analizando…
-                        </span>
-                      )}
-                      {t.has_error && <span className="ml-1.5 text-[9px] text-red-400" title={t.error_message ?? ""}>⚠</span>}
-                    </span>
-                    {playingIds.has(t.id) && (
-                      <AudioLines size={12} className="shrink-0 animate-pulse text-emerald-400" />
-                    )}
-                  </div>
-                </td>
-<td className="hidden max-w-40 truncate px-2 py-1.5 text-slate-400 md:table-cell">{t.artist}</td>
-              <td className="hidden px-2 py-1.5 text-slate-500 sm:table-cell">{t.genre ?? "Desconocido"}</td>
-              <td className="px-2 py-1.5 text-right font-mono text-cyan-300">{fmtBpm(t.bpm)}</td>
-                <td
-                  className="px-2 py-1.5 text-center"
-                  onClick={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                >
-                  {editingKeyId === t.id ? (
-                    <select
-                      autoFocus
-                      value={t.camelot_key ?? ""}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setEditingKeyId(null);
-                        if (v) void saveKey(t.id, v);
-                      }}
-                      onBlur={() => setEditingKeyId(null)}
-                      aria-label="Editar tonalidad"
-                      className="rounded border border-violet-500/60 bg-slate-900 px-1 py-0.5 font-mono text-[10px] font-black text-violet-200 outline-none"
-                    >
-                      <option value="">-</option>
-                      {CAMELOT_CODES.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  ) : (
-                    <button
-                      onClick={() => setEditingKeyId(t.id)}
-                      title="Clic para editar la tonalidad (ajusta a oído)"
-                      className={`rounded-md border px-1.5 py-0.5 font-mono text-[10px] font-black tracking-wider shadow-sm transition hover:ring-1 hover:ring-white/30 ${
-                        t.camelot_key?.endsWith("B")
-                          ? "border-violet-400/40 bg-gradient-to-br from-violet-500/35 to-violet-500/5 text-violet-200 shadow-violet-500/20"
-                          : "border-cyan-400/40 bg-gradient-to-br from-cyan-500/35 to-cyan-500/5 text-cyan-200 shadow-cyan-500/20"
-                      }`}
-                    >
-                      {t.camelot_key ?? "-"}
-                    </button>
-                  )}
-                </td>
-                <td className="px-2 py-1.5"><EnergyBar value={t.energy} /></td>
-                <td className="hidden max-w-28 truncate px-2 py-1.5 text-slate-500 lg:table-cell">{t.folder_name}</td>
-                <td className="hidden px-2 py-1.5 text-right font-mono text-slate-400 sm:table-cell">{fmtDur(t.duration_sec)}</td>
-              </tr>
+                track={t}
+                compatible={compatibleWith?.id === t.id}
+                playing={playingIds.has(t.id)}
+                editingKey={editingKeyId === t.id}
+                onPlayPreview={onPlayPreview}
+                onLoadToDeckA={onLoadToDeckA}
+                onLoadToDeckB={onLoadToDeckB}
+                onLoadToActiveDeck={onLoadToActiveDeck}
+                onStartEditKey={setEditingKeyId}
+                onSaveKey={(id, key) => void saveKey(id, key)}
+                onCancelEditKey={() => setEditingKeyId(null)}
+              />
             ))}
           </tbody>
         </table>
         {loading && <p className="p-4 text-center text-xs text-slate-500">Cargando...</p>}
         {!loading && tracks.length === 0 && (
-          <div className="grid h-full place-items-center p-8">
-            <div className="max-w-sm text-center">
-              <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-panel-2">
-                <Music2 size={24} className="text-slate-600" />
-              </div>
-              {folders.length === 0 ? (
-                <>
-                  <p className="text-sm font-semibold text-slate-300">No hay carpetas agregadas</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Haz clic en <b className="text-violet-400">"Agregar Carpeta"</b> en la barra lateral
-                    para importar tu música y comenzar a analizarla.
-                  </p>
-                </>
-              ) : filtersActive ? (
-                <>
-                  <p className="text-sm font-semibold text-slate-300">Sin resultados para los filtros actuales</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Ajusta o limpia los filtros para ver más tracks.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p className="text-sm font-semibold text-slate-300">Tu biblioteca está vacía</p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Usa el botón <b className="text-cyan-400">Escanear / Re-analizar</b> de tus carpetas
-                    para analizar BPM, tonalidad y energía.
-                  </p>
-                </>
-              )}
-            </div>
-          </div>
+          <EmptyState foldersCount={folders.length} filtersActive={filtersActive} />
         )}
       </div>
     </div>

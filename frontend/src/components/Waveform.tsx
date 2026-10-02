@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { AnalysisBar, HotCue, TrackAnalysis } from "../types";
+import type { AnalysisBar, HotCue, Phrase, TrackAnalysis, VocalZone } from "../types";
 
 interface Props {
   analyser: AnalyserNode | null;
@@ -17,6 +17,10 @@ interface Props {
   display?: "time" | "bars";
   /** false = waveform limpia (sin beatgrid, frases ni contador de compases). */
   grid?: boolean;
+  /** Near-Line Click Snapping: dibuja las líneas de beat y atrae (Quantized
+   *  Snap) la aguja a la línea exacta más próxima al hacer clic/arrastrar
+   *  cerca de ellas. Independiente de `grid` (vale para ondas limpias). */
+  snapToGrid?: boolean;
   /** Ruta del archivo para el análisis estructural (onda RGB, frases, cues, vocales). */
   analysisPath?: string | null;
 }
@@ -27,6 +31,18 @@ const HALF_WINDOW = 8;
 /** Cues por defecto estables: evita crear un array nuevo en cada render
  *  (el valor por defecto de una prop [] rompería cualquier memo). */
 const EMPTY_CUES: { t: number; color: string; label?: string }[] = [];
+
+/** Near-Line Click Snapping: si el clic/arrastre cae cerca de una línea de
+ *  beat, atrae la aguja a la línea EXACTA más próxima (Quantized Snap). El
+ *  imán actúa dentro de ~40% del periodo de beat (máx. 300 ms): fuera de esa
+ *  ventana el seek queda libre, sin tirones. */
+function snapToBeat(t: number, rate: number, bpm: number, gridOffsetSec: number): number {
+  const period = 60 / (bpm * rate);
+  const k = Math.round((t - gridOffsetSec) / period);
+  const snapped = gridOffsetSec + k * period;
+  const threshold = Math.min(0.3, period * 0.4);
+  return Math.abs(t - snapped) <= threshold ? snapped : t;
+}
 
 interface Sample {
   t: number;
@@ -92,6 +108,407 @@ const CUE_COLORS: Record<string, string> = {
   outro: "#94a3b8",
 };
 
+/** Geometría compartida de un frame de dibujo (ventana deslizante). */
+interface DrawView {
+  w: number;
+  h: number;
+  cx: number;
+  pxPerSec: number;
+  tCur: number;
+  t0: number;
+  t1: number;
+}
+
+/** Proyecta un instante t de la canción a su coordenada x en el canvas. */
+function xAt(view: DrawView, t: number): number {
+  return view.cx + (t - view.tCur) * view.pxPerSec;
+}
+
+/** Promedia las barras del análisis en [ta, tb); sin barras interpola con la
+ *  más cercana al centro del intervalo (los huecos no quedan en blanco). */
+function sumBars(
+  bars: AnalysisBar[],
+  ta: number,
+  tb: number
+): { lo: number; mid: number; hi: number } | null {
+  let lo = 0, mid = 0, hi = 0, n = 0;
+  for (const b of bars) {
+    if (b.t >= ta && b.t < tb) {
+      lo += b.lo;
+      mid += b.mid;
+      hi += b.hi;
+      n++;
+    }
+  }
+  if (n === 0) {
+    let best: AnalysisBar | null = null;
+    let bd = Infinity;
+    for (const b of bars) {
+      const d = Math.abs(b.t - (ta + tb) / 2);
+      if (d < bd) {
+        bd = d;
+        best = b;
+      }
+    }
+    if (!best) return null;
+    return { lo: best.lo, mid: best.mid, hi: best.hi };
+  }
+  return { lo: lo / n, mid: mid / n, hi: hi / n };
+}
+
+/** Líneas de subdivisión por segundo (rejilla de fondo sutil). */
+function drawSecondTicks(ctx: CanvasRenderingContext2D, view: DrawView): void {
+  ctx.strokeStyle = "rgba(148,163,184,0.08)";
+  ctx.lineWidth = 1;
+  for (let t = Math.ceil(view.t0); t <= view.t1; t++) {
+    const x = xAt(view, t);
+    if (x < 0 || x > view.w) continue;
+    ctx.beginPath();
+    ctx.moveTo(x, 4);
+    ctx.lineTo(x, view.h - 4);
+    ctx.stroke();
+  }
+}
+
+/** Frases: franja de fondo + etiqueta con la estructura (8 compases). */
+function drawPhrases(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  phrases: Phrase[]
+): void {
+  for (const p of phrases) {
+    if (p.end < view.t0 || p.start > view.t1) continue;
+    const x0 = Math.max(0, xAt(view, p.start));
+    const x1 = Math.min(view.w, xAt(view, p.end));
+    if (x1 - x0 < 6) continue;
+    const base = PHRASE_COLORS[p.label] ?? "#64748b";
+    ctx.fillStyle = hexA(base, 0.1);
+    ctx.fillRect(x0, 4, x1 - x0, view.h - 8);
+    if (x1 - x0 > 34) {
+      ctx.fillStyle = hexA(base, 0.95);
+      ctx.font = "bold 8px ui-monospace, monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(
+        p.label === "Chorus/Drop" ? "DROP" : p.label.toUpperCase(),
+        x0 + 3,
+        11
+      );
+    }
+  }
+}
+
+/** Zonas vocales: patrón diagonal + badge de micrófono. */
+function drawVocalZones(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  zones: VocalZone[]
+): void {
+  for (const z of zones) {
+    if (z.end < view.t0 || z.start > view.t1) continue;
+    const x0 = Math.max(0, xAt(view, z.start));
+    const x1 = Math.min(view.w, xAt(view, z.end));
+    if (x1 - x0 < 8) continue;
+    ctx.fillStyle = "rgba(244,63,94,0.07)";
+    ctx.fillRect(x0, 4, x1 - x0, view.h - 8);
+    ctx.strokeStyle = "rgba(244,63,94,0.25)";
+    ctx.lineWidth = 1;
+    const y0 = 4;
+    const y1 = view.h - 8;
+    for (let yy = y0 - (x1 - x0); yy < y1; yy += 6) {
+      ctx.beginPath();
+      ctx.moveTo(x0, yy);
+      ctx.lineTo(x0 + (yy - y0) + (x1 - x0), y0);
+      ctx.stroke();
+    }
+    if (x1 - x0 > 60) {
+      ctx.fillStyle = "rgba(244,63,94,0.95)";
+      ctx.font = "700 7px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("\uD83C\uDFA4 VOCAL ZONE", (x0 + x1) / 2, view.h - 6);
+    }
+  }
+}
+
+/** Barras RGB apiladas del análisis: graves (rojo/kick) en la base, medios
+ *  (verde) encima y agudos (azul/hi-hats) en la punta. Cada banda se escala
+ *  contra su pico real del archivo → drops altos y breaks casi vacíos. */
+function drawAnalysisRgb(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  bars: AnalysisBar[],
+  bandMax: [number, number, number]
+): void {
+  const nCols = Math.min(Math.max(1, Math.floor(view.w / 4)), 320);
+  const dtCol = (view.t1 - view.t0) / nCols;
+  const maxHalf = view.h * 0.3;
+  const yc = view.h / 2;
+  const unit = maxHalf / 3;
+  for (let i = 0; i < nCols; i++) {
+    const ta = view.t0 + i * dtCol;
+    const s = sumBars(bars, ta, ta + dtCol);
+    if (!s) continue;
+    const x = view.cx + (ta + dtCol / 2 - view.tCur) * view.pxPerSec;
+    if (x < -3 || x > view.w + 3) continue;
+    const norm: [number, number, number] = [
+      s.lo / bandMax[0],
+      s.mid / bandMax[1],
+      s.hi / bandMax[2],
+    ];
+    const energy = norm[0] + norm[1] + norm[2];
+    if (energy < 0.06) continue; // silencio/break → columna vacía
+    let cum = 0;
+    for (let b = 0; b < 3; b++) {
+      const n = Math.min(1, norm[b]);
+      if (n < 0.02) continue;
+      const seg = n * unit;
+      ctx.fillStyle = RGB_COLORS[b];
+      ctx.globalAlpha = 0.5 + 0.5 * n;
+      peakBar(ctx, x, yc - cum - seg, 2.5, seg * 2, 1);
+      ctx.globalAlpha = 1;
+      cum += seg;
+    }
+  }
+}
+
+/** Líneas verticales de los hot cues del DJ (prop `cues`). */
+function drawCueLines(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  cues: { t: number; color: string; label?: string }[]
+): void {
+  for (const cueTag of cues) {
+    ctx.strokeStyle = hexA(cueTag.color, 0.85);
+    ctx.lineWidth = 1.2;
+    const x = xAt(view, cueTag.t);
+    if (x >= -20 && x <= view.w + 20) {
+      ctx.beginPath();
+      ctx.moveTo(x, 3);
+      ctx.lineTo(x, view.h - 3);
+      ctx.stroke();
+    }
+  }
+}
+
+/** Hot cues automáticos del análisis (Intro, Drop, Break, Outro). */
+function drawAnalysisCues(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  cs: HotCue[]
+): void {
+  for (const c of cs) {
+    const x = xAt(view, c.t);
+    if (x < -24 || x > view.w + 24) continue;
+    const cc = CUE_COLORS[c.type] ?? "#f59e0b";
+    ctx.strokeStyle = hexA(cc, 0.9);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x, 3);
+    ctx.lineTo(x, view.h - 3);
+    ctx.stroke();
+    ctx.fillStyle = cc;
+    ctx.beginPath();
+    ctx.moveTo(x - 4, 3);
+    ctx.lineTo(x + 6, 3);
+    ctx.lineTo(x, 11);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "bold 6px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(c.label, x + 6, 11);
+  }
+}
+
+/** Beatgrid 1-2-3-4 alineado al BPM efectivo + frases de 32 beats.
+ *  Modo `subtle`: líneas de imán para el Near-Line Click Snapping de las
+ *  ondas limpias de deck (sin etiquetas, brillo discreto). */
+function drawBeatgrid(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  beat: number,
+  gridOffsetSec: number,
+  color: string,
+  subtle = false
+): void {
+  const start = gridOffsetSec + Math.floor((view.t0 - gridOffsetSec) / beat) * beat;
+  for (let t = start; t <= view.t1; t += beat) {
+    const x = xAt(view, t);
+    if (x < -30 || x > view.w + 30) continue;
+    const idx = Math.round((t - gridOffsetSec) / beat);
+    const num = ((idx % 4) + 4) % 4 + 1;
+    const isPhrase = idx % 32 === 0;
+    const isOne = num === 1 && !isPhrase;
+    if (subtle) {
+      ctx.strokeStyle = isPhrase
+        ? "rgba(255,255,255,0.38)"
+        : isOne
+          ? "rgba(255,255,255,0.2)"
+          : hexA(color, 0.16);
+      ctx.lineWidth = isPhrase ? 1.4 : 1;
+      ctx.beginPath();
+      ctx.moveTo(x, 3);
+      ctx.lineTo(x, view.h - 3);
+      ctx.stroke();
+      continue;
+    }
+    ctx.strokeStyle = isPhrase
+      ? "rgba(255,255,255,0.95)"
+      : isOne
+        ? "rgba(255,255,255,0.5)"
+        : hexA(color, 0.8);
+    ctx.lineWidth = isPhrase ? 2 : isOne ? 1.6 : 1;
+    ctx.beginPath();
+    ctx.moveTo(x, isPhrase || isOne ? 3 : view.h * 0.16);
+    ctx.lineTo(x, view.h - 3);
+    ctx.stroke();
+    ctx.textAlign = "center";
+    if (isPhrase) {
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.font = "bold 8px ui-monospace, monospace";
+      ctx.fillText(`FR${Math.floor(idx / 32) + 1}`, x, 10);
+    } else if (isOne) {
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.font = "bold 8px ui-monospace, monospace";
+      ctx.fillText("1", x, 10);
+    } else {
+      ctx.fillStyle = hexA(color, 0.75);
+      ctx.font = "7px ui-monospace, monospace";
+      ctx.fillText(String(num), x, 9);
+    }
+  }
+}
+
+/** Barras RGB en vivo: mismas 3 frecuencias (rojo bajos, verde medios, azul
+ *  agudos) apiladas, con el pasado más brillante que el futuro. */
+function drawLiveSamples(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  samples: Sample[]
+): void {
+  const maxHalf = view.h * 0.3;
+  const yc = view.h / 2;
+  const unit = maxHalf / 3;
+  for (const s of samples) {
+    const x = xAt(view, s.t);
+    if (x < -3 || x > view.w + 3) continue;
+    const norm = [Math.min(1, s.lo), Math.min(1, s.mid), Math.min(1, s.hi)];
+    const energy = norm[0] + norm[1] + norm[2];
+    if (energy < 0.06) continue;
+    const past = s.t < view.tCur;
+    let cum = 0;
+    for (let b = 0; b < 3; b++) {
+      const n = norm[b];
+      if (n < 0.02) continue;
+      const seg = n * unit;
+      ctx.fillStyle = RGB_COLORS[b];
+      ctx.globalAlpha = (past ? 0.95 : 0.45) * (0.5 + 0.5 * n);
+      peakBar(ctx, x, yc - cum - seg, 2, seg * 2, 1);
+      ctx.globalAlpha = 1;
+      cum += seg;
+    }
+  }
+}
+
+/** Hot cues del DJ (prop) con triángulo y etiqueta. */
+function drawCueMarkers(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  cues: { t: number; color: string; label?: string }[]
+): void {
+  for (const c of cues) {
+    const x = xAt(view, c.t);
+    if (x < -24 || x > view.w + 24) continue;
+    ctx.strokeStyle = hexA(c.color, 0.85);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x, 3);
+    ctx.lineTo(x, view.h - 3);
+    ctx.stroke();
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.moveTo(x - 4, 3);
+    ctx.lineTo(x + 6, 3);
+    ctx.lineTo(x, 11);
+    ctx.closePath();
+    ctx.fill();
+    if (c.label) {
+      ctx.fillStyle = "#0f172a";
+      ctx.font = "bold 6px ui-monospace, monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(c.label, x + 6, 11);
+    }
+  }
+}
+
+/** Halo de brillo a lo largo de la línea de tiempo. */
+function drawHalo(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  analysis: TrackAnalysis | null,
+  color: string
+): void {
+  if (analysis) {
+    const grad = ctx.createLinearGradient(0, 0, 0, view.h);
+    grad.addColorStop(0, "rgba(255,255,255,0.05)");
+    grad.addColorStop(1, "rgba(255,255,255,0.02)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 4, view.w, view.h - 8);
+  } else {
+    const halo = ctx.createLinearGradient(0, 0, 0, view.h);
+    halo.addColorStop(0, hexA(color, 0.22));
+    halo.addColorStop(0.5, hexA(color, 0.12));
+    halo.addColorStop(1, hexA(color, 0.05));
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 4, view.w, view.h - 8);
+  }
+}
+
+/** Playhead con glow, limpio (sin rectángulo lateral). */
+function drawPlayhead(ctx: CanvasRenderingContext2D, view: DrawView): void {
+  ctx.shadowColor = "rgba(255,255,255,0.9)";
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.fillRect(view.cx - 0.75, 0, 1.5, view.h);
+  ctx.shadowBlur = 0;
+}
+
+/** Indicador de análisis en curso. */
+function drawLoading(ctx: CanvasRenderingContext2D, view: DrawView): void {
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "bold 8px ui-monospace, monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("ANALIZANDO ESTRUCTURA (RGB · FRASES · CUES)…", view.cx, view.h / 2 - 4);
+}
+
+/** Tiempo o compases transcurridos (solo en vistas con grid). */
+function drawReadout(
+  ctx: CanvasRenderingContext2D,
+  view: DrawView,
+  opts: {
+    display: "time" | "bars";
+    beat: number | null;
+    gridOffsetSec: number;
+    duration: number;
+  }
+): void {
+  ctx.textAlign = "left";
+  if (opts.display === "bars" && opts.beat) {
+    const barDur = opts.beat * 4;
+    const bars = (view.tCur - opts.gridOffsetSec) / barDur;
+    const totalBars = opts.duration / barDur;
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = "bold 10px ui-monospace, monospace";
+    ctx.fillText(`${bars.toFixed(1)} BARS`, 5, 11);
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.font = "8px ui-monospace, monospace";
+    ctx.fillText(`de ${totalBars.toFixed(0)} · ${fmt(view.tCur)}`, 5, 22);
+  } else {
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.fillText(fmt(view.tCur), 5, 10);
+  }
+}
+
 /**
  * Waveform con playhead fijo (ventana deslizante) y beatgrid 1-2-3-4.
  *
@@ -99,7 +516,9 @@ const CUE_COLORS: Record<string, string> = {
  * rojo, medios verde, agudos azul — Rekordbox 7), la estructura de frases
  * (Intro / Chorus/Drop / Bridge / Outro alineadas a 8 compases), los 4 hot
  * cues automáticos y las zonas vocales ("Vocal Zone" con micrófono). Sin
- * análisis conserva la onda time-domain neón en vivo. Clic/arrastre = seek.
+ * análisis conserva la onda time-domain neón en vivo. Clic/arrastre = seek;
+ * con `snapToGrid` el seek queda imantado a la línea de beat más próxima
+ * (Near-Line Click Snapping / Quantized Snap) y las líneas se dibujan.
  */
 export default function Waveform({
   analyser,
@@ -113,6 +532,7 @@ export default function Waveform({
   playheadFrac = 0.4,
   display = "time",
   grid = true,
+  snapToGrid = false,
   analysisPath,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -222,320 +642,67 @@ export default function Waveform({
 
       const cx = w * playheadFrac;
       const pxPerSec = (w * Math.min(playheadFrac, 1 - playheadFrac)) / HALF_WINDOW;
-      const t0 = tCur - HALF_WINDOW;
-      const t1 = tCur + HALF_WINDOW;
-      const xOf = (t: number) => cx + (t - tCur) * pxPerSec;
+      const view: DrawView = {
+        w,
+        h,
+        cx,
+        pxPerSec,
+        tCur,
+        t0: tCur - HALF_WINDOW,
+        t1: tCur + HALF_WINDOW,
+      };
 
       // Subdivisión por segundo
-      ctx.strokeStyle = "rgba(148,163,184,0.08)";
-      ctx.lineWidth = 1;
-      for (let t = Math.ceil(t0); t <= t1; t++) {
-        const x = xOf(t);
-        if (x < 0 || x > w) continue;
-        ctx.beginPath();
-        ctx.moveTo(x, 4);
-        ctx.lineTo(x, h - 4);
-        ctx.stroke();
-      }
+      drawSecondTicks(ctx, view);
 
-      // ---------------- ONDA RGB ESTÁTICA (análisis estructural) ----------------
       if (analysis) {
-        // Frases: franja de fondo + etiqueta con la estructura (8 compases)
-        for (const p of analysis.phrases) {
-          if (p.end < t0 || p.start > t1) continue;
-          const x0 = Math.max(0, xOf(p.start));
-          const x1 = Math.min(w, xOf(p.end));
-          if (x1 - x0 < 6) continue;
-          const base = PHRASE_COLORS[p.label] ?? "#64748b";
-          ctx.fillStyle = hexA(base, 0.1);
-          ctx.fillRect(x0, 4, x1 - x0, h - 8);
-          if (x1 - x0 > 34) {
-            ctx.fillStyle = hexA(base, 0.95);
-            ctx.font = "bold 8px ui-monospace, monospace";
-            ctx.textAlign = "left";
-            ctx.fillText(
-              p.label === "Chorus/Drop" ? "DROP" : p.label.toUpperCase(),
-              x0 + 3,
-              11
-            );
-          }
+        // ---------------- ONDA RGB ESTÁTICA (análisis estructural) ----------------
+        drawPhrases(ctx, view, analysis.phrases);
+        drawVocalZones(ctx, view, analysis.vocal_zones);
+        // Líneas de imán (Near-Line Click Snapping) bajo la onda RGB.
+        if (snapToGrid && beat) {
+          drawBeatgrid(ctx, view, beat, gridOffsetSec, color, true);
         }
-
-        // Zonas vocales: patrón diagonal + badge de micrófono
-        for (const z of analysis.vocal_zones) {
-          if (z.end < t0 || z.start > t1) continue;
-          const x0 = Math.max(0, xOf(z.start));
-          const x1 = Math.min(w, xOf(z.end));
-          if (x1 - x0 < 8) continue;
-          ctx.fillStyle = "rgba(244,63,94,0.07)";
-          ctx.fillRect(x0, 4, x1 - x0, h - 8);
-          ctx.strokeStyle = "rgba(244,63,94,0.25)";
-          ctx.lineWidth = 1;
-          const y0 = 4;
-          const y1 = h - 8;
-          for (let yy = y0 - (x1 - x0); yy < y1; yy += 6) {
-            ctx.beginPath();
-            ctx.moveTo(x0, yy);
-            ctx.lineTo(x0 + (yy - y0) + (x1 - x0), y0);
-            ctx.stroke();
-          }
-          if (x1 - x0 > 60) {
-            ctx.fillStyle = "rgba(244,63,94,0.95)";
-            ctx.font = "700 7px ui-monospace, monospace";
-            ctx.textAlign = "center";
-            ctx.fillText("\uD83C\uDFA4 VOCAL ZONE", (x0 + x1) / 2, h - 6);
-          }
-        }
-
-        // Onzas RGB reales de las frecuencias del archivo: envolventes
-        // suaves (graves/medios/agudos con sus picos, caídas y zonas de
-        // volumen) en lugar de bloques rectangulares sólidos.
-        const nCols = Math.min(Math.max(1, Math.floor(w / 4)), 320);
-        const dtCol = (t1 - t0) / nCols;
-        const sumBars = (bars: AnalysisBar[], ta: number, tb: number) => {
-          let lo = 0, mid = 0, hi = 0, n = 0;
-          for (const b of bars) {
-            if (b.t >= ta && b.t < tb) {
-              lo += b.lo;
-              mid += b.mid;
-              hi += b.hi;
-              n++;
-            }
-          }
-          if (n === 0) {
-            // interpolar con la barra más cercana
-            let best: AnalysisBar | null = null;
-            let bd = Infinity;
-            for (const b of bars) {
-              const d = Math.abs(b.t - (ta + tb) / 2);
-              if (d < bd) {
-                bd = d;
-                best = b;
-              }
-            }
-            if (!best) return null;
-            return { lo: best.lo, mid: best.mid, hi: best.hi };
-          }
-          return { lo: lo / n, mid: mid / n, hi: hi / n };
-        };
-        // Barras RGB apiladas estilo Rekordbox 7: graves (rojo/kick) en la base,
-        // medios (verde) encima y agudos (azul/hi-hats) en la punta. La altura
-        // de cada banda se escala contra su PICO REAL en el archivo → drops
-        // como columnas altas y breaks como vacíos pronunciados.
-        const maxHalf = h * 0.3;
-        const yc = h / 2;
-        const unit = maxHalf / 3;
-        for (let i = 0; i < nCols; i++) {
-          const ta = t0 + i * dtCol;
-          const s = sumBars(analysis.bars, ta, ta + dtCol);
-          if (!s) continue;
-          const x = cx + (ta + dtCol / 2 - tCur) * pxPerSec;
-          if (x < -3 || x > w + 3) continue;
-          const norm: [number, number, number] = [
-            s.lo / bandMax[0],
-            s.mid / bandMax[1],
-            s.hi / bandMax[2],
-          ];
-          const energy = norm[0] + norm[1] + norm[2];
-          if (energy < 0.06) continue; // silencio/break → columna vacía
-          let cum = 0;
-          for (let b = 0; b < 3; b++) {
-            const n = Math.min(1, norm[b]);
-            if (n < 0.02) continue;
-            const seg = n * unit;
-            ctx.fillStyle = RGB_COLORS[b];
-            ctx.globalAlpha = 0.5 + 0.5 * n;
-            peakBar(ctx, x, yc - cum - seg, 2.5, seg * 2, 1);
-            ctx.globalAlpha = 1;
-            cum += seg;
-          }
-        }
-
-        // Hot cues automáticos del análisis (Intro, Drop, Break, Outro)
-        const cs: HotCue[] = analysis.cues ?? [];
-        for (const cueTag of cues) {
-          ctx.strokeStyle = hexA(cueTag.color, 0.85);
-          ctx.lineWidth = 1.2;
-          const x = xOf(cueTag.t);
-          if (x >= -20 && x <= w + 20) {
-            ctx.beginPath();
-            ctx.moveTo(x, 3);
-            ctx.lineTo(x, h - 3);
-            ctx.stroke();
-          }
-        }
-        for (const c of cs) {
-          const x = xOf(c.t);
-          if (x < -24 || x > w + 24) continue;
-          const cc = CUE_COLORS[c.type] ?? "#f59e0b";
-          ctx.strokeStyle = hexA(cc, 0.9);
-          ctx.lineWidth = 1.4;
-          ctx.beginPath();
-          ctx.moveTo(x, 3);
-          ctx.lineTo(x, h - 3);
-          ctx.stroke();
-          ctx.fillStyle = cc;
-          ctx.beginPath();
-          ctx.moveTo(x - 4, 3);
-          ctx.lineTo(x + 6, 3);
-          ctx.lineTo(x, 11);
-          ctx.closePath();
-          ctx.fill();
-          ctx.fillStyle = "#0f172a";
-          ctx.font = "bold 6px ui-monospace, monospace";
-          ctx.textAlign = "left";
-          ctx.fillText(c.label, x + 6, 11);
-        }
+        drawAnalysisRgb(ctx, view, analysis.bars, bandMax);
+        drawCueLines(ctx, view, cues);
+        drawAnalysisCues(ctx, view, analysis.cues ?? []);
       } else {
         // ---------------- ONDA TIME-DOMAIN NEÓN EN VIVO (sin análisis) ----------------
-
-        // Beatgrid 1-2-3-4 alineado al BPM efectivo + frases de 32 beats
-        if (grid && beat) {
-          const start = gridOffsetSec + Math.floor((t0 - gridOffsetSec) / beat) * beat;
-          for (let t = start; t <= t1; t += beat) {
-            const x = xOf(t);
-            if (x < -30 || x > w + 30) continue;
-            const idx = Math.round((t - gridOffsetSec) / beat);
-            const num = ((idx % 4) + 4) % 4 + 1;
-            const isPhrase = idx % 32 === 0;
-            const isOne = num === 1 && !isPhrase;
-            ctx.strokeStyle = isPhrase
-              ? "rgba(255,255,255,0.95)"
-              : isOne
-                ? "rgba(255,255,255,0.5)"
-                : hexA(color, 0.8);
-            ctx.lineWidth = isPhrase ? 2 : isOne ? 1.6 : 1;
-            ctx.beginPath();
-            ctx.moveTo(x, isPhrase || isOne ? 3 : h * 0.16);
-            ctx.lineTo(x, h - 3);
-            ctx.stroke();
-            ctx.textAlign = "center";
-            if (isPhrase) {
-              ctx.fillStyle = "rgba(255,255,255,0.9)";
-              ctx.font = "bold 8px ui-monospace, monospace";
-              ctx.fillText(`FR${Math.floor(idx / 32) + 1}`, x, 10);
-            } else if (isOne) {
-              ctx.fillStyle = "rgba(255,255,255,0.9)";
-              ctx.font = "bold 8px ui-monospace, monospace";
-              ctx.fillText("1", x, 10);
-            } else {
-              ctx.fillStyle = hexA(color, 0.75);
-              ctx.font = "7px ui-monospace, monospace";
-              ctx.fillText(String(num), x, 9);
-            }
-          }
+        if ((grid || snapToGrid) && beat) {
+          drawBeatgrid(ctx, view, beat, gridOffsetSec, color, !grid);
         }
-
-        const samples = samplesRef.current;
-        // Barras RGB en vivo: mismas 3 frecuencias (rojo bajos, verde medios,
-        // azul agudos) apiladas, con el pasado más brillante que el futuro.
-        const maxHalf = h * 0.3;
-        const yc = h / 2;
-        const unit = maxHalf / 3;
-        for (const s of samples) {
-          const x = xOf(s.t);
-          if (x < -3 || x > w + 3) continue;
-          const norm = [Math.min(1, s.lo), Math.min(1, s.mid), Math.min(1, s.hi)];
-          const energy = norm[0] + norm[1] + norm[2];
-          if (energy < 0.06) continue;
-          const past = s.t < tCur;
-          let cum = 0;
-          for (let b = 0; b < 3; b++) {
-            const n = norm[b];
-            if (n < 0.02) continue;
-            const seg = n * unit;
-            ctx.fillStyle = RGB_COLORS[b];
-            ctx.globalAlpha = (past ? 0.95 : 0.45) * (0.5 + 0.5 * n);
-            peakBar(ctx, x, yc - cum - seg, 2, seg * 2, 1);
-            ctx.globalAlpha = 1;
-            cum += seg;
-          }
-        }
-
-        // Hot Cues del DJ (prop)
-        for (const c of cues) {
-          const x = xOf(c.t);
-          if (x < -24 || x > w + 24) continue;
-          ctx.strokeStyle = hexA(c.color, 0.85);
-          ctx.lineWidth = 1.4;
-          ctx.beginPath();
-          ctx.moveTo(x, 3);
-          ctx.lineTo(x, h - 3);
-          ctx.stroke();
-          ctx.fillStyle = c.color;
-          ctx.beginPath();
-          ctx.moveTo(x - 4, 3);
-          ctx.lineTo(x + 6, 3);
-          ctx.lineTo(x, 11);
-          ctx.closePath();
-          ctx.fill();
-          if (c.label) {
-            ctx.fillStyle = "#0f172a";
-            ctx.font = "bold 6px ui-monospace, monospace";
-            ctx.textAlign = "left";
-            ctx.fillText(c.label, x + 6, 11);
-          }
-        }
+        drawLiveSamples(ctx, view, samplesRef.current);
+        drawCueMarkers(ctx, view, cues);
       }
 
       // Halo de brillo a lo largo de la línea de tiempo
-      if (analysis) {
-        const grad = ctx.createLinearGradient(0, 0, 0, h);
-        grad.addColorStop(0, "rgba(255,255,255,0.05)");
-        grad.addColorStop(1, "rgba(255,255,255,0.02)");
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 4, w, h - 8);
-      } else {
-        const halo = ctx.createLinearGradient(0, 0, 0, h);
-        halo.addColorStop(0, hexA(color, 0.22));
-        halo.addColorStop(0.5, hexA(color, 0.12));
-        halo.addColorStop(1, hexA(color, 0.05));
-        ctx.fillStyle = halo;
-        ctx.fillRect(0, 4, w, h - 8);
-      }
+      drawHalo(ctx, view, analysis, color);
 
       // Playhead con glow, limpio (sin rectángulo lateral)
-      ctx.shadowColor = "rgba(255,255,255,0.9)";
-      ctx.shadowBlur = 6;
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.fillRect(cx - 0.75, 0, 1.5, h);
-      ctx.shadowBlur = 0;
+      drawPlayhead(ctx, view);
 
       // Indicador de análisis en curso
-      if (analysisLoading) {
-        ctx.fillStyle = "rgba(255,255,255,0.75)";
-        ctx.font = "bold 8px ui-monospace, monospace";
-        ctx.textAlign = "center";
-        ctx.fillText("ANALIZANDO ESTRUCTURA (RGB · FRASES · CUES)…", cx, h / 2 - 4);
-      }
+      if (analysisLoading) drawLoading(ctx, view);
 
       // Tiempo / compases transcurridos (solo en vistas con grid)
       if (grid && (display === "bars" || (analysis && analysis.bpm))) {
-        ctx.textAlign = "left";
-        if (display === "bars" && beat) {
-          const barDur = beat * 4;
-          const bars = (tCur - gridOffsetSec) / barDur;
-          const totalBars = (el?.duration && isFinite(el.duration) ? el.duration : tCur) / barDur;
-          ctx.fillStyle = "rgba(255,255,255,0.75)";
-          ctx.font = "bold 10px ui-monospace, monospace";
-          ctx.fillText(`${bars.toFixed(1)} BARS`, 5, 11);
-          ctx.fillStyle = "rgba(255,255,255,0.4)";
-          ctx.font = "8px ui-monospace, monospace";
-          ctx.fillText(`de ${totalBars.toFixed(0)} · ${fmt(tCur)}`, 5, 22);
-        } else {
-          ctx.fillStyle = "rgba(255,255,255,0.6)";
-          ctx.font = "9px ui-monospace, monospace";
-          ctx.fillText(fmt(tCur), 5, 10);
-        }
+        drawReadout(ctx, view, {
+          display,
+          beat,
+          gridOffsetSec,
+          duration: el?.duration && isFinite(el.duration) ? el.duration : tCur,
+        });
       }
     };
     draw();
     return () => cancelAnimationFrame(raf);
-  }, [analyser, el, bpm, color, gridOffsetSec, cues, playheadFrac, display, grid, analysis, analysisLoading, bandMax]);
+  }, [analyser, el, bpm, color, gridOffsetSec, cues, playheadFrac, display, grid, snapToGrid, analysis, analysisLoading, bandMax]);
 
   const draggingRef = useRef(false);
 
-  /** Clic o arrastre = salto instantáneo a esa posición exacta de la canción. */
+  /** Clic o arrastre = salto a esa posición de la canción. Con `snapToGrid`
+   *  la aguja se ATRAE (Quantized Snap) a la línea de beat exacta más
+   *  próxima: el seek queda imantado a la rejilla, listo para mezclar. */
   const seekAt = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!el || !onSeek) return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -543,7 +710,12 @@ export default function Waveform({
     const cx = rect.width * playheadFrac;
     const pxPerSec = (rect.width * Math.min(playheadFrac, 1 - playheadFrac)) / HALF_WINDOW;
     const t = el.currentTime + (x - cx) / pxPerSec;
-    onSeek(Math.max(0, t));
+    if (!snapToGrid || !bpm || bpm <= 0) {
+      onSeek(Math.max(0, t));
+      return;
+    }
+    const rate = el.playbackRate > 0 ? el.playbackRate : 1;
+    onSeek(Math.max(0, snapToBeat(t, rate, bpm, gridOffsetSec)));
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {

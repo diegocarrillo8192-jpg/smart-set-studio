@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactElement, type RefObject } from "react";
 import {
   ChevronDown,
-  Disc3,
   FolderPlus,
   FolderSearch,
   Library,
@@ -127,6 +126,437 @@ type MenuTarget = { kind: "folder" | "set"; id: number; x: number; y: number } |
 type RenameTarget = { kind: "folder" | "set"; id: number } | null;
 
 type DeleteTarget = { kind: "folder" | "set"; id: number; name: string } | null;
+
+interface LibrarySectionProps {
+  folders: Folder[];
+  totalTracks: number;
+  selectedFolderId: number | null;
+  onSelectFolder: (id: number | null) => void;
+  adding: boolean;
+  onAddFolder: () => void;
+  onAddAudioFiles: () => void;
+  libraryOpen: boolean;
+  onToggleLibraryOpen: () => void;
+  scanningIds: Set<number>;
+  progress: Record<number, ScanJob>;
+  renameTarget: RenameTarget;
+  renameValue: string;
+  onRenameValueChange: (value: string) => void;
+  onSaveRename: () => void;
+  onCancelRename: () => void;
+  renameInputRef: RefObject<HTMLInputElement | null>;
+  menu: MenuTarget;
+  onScanFolder: (folder: Folder) => void;
+  onOpenMenu: (kind: "folder" | "set", id: number, e: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+/** Sección "Mi Biblioteca": agregar carpetas/audio, vista global y carpetas. */
+function LibrarySection({
+  folders,
+  totalTracks,
+  selectedFolderId,
+  onSelectFolder,
+  adding,
+  onAddFolder,
+  onAddAudioFiles,
+  libraryOpen,
+  onToggleLibraryOpen,
+  scanningIds,
+  progress,
+  renameTarget,
+  renameValue,
+  onRenameValueChange,
+  onSaveRename,
+  onCancelRename,
+  renameInputRef,
+  menu,
+  onScanFolder,
+  onOpenMenu,
+}: LibrarySectionProps) {
+  return (
+    <section className="px-3 py-3">
+      <h2 className="mb-1.5">
+        <button
+          onClick={onToggleLibraryOpen}
+          className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
+          title={libraryOpen ? "Colapsar sección" : "Expandir sección"}
+        >
+          <Library size={12} className="shrink-0" /> Mi Biblioteca
+          <ChevronDown
+            size={12}
+            className={`ml-auto shrink-0 transition-transform ${libraryOpen ? "" : "-rotate-90"}`}
+          />
+        </button>
+      </h2>
+      <button
+        onClick={onAddFolder}
+        disabled={adding}
+        className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-violet-500 hover:text-violet-300 disabled:opacity-50"
+      >
+        <FolderPlus size={14} /> Agregar Carpeta
+      </button>
+      <button
+        onClick={onAddAudioFiles}
+        disabled={adding}
+        className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
+        title="Selecciona archivos de audio sueltos (MP3/WAV/M4A…)"
+      >
+        <Music2 size={14} /> Cargar Audio
+      </button>
+
+      <div className="space-y-1.5">
+        {/* Vista global: colección completa */}
+        <button
+          onClick={() => onSelectFolder(null)}
+          className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
+            selectedFolderId === null
+              ? "bg-violet-500/20 ring-1 ring-violet-500/40"
+              : "bg-panel-2 hover:bg-panel-3"
+          }`}
+          title="Ver todos los tracks de la biblioteca"
+        >
+          <Library size={13} className="shrink-0 text-violet-400" />
+          <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${selectedFolderId === null ? "text-white" : "text-slate-200"}`}>
+            Todos los tracks
+          </span>
+          <span className="rounded bg-panel-3 px-1.5 py-0.5 text-[9px] text-slate-400">{totalTracks}</span>
+        </button>
+
+        {folders.length === 0 && (
+          <div className="rounded-lg border border-dashed border-slate-700 p-3 text-center">
+            <p className="text-[11px] leading-relaxed text-slate-400">
+              No hay carpetas agregadas.
+              <br />
+              Haz clic en <b className="text-violet-400">"Agregar Carpeta"</b> para comenzar.
+            </p>
+          </div>
+        )}
+        {libraryOpen && folders.map((folder) => {
+          const scanning = scanningIds.has(folder.id);
+          const job = progress[folder.id];
+          const active = selectedFolderId === folder.id;
+          const renaming = renameTarget?.kind === "folder" && renameTarget.id === folder.id;
+          return (
+            <div key={folder.id} className="space-y-1">
+              {renaming ? (
+                /* Fila en renombrado: SOLO el input es interactivo. */
+                <div className="flex h-11 w-full items-center rounded-lg bg-panel-2 ring-1 ring-violet-500/40">
+                  <input
+                    ref={renameInputRef}
+                    value={renameValue}
+                    onChange={(e) => onRenameValueChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void onSaveRename();
+                      else if (e.key === "Escape") onCancelRename();
+                    }}
+                    onBlur={onCancelRename}
+                    aria-label="Renombrar carpeta"
+                    className="h-11 w-full bg-transparent px-2.5 text-xs font-medium text-white outline-none"
+                    placeholder="Nombre de la carpeta"
+                  />
+                </div>
+              ) : (
+                /* Fila interactiva: el botón de selección ocupa TODO el
+                   contenedor (hitbox completo, click + hover en cualquier
+                   punto). Las acciones (escanear / opciones) son hermanas
+                   superpuestas, no descendientes: sin anidar controles. */
+                <div
+                  className={`group relative flex h-11 w-full items-center rounded-lg transition ${
+                    active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectFolder(folder.id)}
+                    title="Clic para filtrar la biblioteca por esta carpeta"
+                    className="flex h-full w-full cursor-pointer items-center gap-2 overflow-hidden px-2.5 text-left"
+                  >
+                    <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
+                    <span className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                      <span className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</span>
+                      <span className="text-[10px] text-slate-500">
+                        {scanning && job
+                          ? `${job.processed_files}/${job.total_files} analizando...`
+                          : `${folder.track_count} tracks`}
+                      </span>
+                    </span>
+                  </button>
+                  <span className="absolute right-1 flex shrink-0 items-center gap-0.5">
+                    <button
+                      onClick={() => onScanFolder(folder)}
+                      aria-label="Escanear / Re-analizar"
+                      title="Escanear / Re-analizar"
+                      className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
+                    >
+                      <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
+                    </button>
+                    <button
+                      onClick={(e) => onOpenMenu("folder", folder.id, e)}
+                      aria-label="Opciones de carpeta"
+                      title="Opciones"
+                      className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
+                    >
+                      <MoreVertical size={13} />
+                    </button>
+                  </span>
+                </div>
+              )}
+              {job && job.status === "error" && (
+                <p className="text-[10px] text-red-400">{job.message}</p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+interface SetsSectionProps {
+  sets: DJSet[];
+  activeSetId: number | null;
+  onSelectSet: (set: DJSet) => void;
+  setsOpen: boolean;
+  onToggleSetsOpen: () => void;
+  renameTarget: RenameTarget;
+  renameValue: string;
+  onRenameValueChange: (value: string) => void;
+  onSaveRename: () => void;
+  onCancelRename: () => void;
+  renameInputRef: RefObject<HTMLInputElement | null>;
+  menu: MenuTarget;
+  onOpenMenu: (kind: "folder" | "set", id: number, e: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+/** Sección "Playlists & Sets": lista de sets con renombrado en línea. */
+function SetsSection({
+  sets,
+  activeSetId,
+  onSelectSet,
+  setsOpen,
+  onToggleSetsOpen,
+  renameTarget,
+  renameValue,
+  onRenameValueChange,
+  onSaveRename,
+  onCancelRename,
+  renameInputRef,
+  menu,
+  onOpenMenu,
+}: SetsSectionProps) {
+  return (
+    <section className="border-t border-slate-800 px-3 py-3">
+      <h2 className="mb-1.5">
+        <button
+          onClick={onToggleSetsOpen}
+          className="flex w-full cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
+          title={setsOpen ? "Colapsar sección" : "Expandir sección"}
+        >
+          <ListMusic size={12} className="shrink-0" /> Playlists & Sets
+          <ChevronDown
+            size={12}
+            className={`ml-auto shrink-0 transition-transform ${setsOpen ? "" : "-rotate-90"}`}
+          />
+        </button>
+      </h2>
+      <div className="space-y-1">
+        {sets.length === 0 && (
+          <div className="animate-fade-in rounded-xl border border-slate-800/80 bg-white/[0.02] px-3 py-4">
+            <div className="flex flex-col items-center gap-2 text-center">
+              <span className="grid h-9 w-9 place-items-center rounded-full border border-slate-700/60 bg-panel-2/60">
+                <ListMusic size={15} className="text-slate-500" />
+              </span>
+              <p className="text-[11px] font-semibold text-slate-400">No hay playlists creadas</p>
+              <p className="text-[10px] leading-relaxed text-slate-500">
+                Usa <b className="font-semibold text-cyan-300/80">Smart Set Generator</b> para crear tu primer set
+              </p>
+            </div>
+          </div>
+        )}
+        {setsOpen && sets.map((set) => {
+          const renaming = renameTarget?.kind === "set" && renameTarget.id === set.id;
+          return (
+            <div
+              key={set.id}
+              className={`group relative rounded-lg transition ${
+                activeSetId === set.id ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
+              }`}
+            >
+              {renaming ? (
+                /* Fila en renombrado: SOLO el input es interactivo. */
+                <div className="flex items-center p-2.5">
+                  <input
+                    ref={renameInputRef}
+                    value={renameValue}
+                    onChange={(e) => onRenameValueChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void onSaveRename();
+                      else if (e.key === "Escape") onCancelRename();
+                    }}
+                    onBlur={onCancelRename}
+                    aria-label="Renombrar set"
+                    className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
+                    placeholder="Nombre del set"
+                  />
+                </div>
+              ) : (
+                /* Fila interactiva: el botón de selección ocupa TODA la
+                   tarjeta (nombre + meta incluidos). El menú de opciones es
+                   hermano superpuesto, no descendiente del botón. */
+                <button
+                  type="button"
+                  onClick={() => onSelectSet(set)}
+                  title={set.name}
+                  className="block w-full cursor-pointer px-2.5 pb-1.5 pt-1.5 pr-9 text-left"
+                >
+                  <span className="block min-w-0 truncate text-xs font-medium text-slate-200">{set.name}</span>
+                  <span className="mt-0.5 block text-[10px] text-slate-500">
+                    {set.items.length} tracks · {Math.round(set.total_sec / 60)} min
+                  </span>
+                </button>
+              )}
+              {!renaming && (
+                <button
+                  onClick={(e) => onOpenMenu("set", set.id, e)}
+                  aria-label="Opciones del set"
+                  title="Opciones del set"
+                  className={`absolute right-1.5 top-1.5 rounded p-1 transition ${menu && menu.kind === "set" && menu.id === set.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
+                >
+                  <MoreVertical size={13} />
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+interface SettingsSectionProps {
+  error: string;
+  onOpenSettings: () => void;
+}
+
+/** Sección de Ajustes del Motor + aviso de error global. */
+function SettingsSection({ error, onOpenSettings }: SettingsSectionProps) {
+  return (
+    <section className="mt-auto border-t border-slate-800 px-3 py-3">
+      {/* Ajustes del Motor: misma UI que escritorio; en la demo web el motor
+          Python no existe y el clic muestra un aviso en lugar del modal. */}
+      <button
+        onClick={() => {
+          if (isWeb()) {
+            window.alert("Función solo disponible en la versión de Escritorio");
+            return;
+          }
+          onOpenSettings();
+        }}
+        className="mb-1.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-panel-2 hover:text-white"
+      >
+        <Settings size={14} /> Ajustes del Motor
+      </button>
+      {error && (
+        <p className="mt-2 flex items-center gap-1 rounded bg-red-500/10 px-2 py-1 text-[10px] text-red-400">
+          <Trash2 size={10} /> {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+interface ContextMenuProps {
+  menu: NonNullable<MenuTarget>;
+  folders: Folder[];
+  sets: DJSet[];
+  menuRef: RefObject<HTMLDivElement | null>;
+  onClose: () => void;
+  onRename: (kind: "folder" | "set", id: number, name: string) => void;
+  onDelete: (kind: "folder" | "set", id: number, name: string) => void;
+}
+
+/** Menú contextual de carpetas/sets (renombrar / eliminar). */
+function ContextMenu({ menu, folders, sets, menuRef, onClose, onRename, onDelete }: ContextMenuProps) {
+  const target =
+    menu.kind === "folder"
+      ? folders.find((f) => f.id === menu.id)
+      : sets.find((s) => s.id === menu.id);
+  return (
+    <div
+      ref={menuRef}
+      className="fixed z-50 w-44 overflow-hidden rounded-lg border border-slate-700 bg-[#141a2b] py-1 shadow-2xl shadow-black/60"
+      style={{ left: menu.x, top: menu.y }}
+    >
+      <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+        {menu.kind === "folder" ? "Carpeta" : "Set"}
+      </div>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose(); // cierra el menú al elegir acción
+          if (target) onRename(menu.kind, menu.id, target.name);
+        }}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 transition hover:bg-violet-500/15 hover:text-violet-200"
+      >
+        <Pencil size={12} /> Renombrar
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose(); // cierra el menú al elegir acción
+          if (target) onDelete(menu.kind, menu.id, target.name);
+        }}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 transition hover:bg-red-500/15"
+      >
+        <Trash2 size={12} /> Eliminar
+      </button>
+    </div>
+  );
+}
+
+interface DeleteConfirmDialogProps {
+  target: NonNullable<DeleteTarget>;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/** Diálogo sutil de confirmación de eliminación (carpeta o set). */
+function DeleteConfirmDialog({ target, onCancel, onConfirm }: DeleteConfirmDialogProps) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <button
+        type="button"
+        onClick={onCancel}
+        aria-label="Cancelar eliminación"
+        className="absolute inset-0 cursor-default"
+      />
+      <div className="relative w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70">
+        <h3 className="text-sm font-bold text-slate-100">
+          {target.kind === "folder" ? "Quitar carpeta" : "Eliminar set"}
+        </h3>
+        <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
+          {target.kind === "folder"
+            ? `¿Quitar la carpeta "${target.name}" y sus tracks de la biblioteca?`
+            : `¿Eliminar el set "${target.name}"? Esta acción no se puede deshacer.`}
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
+          >
+            <Trash2 size={12} /> Eliminar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function Sidebar({
   folders,
@@ -315,11 +745,6 @@ export default function Sidebar({
 
   const cancelDelete = () => setDeleteTarget(null);
 
-  const isScanning = (id: number) => scanningIds.has(id);
-  const jobFor = (id: number) => progress[id];
-
-  const folderRowActive = (id: number) => selectedFolderId === id;
-
   /** Abre el menú de opciones junto al botón que lo dispara (posición fija). */
   const openMenu = (kind: "folder" | "set", id: number, e: ReactMouseEvent<HTMLButtonElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -330,339 +755,71 @@ export default function Sidebar({
     <aside className="flex w-full shrink-0 flex-col overflow-y-auto border-r border-slate-800 bg-panel md:w-64 md:overflow-y-auto">
       {hiddenInput}
       {audioInput}
-      <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3">
-        <Disc3 size={18} className="text-violet-400" />
-        <div className="min-w-0">
-          <h1 className="text-sm font-black tracking-tight text-white">Smart Set Studio</h1>
-          <p className="text-[10px] leading-tight text-slate-500">AI Set Architect &amp; DJ Library</p>
-          {isWeb() && (
-            <span
-              className="mt-1.5 block w-full rounded-md border border-cyan-700/60 bg-cyan-500/10 px-2 py-1 text-center text-[9px] font-bold uppercase tracking-widest text-cyan-300"
-              title="Demo web: sesión volátil en memoria del navegador, sin base de datos ni motor local"
-            >
-              Demo web · volátil
-            </span>
-          )}
-        </div>
-      </div>
 
       {/* Mi Biblioteca */}
-      <section className="px-3 py-3">
-        <h2 className="mb-2">
-          <button
-            onClick={() => setLibraryOpen((o) => !o)}
-            className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
-            title={libraryOpen ? "Colapsar sección" : "Expandir sección"}
-          >
-            <Library size={12} className="shrink-0" /> Mi Biblioteca
-            <ChevronDown
-              size={12}
-              className={`ml-auto shrink-0 transition-transform ${libraryOpen ? "" : "-rotate-90"}`}
-            />
-          </button>
-        </h2>
-        <button
-          onClick={addFolder}
-          disabled={adding}
-          className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-violet-500 hover:text-violet-300 disabled:opacity-50"
-        >
-          <FolderPlus size={14} /> Agregar Carpeta
-        </button>
-        <button
-          onClick={() => void addAudioFiles()}
-          disabled={adding}
-          className="mb-2 flex w-full items-center gap-2 rounded-lg border border-slate-700 bg-panel-2 px-2.5 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-cyan-500 hover:text-cyan-300 disabled:opacity-50"
-          title="Selecciona archivos de audio sueltos (MP3/WAV/M4A…)"
-        >
-          <Music2 size={14} /> Cargar Audio
-        </button>
-
-        <div className="space-y-1.5">
-          {/* Vista global: colección completa */}
-          <button
-            onClick={() => onSelectFolder(null)}
-            className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition ${
-              selectedFolderId === null
-                ? "bg-violet-500/20 ring-1 ring-violet-500/40"
-                : "bg-panel-2 hover:bg-panel-3"
-            }`}
-            title="Ver todos los tracks de la biblioteca"
-          >
-            <Library size={13} className="shrink-0 text-violet-400" />
-            <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${selectedFolderId === null ? "text-white" : "text-slate-200"}`}>
-              Todos los tracks
-            </span>
-            <span className="rounded bg-panel-3 px-1.5 py-0.5 text-[9px] text-slate-400">{totalTracks}</span>
-          </button>
-
-          {folders.length === 0 && (
-            <div className="rounded-lg border border-dashed border-slate-700 p-3 text-center">
-              <p className="text-[11px] leading-relaxed text-slate-400">
-                No hay carpetas agregadas.
-                <br />
-                Haz clic en <b className="text-violet-400">"Agregar Carpeta"</b> para comenzar.
-              </p>
-            </div>
-          )}
-          {libraryOpen && folders.map((folder) => {
-            const scanning = isScanning(folder.id);
-            const job = jobFor(folder.id);
-            const active = folderRowActive(folder.id);
-            return (
-              <div key={folder.id} className="space-y-1">
-                <div
-                  onClick={() => onSelectFolder(folder.id)}
-                  className={`group flex h-11 w-full cursor-pointer flex-row items-center justify-between gap-2 rounded-lg p-2.5 transition ${
-                    active ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
-                  }`}
-                  title="Clic para filtrar la biblioteca por esta carpeta"
-                >
-                  <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
-                    <FolderSearch size={13} className={`shrink-0 ${active ? "text-violet-300" : "text-slate-400"}`} />
-                    <div className="min-w-0 flex-1">
-                      {renameTarget?.kind === "folder" && renameTarget.id === folder.id ? (
-                        <input
-                          ref={renameInputRef}
-                          value={renameValue}
-                          onChange={(e) => setRenameValue(e.target.value)}
-                          onKeyDown={(e) => {
-                            e.stopPropagation();
-                            if (e.key === "Enter") void saveRename();
-                            else if (e.key === "Escape") cancelRename();
-                          }}
-                          onBlur={() => setRenameTarget(null)}
-                          aria-label="Renombrar carpeta"
-                          className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
-                          placeholder="Nombre de la carpeta"
-                        />
-                      ) : (
-                        <p className={`truncate text-xs font-medium ${active ? "text-white" : "text-slate-200"}`}>{folder.name}</p>
-                      )}
-                      <p className="text-[10px] text-slate-500">
-                        {scanning && job
-                          ? `${job.processed_files}/${job.total_files} analizando...`
-                          : `${folder.track_count} tracks`}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void scanFolder(folder);
-                      }}
-                      aria-label="Escanear / Re-analizar"
-                      title="Escanear / Re-analizar"
-                      className="rounded p-1 text-slate-500 opacity-0 transition hover:text-cyan-300 group-hover:opacity-100"
-                    >
-                      <RefreshCw size={13} className={scanning ? "animate-spin" : ""} />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openMenu("folder", folder.id, e);
-                      }}
-                      aria-label="Opciones de carpeta"
-                      title="Opciones"
-                      className={`rounded p-1 transition ${menu && menu.kind === "folder" && menu.id === folder.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
-                    >
-                      <MoreVertical size={13} />
-                    </button>
-                  </div>
-                </div>
-                {job && job.status === "error" && (
-                  <p className="text-[10px] text-red-400">{job.message}</p>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
+      <LibrarySection
+        folders={folders}
+        totalTracks={totalTracks}
+        selectedFolderId={selectedFolderId}
+        onSelectFolder={onSelectFolder}
+        adding={adding}
+        onAddFolder={() => void addFolder()}
+        onAddAudioFiles={() => void addAudioFiles()}
+        libraryOpen={libraryOpen}
+        onToggleLibraryOpen={() => setLibraryOpen((o) => !o)}
+        scanningIds={scanningIds}
+        progress={progress}
+        renameTarget={renameTarget}
+        renameValue={renameValue}
+        onRenameValueChange={setRenameValue}
+        onSaveRename={() => void saveRename()}
+        onCancelRename={cancelRename}
+        renameInputRef={renameInputRef}
+        menu={menu}
+        onScanFolder={(folder) => void scanFolder(folder)}
+        onOpenMenu={openMenu}
+      />
 
       {/* Playlists & Sets */}
-      <section className="border-t border-slate-800 px-3 py-3">
-<h2 className="mb-2">
-          <button
-            onClick={() => setSetsOpen((o) => !o)}
-            className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-[11px] font-bold uppercase tracking-widest text-slate-400 transition hover:bg-panel-2/70 hover:text-violet-300"
-            title={setsOpen ? "Colapsar sección" : "Expandir sección"}
-          >
-            <ListMusic size={12} className="shrink-0" /> Playlists & Sets
-            <ChevronDown
-              size={12}
-              className={`ml-auto shrink-0 transition-transform ${setsOpen ? "" : "-rotate-90"}`}
-            />
-          </button>
-        </h2>
-        <div className="space-y-1">
-          {sets.length === 0 && (
-            <div className="animate-fade-in rounded-xl border border-slate-800/80 bg-white/[0.02] px-3 py-4">
-              <div className="flex flex-col items-center gap-2 text-center">
-                <span className="grid h-9 w-9 place-items-center rounded-full border border-slate-700/60 bg-panel-2/60">
-                  <ListMusic size={15} className="text-slate-500" />
-                </span>
-                <p className="text-[11px] font-semibold text-slate-400">No hay playlists creadas</p>
-                <p className="text-[10px] leading-relaxed text-slate-500">
-                  Usa <b className="font-semibold text-cyan-300/80">Smart Set Generator</b> para crear tu primer set
-                </p>
-              </div>
-            </div>
-          )}
-          {setsOpen && sets.map((set) => (
-            <div
-              key={set.id}
-              onClick={() => onSelectSet(set)}
-              className={`group relative cursor-pointer rounded-lg px-2.5 py-1.5 transition ${
-                activeSetId === set.id ? "bg-violet-500/20 ring-1 ring-violet-500/40" : "bg-panel-2 hover:bg-panel-3"
-              }`}
-            >
-              <div className="flex items-center gap-1">
-                {renameTarget?.kind === "set" && renameTarget.id === set.id ? (
-                  <input
-                    ref={renameInputRef}
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      e.stopPropagation();
-                      if (e.key === "Enter") void saveRename();
-                      else if (e.key === "Escape") cancelRename();
-                    }}
-                    onBlur={() => setRenameTarget(null)}
-                    aria-label="Renombrar set"
-                    className="w-full rounded border border-violet-500/60 bg-slate-900 px-1.5 py-0.5 text-xs font-medium text-white outline-none"
-                    placeholder="Nombre del set"
-                  />
-                ) : (
-                  <p className="min-w-0 flex-1 truncate text-xs font-medium text-slate-200">{set.name}</p>
-                )}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openMenu("set", set.id, e);
-                  }}
-                  aria-label="Opciones del set"
-                  title="Opciones del set"
-                  className={`rounded p-1 transition ${menu && menu.kind === "set" && menu.id === set.id ? "text-violet-300 opacity-100" : "text-slate-500 opacity-0 group-hover:opacity-100 hover:text-violet-300"}`}
-                >
-                  <MoreVertical size={13} />
-                </button>
-              </div>
-              <p className="text-[10px] text-slate-500">
-                {set.items.length} tracks · {Math.round(set.total_sec / 60)} min
-              </p>
-            </div>
-          ))}
-        </div>
-      </section>
+      <SetsSection
+        sets={sets}
+        activeSetId={activeSetId}
+        onSelectSet={onSelectSet}
+        setsOpen={setsOpen}
+        onToggleSetsOpen={() => setSetsOpen((o) => !o)}
+        renameTarget={renameTarget}
+        renameValue={renameValue}
+        onRenameValueChange={setRenameValue}
+        onSaveRename={() => void saveRename()}
+        onCancelRename={cancelRename}
+        renameInputRef={renameInputRef}
+        menu={menu}
+        onOpenMenu={openMenu}
+      />
 
       {/* Ajustes */}
-      <section className="mt-auto border-t border-slate-800 px-3 py-3">
-{/* Ajustes del Motor: misma UI que escritorio; en la demo web el motor
-        Python no existe y el clic muestra un aviso en lugar del modal. */}
-      <button
-        onClick={() => {
-          if (isWeb()) {
-            window.alert("Función solo disponible en la versión de Escritorio");
-            return;
-          }
-          onOpenSettings();
-        }}
-        className="mb-1.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-xs font-semibold text-slate-300 transition hover:bg-panel-2 hover:text-white"
-      >
-        <Settings size={14} /> Ajustes del Motor
-      </button>
-        {error && (
-          <p className="mt-2 flex items-center gap-1 rounded bg-red-500/10 px-2 py-1 text-[10px] text-red-400">
-            <Trash2 size={10} /> {error}
-          </p>
-        )}
-      </section>
+      <SettingsSection error={error} onOpenSettings={onOpenSettings} />
 
       {/* Menú contextual (renombrar / eliminar) */}
       {menu && (
-        <div
-          ref={menuRef}
-          className="fixed z-50 w-44 overflow-hidden rounded-lg border border-slate-700 bg-[#141a2b] py-1 shadow-2xl shadow-black/60"
-          style={{ left: menu.x, top: menu.y }}
-        >
-          <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
-            {menu.kind === "folder" ? "Carpeta" : "Set"}
-          </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              const target =
-                menu.kind === "folder"
-                  ? folders.find((f) => f.id === menu.id)
-                  : sets.find((s) => s.id === menu.id);
-              const kind = menu.kind;
-              const id = menu.id;
-              setMenu(null); // cierra el menú al elegir acción
-              if (target) openRename(kind, id, target.name);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-slate-200 transition hover:bg-violet-500/15 hover:text-violet-200"
-          >
-            <Pencil size={12} /> Renombrar
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              const target =
-                menu.kind === "folder"
-                  ? folders.find((f) => f.id === menu.id)
-                  : sets.find((s) => s.id === menu.id);
-              const kind = menu.kind;
-              const id = menu.id;
-              setMenu(null); // cierra el menú al elegir acción
-              if (target) requestDelete(kind, id, target.name);
-            }}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 transition hover:bg-red-500/15"
-          >
-            <Trash2 size={12} /> Eliminar
-          </button>
-        </div>
+        <ContextMenu
+          menu={menu}
+          folders={folders}
+          sets={sets}
+          menuRef={menuRef}
+          onClose={() => setMenu(null)}
+          onRename={openRename}
+          onDelete={requestDelete}
+        />
       )}
 
       {/* Diálogo sutil de confirmación de eliminación */}
       {deleteTarget && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-          onMouseDown={cancelDelete}
-        >
-          <div
-            className="w-80 rounded-xl border border-slate-700 bg-[#141a2b] p-4 shadow-2xl shadow-black/70"
-            onMouseDown={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-bold text-slate-100">
-              {deleteTarget.kind === "folder" ? "Quitar carpeta" : "Eliminar set"}
-            </h3>
-            <p className="mt-1.5 text-xs leading-relaxed text-slate-400">
-              {deleteTarget.kind === "folder"
-                ? `¿Quitar la carpeta "${deleteTarget.name}" y sus tracks de la biblioteca?`
-                : `¿Eliminar el set "${deleteTarget.name}"? Esta acción no se puede deshacer.`}
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  cancelDelete();
-                }}
-                className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-300 transition hover:bg-panel-2"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void confirmDelete();
-                }}
-                className="flex items-center gap-1.5 rounded-lg bg-red-500/90 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-red-500"
-              >
-                <Trash2 size={12} /> Eliminar
-              </button>
-            </div>
-          </div>
-        </div>
+        <DeleteConfirmDialog
+          target={deleteTarget}
+          onCancel={cancelDelete}
+          onConfirm={() => void confirmDelete()}
+        />
       )}
     </aside>
   );

@@ -61,6 +61,12 @@ class Track(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     genre: Mapped[str | None] = mapped_column(String(128), default=None)  # nuevo: género del archivo
 
+    # Datos DJ de la consola (BPM/beatgrid detectados por el motor de la consola
+    # y hot cues fijados por el usuario): persistencia de sesión a sesión.
+    dj_bpm: Mapped[float | None] = mapped_column(Float)
+    dj_beatgrid_offset: Mapped[float | None] = mapped_column(Float)
+    dj_hot_cues: Mapped[str | None] = mapped_column(Text)
+
     folder: Mapped[Folder | None] = relationship(back_populates="tracks")
 
 

@@ -23,10 +23,15 @@ KS_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 
+# Índice de pitch class (0-11) por nombre de nota canónica
+NOTE_PC = {name: idx for idx, name in enumerate(NOTE_NAMES)}
+
 # Alias: Ab == G#, Eb == D#, F# == Gb, C# == Db, Bb == A#
 _ALIASES = {
     "G#": "Ab", "D#": "Eb", "G♯": "Ab", "D♯": "Eb", "F♯": "F#", "C♯": "C#",
     "B♭": "Bb", "E♭": "Eb", "A♭": "Ab", "A#": "Bb", "Db": "C#", "Gb": "F#",
+    "D♭": "C#", "G♭": "F#", "A♯": "Bb", "E♯": "F", "B♯": "C", "C♭": "B",
+    "F♭": "E",
 }
 
 # Inverso: tonalidad -> código Camelot
@@ -84,15 +89,25 @@ def camelot_mode(code: str) -> str:
     return code[-1]
 
 
+def wheel_step(c_num: int, n_num: int) -> int:
+    """Paso circular firmado entre dos cuñas de la rueda (1..12).
+
+    +1 = subir una cuña, -1 = bajar, ±2 = Energy Boost/respaldo. Respeta el
+    borde de la rueda: 12 -> 1 es +1 (vecino) y 1 -> 12 es -1, nunca 11.
+    """
+    step = (n_num - c_num) % 12
+    return step if step <= 6 else step - 12
+
+
 def relation(current: str, nxt: str) -> tuple[str, str]:
     """Relación armónica entre dos códigos Camelot.
 
     Devuelve (relation_key, label_human):
       - "same":    XA -> XA / XB -> XB      (Perfect Match)
       - "mode":    XA <-> XB                (Cambio de modo)
-      - "neighbor": XA -> (X±1)A            (Vecino armónico)
-      - "boost":   XA -> (X+2)A             (Energy Boost)
-      - None      sin relación válida
+      - "neighbor": XA -> (X±1)A            (Vecino armónico, circular 12<->1)
+      - "boost":   XA -> (X+2)A             (Energy Boost, solo ascendente)
+      - ""        sin relación válida
     """
     cur = normalize_camelot(current)
     nxt = normalize_camelot(nxt)
@@ -108,11 +123,16 @@ def relation(current: str, nxt: str) -> tuple[str, str]:
     if c_num == n_num and c_mode != n_mode:
         return ("mode", "Cambio de Modo")
 
-    diff = abs(c_num - n_num)
-    if diff == 1 and c_mode == n_mode:
+    # Vecinos y boosts solo existen dentro de la misma cara de la rueda
+    # (menor↔menor o mayor↔mayor); cruzar de cara no es armónico jamás.
+    if c_mode != n_mode:
+        return ("", "")
+
+    step = wheel_step(c_num, n_num)
+    if step in (1, -1):
         return ("neighbor", f"{cur} ➔ {nxt} (Vecino)")
 
-    if c_mode == n_mode and (n_num - c_num) % 12 == 2:
+    if step == 2:
         return ("boost", f"{cur} ➔ {nxt} (+2 Energy Boost)")
 
     return ("", "")
@@ -121,16 +141,30 @@ def relation(current: str, nxt: str) -> tuple[str, str]:
 def is_compatible(current: str, nxt: str, radius: int = 1, allow_mode: bool = True) -> bool:
     """Indica si `nxt` es una transición armónica válida desde `current`.
 
-    Reglas (PRD §4): misma clave, cambio de modo, vecinos ±1 (radio configurable)
-    y Energy Boost +2.
+    Reglas (PRD §4): misma clave, cambio de modo (si `allow_mode`), vecinos
+    ±1 (radio configurable, circular 12<->1) y Energy Boost +2 ascendente.
+    Con radius=2 se aceptan además los vecinos de segundo grado (±2) como
+    cruce de respaldo.
     """
-    relation_key, _ = relation(current, nxt)
-    if relation_key in ("same", "boost"):
+    cur = normalize_camelot(current)
+    nxt = normalize_camelot(nxt)
+    if not cur or not nxt:
+        return False
+
+    if cur == nxt:
         return True
-    if relation_key == "mode":
-        return allow_mode
-    if relation_key == "neighbor":
-        c_num = camelot_number(current)
-        n_num = camelot_number(nxt)
-        return abs(c_num - n_num) <= radius
-    return False
+
+    c_num, c_mode = camelot_number(cur), camelot_mode(cur)
+    n_num, n_mode = camelot_number(nxt), camelot_mode(nxt)
+
+    # Distinta cara de la rueda: solo el cambio de modo (mismo número) es
+    # armónico; cualquier cruce menor<->mayor con números distintos no lo es.
+    if c_mode != n_mode:
+        return c_num == n_num and allow_mode
+
+    step = wheel_step(c_num, n_num)
+    if abs(step) <= radius:
+        return True
+    # Energy Boost +2: siempre válido en ascendente (sube intensidad) y solo
+    # como respaldo en descendente cuando el radio lo permite.
+    return step == 2 or (radius >= 2 and step == -2)

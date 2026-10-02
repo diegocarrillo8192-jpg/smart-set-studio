@@ -115,6 +115,29 @@ class TrackKeyUpdate(BaseModel):
     key: str = Field(min_length=1, max_length=32)
 
 
+class DjCue(BaseModel):
+    """Hot cue de la consola DJ (posición en compases/beats de canción)."""
+
+    index: int = Field(ge=0, le=7)
+    beat: float
+
+
+class DjDataUpdate(BaseModel):
+    """Persistencia de los datos DJ de un track (BPM/beatgrid + hot cues)."""
+
+    bpm: float | None = None
+    beatgrid_offset: float | None = None
+    hot_cues: list[DjCue] = Field(default_factory=list)
+
+
+class DjDataOut(BaseModel):
+    """Datos DJ persistidos de un track (lectura)."""
+
+    bpm: float | None = None
+    beatgrid_offset: float | None = None
+    hot_cues: list[DjCue] = Field(default_factory=list)
+
+
 class ImportTracksRequest(BaseModel):
     """Importación individual de archivos de audio (rutas locales absolutas)."""
 

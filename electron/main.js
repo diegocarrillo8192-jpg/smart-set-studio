@@ -7,13 +7,57 @@ const crypto = require("crypto");
 
 const BACKEND_PORT = 8765;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
-const DEV_URL = "http://localhost:5173";
+const DEV_URL = "http://127.0.0.1:5173";
 const isDev = !app.isPackaged;
 
 // Secreto de bucle local: la ventana (renderer) y el backend lo comparten para
 // autenticar cada petición. Se regenera en cada arranque y se pasa al backend
 // por entorno (SMART_SET_TOKEN) y al renderer vía preload (additionalArguments).
 const SSA_TOKEN = crypto.randomBytes(32).toString("hex");
+
+// ── Estabilidad GPU / renderer ─────────────────────────────────────────────
+// Cálculo de oclusión nativo de Windows: causa conocida de cuelgues de la UI
+// en Electron (la ventana queda congelada tras minimizar/restaurar).
+app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
+// Límite de memoria de los shaders: evita reinicios completos del proceso GPU
+// por picos de carga en canvas 2D/WebGL.
+app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+
+// Re-lanzamiento de emergencia: si una sesión anterior detectó un driver de
+// GPU inestable (2 caídas reales), la app arranca con la GPU desactivada y
+// render por software: estabilidad total, sin pantallazos azules repetidos.
+// (Los canvas 2D de la consola mantienen 60 FPS también en software.)
+if (process.argv.includes("--disable-gpu")) {
+  app.commandLine.appendSwitch("disable-gpu");
+  app.disableHardwareAcceleration();
+}
+
+// Contador de caídas del proceso GPU.
+let gpuCrashes = 0;
+
+app.on("child-process-gone", (_event, details) => {
+  // Solo interesan las caídas del proceso GPU (pantallazo azul del driver).
+  // "clean-exit" = cierre normal (quit), no es una caída.
+  if (details.type !== "GPU" || details.reason === "clean-exit") return;
+  gpuCrashes += 1;
+  console.error(
+    `[smart-set] Proceso GPU terminó (${details.reason}) — caída ${gpuCrashes}. Recuperando…`
+  );
+  if (gpuCrashes >= 2 && !process.argv.includes("--disable-gpu")) {
+    // Driver de GPU inestable: relanzar SIN aceleración por hardware y salir.
+    // Así se evita el bucle de pantallazos azules (cada recarga volvería a
+    // chocar con el mismo driver).
+    console.error("[smart-set] GPU inestable: relanzando con render por software");
+    app.relaunch({ args: [...process.argv.slice(1), "--disable-gpu"] });
+    app.quit();
+    return;
+  }
+  // Primera caída: recargar la ventana resucita el proceso GPU (y sus
+  // contextos) sin matar la app: el renderer se re-monta sobre el motor.
+  if (mainWindow && !mainWindow.isDestroyed() && !quitting) {
+    mainWindow.webContents.reload();
+  }
+});
 
 let backendProc = null;
 let mainWindow = null;
@@ -315,6 +359,16 @@ function createWindow() {
     title: "AI Smart Set Architect",
     show: true,
     autoHideMenuBar: true,
+    // BRANDING ÚNICO: la barra de título nativa de Windows duplicaba el
+    // logo/título que ya pinta la cabecera de la consola (MixiTopBar). Se
+    // oculta el título del sistema y se mantienen solo los controles de
+    // ventana como overlay, alineados con el fondo de la topbar (#13141a).
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#13141a",
+      symbolColor: "#94a3b8",
+      height: 40,
+    },
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -332,6 +386,28 @@ function createWindow() {
   mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
     if (level >= 2) {
       console.log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+    }
+  });
+
+  // RECUPERACIÓN DEL RENDERER: si el proceso de render cae (GPU driver, OOM,
+  // bug de Chromium), se recarga la ventana en vez de dejar la app en blanco
+  // o muerta. "clean-exit" es un cierre voluntario (quit) → no se recarga.
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    if (details.reason === "clean-exit" || quitting) return;
+    console.error(`[smart-set] Renderer terminó (${details.reason}) — recargando ventana`);
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !quitting) {
+        mainWindow.webContents.reload();
+      }
+    }, 400);
+  });
+
+  // Detección de cuelgue (main thread del renderer > 5s sin responder):
+  // se registra y se fuerza una recarga para no dejar la consola congelada.
+  mainWindow.webContents.on("unresponsive", () => {
+    console.error("[smart-set] Renderer no responde — forzando recarga");
+    if (mainWindow && !mainWindow.isDestroyed() && !quitting) {
+      mainWindow.webContents.reload();
     }
   });
 

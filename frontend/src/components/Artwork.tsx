@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Track } from "../types";
 import { cachedTrackArtwork, getTrackArtwork, subscribeArtwork } from "../api";
 import { hexRgba } from "../lib/color";
 
 /** Logo oficial de la marca como fallback limpio cuando el track no tiene
  *  portada (ID3 sin APIC) o mientras la extracción aún carga. */
-const LOGO_URL = "logo.png";
+const LOGO_URL = `${import.meta.env.BASE_URL}logo.png`;
 
 interface Props {
   track: Track | null;
@@ -45,8 +45,7 @@ function useArtworkDataUrl(track: Track | null): string | null | undefined {
       cancelled = true;
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [track?.id]);
+  }, [track]);
   return art;
 }
 
@@ -59,19 +58,22 @@ function useArtworkDataUrl(track: Track | null): string | null | undefined {
  */
 export default function Artwork({ track, accent, size = 56, remountKey }: Props) {
   const art = useArtworkDataUrl(track);
+  // Estilos del marco derivados solo del acento: memoizados para no recrear
+  // los objetos (y las cadenas de gradiente) en cada render del deck.
+  const frameStyle = useMemo(
+    () => ({
+      background: `linear-gradient(150deg, ${hexRgba(accent, 0.75)} 0%, ${hexRgba(
+        accent,
+        0.15
+      )} 45%, ${hexRgba(accent, 0.55)} 100%)`,
+      boxShadow: `0 0 18px ${hexRgba(accent, 0.28)}`,
+    }),
+    [accent]
+  );
 
   return (
     <div className="shrink-0 animate-artwork-in" style={{ width: size, height: size }}>
-      <div
-        className="h-full w-full rounded-[10px] p-px"
-        style={{
-          background: `linear-gradient(150deg, ${hexRgba(accent, 0.75)} 0%, ${hexRgba(
-            accent,
-            0.15
-          )} 45%, ${hexRgba(accent, 0.55)} 100%)`,
-          boxShadow: `0 0 18px ${hexRgba(accent, 0.28)}`,
-        }}
-      >
+      <div className="h-full w-full rounded-[10px] p-px" style={frameStyle}>
         <div
           key={remountKey}
           className="animate-fade-in relative h-full w-full overflow-hidden rounded-[9px] bg-slate-950"
@@ -122,8 +124,7 @@ function useInView(ref: React.RefObject<HTMLElement | null>, rootMargin = "250px
     );
     obs.observe(el);
     return () => obs.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ref, rootMargin]);
   return inView;
 }
 

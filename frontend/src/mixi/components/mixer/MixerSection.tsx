@@ -1,0 +1,679 @@
+﻿/*
+ * Copyright (c) 2026 Fabrizio Salmi. All rights reserved.
+ *
+ * This file is part of MIXI.
+ * MIXI is licensed under the PolyForm Noncommercial License 1.0.0.
+ * You may not use this file for commercial purposes without explicit permission.
+ * For commercial licensing, contact: fabrizio.salmi@gmail.com
+ */
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Mixi â€“ Mixer Section (compact, fits viewport)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+import React, { useCallback, useEffect, useRef, useState, type FC } from 'react';
+import { useMixiStore } from '../../store/mixiStore';
+import { MasterVuMeter } from './MasterVuMeter';
+import { MasterLedScreen } from './MasterLedScreen';
+import { PhaseMeter } from './PhaseMeter';
+import { VuMeter } from './VuMeter';
+import { Fader } from '../controls/Fader';
+import { Knob } from '../controls/Knob';
+
+import { COLOR_DECK_A, COLOR_DECK_B, COLOR_HP } from '../../theme';
+import { isGhost } from '../../ai/ghostFields';
+import { useSettingsStore, EQ_RANGE_PRESETS } from '../../store/settingsStore';
+import type { DeckId, EqBand } from '../../types';
+const CYAN = COLOR_DECK_A;
+const ORANGE = COLOR_DECK_B;
+
+// â”€â”€ Hook: deck channel controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+function useDeckControls(deckId: DeckId) {
+  const gain = useMixiStore((s) => s.decks[deckId].gain);
+  const eq = useMixiStore((s) => s.decks[deckId].eq);
+  const colorFx = useMixiStore((s) => s.decks[deckId].colorFx);
+  const volume = useMixiStore((s) => s.decks[deckId].volume);
+  const eqPreset = useSettingsStore((s) => s.eqRange);
+  const eqRange = EQ_RANGE_PRESETS[eqPreset];
+  const setGain = useMixiStore((s) => s.setDeckGain);
+  const setEq = useMixiStore((s) => s.setDeckEq);
+  const setColorFx = useMixiStore((s) => s.setDeckColorFx);
+  const setVolume = useMixiStore((s) => s.setDeckVolume);
+
+  const [kills, setKills] = useState<Record<EqBand, number | null>>({ high: null, mid: null, low: null });
+
+  const onGainChange = useCallback((val: number) => setGain(deckId, val), [deckId, setGain]);
+  const killsRef = useRef(kills);
+  useEffect(() => { killsRef.current = kills; }, [kills]);
+  const onEqChange = useCallback(
+    (band: EqBand) => (val: number) => {
+      if (killsRef.current[band] !== null) setKills((k) => ({ ...k, [band]: null }));
+      setEq(deckId, band, val);
+    },
+    [deckId, setEq],
+  );
+  const onKill = useCallback(
+    (band: EqBand) => () => {
+      const isKilled = kills[band] !== null;
+      if (isKilled) {
+        setEq(deckId, band, kills[band]!);
+        setKills((k) => ({ ...k, [band]: null }));
+      } else {
+        setKills((k) => ({ ...k, [band]: eq[band] }));
+        setEq(deckId, band, eqRange.min);
+      }
+    },
+    [deckId, eq, eqRange.min, kills, setEq],
+  );
+  const onColorFxChange = useCallback((val: number) => setColorFx(deckId, val), [deckId, setColorFx]);
+  const onVolumeChange = useCallback((val: number) => setVolume(deckId, val), [deckId, setVolume]);
+
+  return { gain, eq, colorFx, volume, eqRange, kills, onGainChange, onEqChange, onKill, onColorFxChange, onVolumeChange };
+}
+
+// â”€â”€ Volume LCD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const VolumeLcd: FC<{ value: number; color: string }> = ({ value, color }) => {
+  const db = value > 0.001 ? Math.round(20 * Math.log10(value)) : -60;
+  const label = db <= -60 ? '-âˆž' : `${db}`;
+  return (
+    <span
+      className="text-[9px] font-mono font-medium rounded px-1.5 py-0.5"
+      style={{
+        background: 'var(--srf-base)',
+        border: `1px solid ${color}18`,
+        color,
+        textShadow: `0 0 8px ${color}55`,
+        boxShadow: `inset 0 1px 3px rgba(0,0,0,0.6), 0 0 4px ${color}11`,
+        minWidth: 32,
+        textAlign: 'center' as const,
+      }}
+    >
+      {label}
+    </span>
+  );
+};
+
+// ── Channel Fader (auto-sized to the available cell height) ──
+// Measures its grid cell so the fader track always fits completely,
+// keeping the cap 100% visible at both 0% and 100% regardless of the
+// surrounding font/height changes.
+
+const MixerChannelFader: FC<{
+  deckId: DeckId;
+  color: string;
+  value: number;
+  onChange: (v: number) => void;
+  vuSide: 'left' | 'right';
+  ghost: boolean;
+  midiAction?: any;
+}> = ({ deckId, color, value, onChange, vuSide, ghost, midiAction }) => {
+  const cellRef = useRef<HTMLDivElement>(null);
+  const [faderLen, setFaderLen] = useState(200);
+
+  useEffect(() => {
+    const el = cellRef.current;
+    if (!el) return;
+    const update = () => {
+      // Reserva mínima para el LCD de dB + separación inferior. La cuchilla NO
+      // se ancla abajo: arranca en la parte superior de su celda, justo debajo
+      // de la sección de perillas EQ/Gain, cerrando cualquier hueco intermedio.
+      const BOTTOM_RESERVE = 26;
+      const available = el.clientHeight;
+      const maxLen = Math.max(0, available - BOTTOM_RESERVE);
+      setFaderLen(Math.max(48, Math.min(720, maxLen)));
+    };
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={cellRef}
+      className="flex h-full w-full flex-col items-center gap-1.5"
+      style={{ overflow: 'hidden', paddingTop: 2, paddingBottom: 4 }}
+    >
+      <div className="flex items-end gap-1" style={{ overflow: 'visible' }}>
+        {vuSide === 'left' && <VuMeter deckId={deckId} height={Math.max(56, faderLen - 12)} />}
+        <Fader value={value} min={0} max={1} onChange={onChange} orientation="vertical" length={faderLen} capSize={[62, 28]} color={color} ghost={ghost} midiAction={midiAction} />
+        {vuSide === 'right' && <VuMeter deckId={deckId} height={Math.max(56, faderLen - 12)} />}
+      </div>
+      <VolumeLcd value={value} color={color} />
+    </div>
+  );
+};
+
+// â”€â”€ EQ Value Display â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const EqValue: FC<{ value: number; color: string; visible: boolean }> = ({ value, color, visible }) => (
+  <span
+    className="text-[7px] font-mono font-medium rounded px-1 py-0.5 transition-opacity duration-150"
+    style={{
+      background: 'var(--srf-base)',
+      border: `1px solid ${color}12`,
+      color,
+      textShadow: `0 0 4px ${color}33`,
+      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.5)',
+      minWidth: 24,
+      textAlign: 'center' as const,
+      opacity: visible ? 1 : 0,
+    }}
+  >
+    {Math.round(value)}
+  </span>
+);
+
+// â”€â”€ Kill Button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const KillBtn: FC<{ killed: boolean; onKill: () => void }> = ({ killed, onKill }) => (
+  <button
+    type="button"
+    onClick={onKill}
+    className="flex items-center justify-center rounded transition duration-150 active:scale-90"
+    style={{
+      width: 26,
+      height: 26,
+      background: killed ? 'rgba(220,38,38,0.2)' : 'rgba(255,255,255,0.04)',
+      border: `1.5px solid ${killed ? 'var(--clr-kill)' : 'var(--srf-light)'}`,
+      boxShadow: killed
+        ? '0 0 10px rgba(220,38,38,0.35), inset 0 0 6px rgba(220,38,38,0.15)'
+        : 'inset 0 2px 4px rgba(0,0,0,0.7), inset 0 -1px 0 rgba(255,255,255,0.04)',
+      borderRadius: 5,
+    }}
+  >
+    <span
+      className="text-[9px] font-mono font-medium tracking-wider"
+      style={{
+        color: killed ? 'var(--clr-kill)' : 'var(--txt-muted)',
+        textShadow: killed ? '0 0 6px rgba(220,38,38,0.5)' : 'none',
+      }}
+    >
+      K
+    </span>
+  </button>
+);
+
+// â”€â”€ EQ Cell (mini 3-col grid: value/knob/kill or kill/knob/value) â”€â”€
+
+const EqCellA: FC<{
+  value: number; min: number; max: number; onChange: (v: number) => void;
+  color: string; ghost: boolean; killed: boolean; onKill: () => void; midiAction?: any;
+}> = ({ value, min, max, onChange, color, ghost, killed, onKill, midiAction }) => {
+  const [active, setActive] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(null);
+  useEffect(() => () => { clearTimeout(timer.current!); }, []);
+  const show = () => { clearTimeout(timer.current!); setActive(true); };
+  const hide = () => { timer.current = setTimeout(() => setActive(false), 600); };
+  return (
+    <div className="flex items-center gap-1">
+      <EqValue value={value} color={color} visible={active} />
+      <Knob value={value} min={min} max={max} center={0} onChange={onChange} bipolar color={color} scale={0.8} ghost={ghost} onDragStart={show} onDragEnd={hide} midiAction={midiAction} />
+      <KillBtn killed={killed} onKill={onKill} />
+    </div>
+  );
+};
+
+const EqCellB: FC<{
+  value: number; min: number; max: number; onChange: (v: number) => void;
+  color: string; ghost: boolean; killed: boolean; onKill: () => void; midiAction?: any;
+}> = ({ value, min, max, onChange, color, ghost, killed, onKill, midiAction }) => {
+  const [active, setActive] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(null);
+  useEffect(() => () => { clearTimeout(timer.current!); }, []);
+  const show = () => { clearTimeout(timer.current!); setActive(true); };
+  const hide = () => { timer.current = setTimeout(() => setActive(false), 600); };
+  return (
+    <div className="flex items-center gap-1">
+      <KillBtn killed={killed} onKill={onKill} />
+      <Knob value={value} min={min} max={max} center={0} onChange={onChange} bipolar color={color} scale={0.8} ghost={ghost} onDragStart={show} onDragEnd={hide} midiAction={midiAction} />
+      <EqValue value={value} color={color} visible={active} />
+    </div>
+  );
+};
+
+// â”€â”€ Gain Cell (knob always centered; value badge floats absolutely) â”€â”€
+
+const gainBadge = (color: string, active: boolean, side: 'left' | 'right'): React.CSSProperties => ({
+  position: 'absolute',
+  [side === 'left' ? 'right' : 'left']: 'calc(100% + 4px)',
+  background: 'var(--srf-base)',
+  border: `1px solid ${color}12`,
+  color,
+  textShadow: `0 0 4px ${color}33`,
+  boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.5)',
+  minWidth: 24,
+  textAlign: 'center',
+  borderRadius: 4,
+  padding: '2px 4px',
+  fontSize: 7,
+  fontFamily: 'monospace',
+  fontWeight: 500,
+  opacity: active ? 1 : 0,
+  transition: 'opacity 150ms',
+  pointerEvents: 'none',
+  whiteSpace: 'nowrap',
+});
+
+const GainCellA: FC<{ value: number; onChange: (v: number) => void; color: string; ghost: boolean; midiAction?: any }> = ({ value, onChange, color, ghost, midiAction }) => {
+  const [active, setActive] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(null);
+  useEffect(() => () => { clearTimeout(timer.current!); }, []);
+  const show = () => { clearTimeout(timer.current!); setActive(true); };
+  const hide = () => { timer.current = setTimeout(() => setActive(false), 600); };
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+      <span style={gainBadge(color, active, 'left')}>{Math.round(value)}</span>
+      <Knob value={value} min={-12} max={12} center={0} onChange={onChange} bipolar color={color} scale={0.8} ghost={ghost} onDragStart={show} onDragEnd={hide} midiAction={midiAction} />
+    </div>
+  );
+};
+
+const GainCellB: FC<{ value: number; onChange: (v: number) => void; color: string; ghost: boolean; midiAction?: any }> = ({ value, onChange, color, ghost, midiAction }) => {
+  const [active, setActive] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(null);
+  useEffect(() => () => { clearTimeout(timer.current!); }, []);
+  const show = () => { clearTimeout(timer.current!); setActive(true); };
+  const hide = () => { timer.current = setTimeout(() => setActive(false), 600); };
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+      <Knob value={value} min={-12} max={12} center={0} onChange={onChange} bipolar color={color} scale={0.8} ghost={ghost} onDragStart={show} onDragEnd={hide} midiAction={midiAction} />
+      <span style={gainBadge(color, active, 'right')}>{Math.round(value)}</span>
+    </div>
+  );
+};
+
+// â”€â”€ Mixer row icons (rounded, tiny) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const iconBox = {
+  display: 'flex',
+  alignItems: 'center' as const,
+  justifyContent: 'center' as const,
+  width: 36,
+  height: 24,
+};
+
+const MixerLabel: FC<{ text: string; title?: string }> = ({ text, title }) => (
+  <div style={iconBox} title={title ?? text}>
+    <span className="text-[9px] font-medium tracking-widest" style={{ color: 'var(--txt-bright)' }}>
+      {text}
+    </span>
+  </div>
+);
+
+const IcGain: FC = () => <MixerLabel text="GAIN" />;
+const IcHi: FC = () => <MixerLabel text="HI" title="High EQ" />;
+const IcMid: FC = () => <MixerLabel text="MID" title="Mid EQ" />;
+const IcLow: FC = () => <MixerLabel text="LOW" title="Low EQ" />;
+
+const IcColor: FC = () => (
+  <div style={iconBox} title="FILTER (LPF/HPF)">
+    <span
+      className="text-[6px] font-medium tracking-widest"
+      style={{ color: 'var(--txt-secondary)' }}
+    >
+      FLT
+    </span>
+  </div>
+);
+
+// â”€â”€ HUD Screen (tabbed: Phase Meter / Vectorscope) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+type HudPage = 'phase' | 'scope';
+
+const HUD_TABS: { id: HudPage; label: string }[] = [
+  { id: 'phase', label: 'PHASE' },
+  { id: 'scope', label: 'SCOPE' },
+];
+
+const MixerHud: FC = () => {
+  const [page, setPage] = useState<HudPage>('phase');
+
+  return (
+    <div
+      className="mixi-led-screen w-full flex flex-col shrink-0"
+      style={{
+        borderRadius: 8,
+        background: 'var(--srf-deep)',
+        border: '1px solid var(--srf-mid)',
+        boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.9), 0 0 1px rgba(0,0,0,0.5)',
+        overflow: 'hidden',
+      }}
+    >
+      {/* Tab bar */}
+      <div className="flex items-center justify-center gap-0 shrink-0" style={{ height: 12, borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+        {HUD_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setPage(tab.id)}
+            className="flex-1 text-[7px] font-mono font-medium uppercase tracking-widest transition"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              borderBottom: page === tab.id ? '1px solid rgba(255,255,255,0.3)' : '1px solid transparent',
+              color: page === tab.id ? 'var(--txt-secondary)' : 'var(--txt-dim)',
+              padding: '2px 4px',
+              cursor: 'pointer',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Page content */}
+      <div className="flex items-center justify-center" style={{ height: 40 }}>
+        {page === 'phase' ? <PhaseMeter /> : <MasterLedScreen />}
+      </div>
+    </div>
+  );
+};
+
+// â”€â”€ Main Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export const MixerSection: FC = () => {
+  const crossfader = useMixiStore((s) => s.crossfader);
+  const setCrossfader = useMixiStore((s) => s.setCrossfader);
+  const onCrossfaderChange = useCallback((val: number) => setCrossfader(val), [setCrossfader]);
+
+  const a = useDeckControls('A');
+  const b = useDeckControls('B');
+
+  return (
+    <div className="flex flex-col items-center gap-1.5 mixi-mixer-glow px-2 py-1 h-full overflow-hidden">
+      {/* â”€â”€ HUD Screen (top of mixer column) â€” tabbed pages â”€â”€â”€â”€ */}
+      <MixerHud />
+
+      {/* â”€â”€ Channel strip panel â€” 3Ã—9 CSS Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <div
+        className="w-full flex-1 min-h-0 rounded-lg overflow-hidden"
+        style={{
+          background: 'var(--mixer-bg, #0f1420)',
+          border: '1px solid rgba(148,163,184,0.12)',
+          boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div
+          className="w-full h-full"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr auto 1fr',
+            gridTemplateRows: 'auto auto 3px auto 3px auto 3px auto 3px auto 2px minmax(0, 1fr)',
+            justifyItems: 'center',
+            alignItems: 'center',
+            padding: '2px 10px 2px',
+            gap: '0px',
+          }}
+        >
+          {/* â”€â”€ Row 1: Deck labels â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <span style={{ gridColumn: 1, gridRow: 1 }} className="text-[10px] font-medium tracking-widest">
+            <span style={{ color: CYAN }}>A</span>
+          </span>
+          <div style={{ gridColumn: 2, gridRow: 1 }} />
+          <span style={{ gridColumn: 3, gridRow: 1 }} className="text-[10px] font-medium tracking-widest">
+            <span style={{ color: ORANGE }}>B</span>
+          </span>
+
+          {/* â”€â”€ Row 2: GAIN (with band background) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <div className="mixi-eq-band" style={{ gridColumn: '1 / -1', gridRow: 2 }} />
+          <div style={{ gridColumn: 1, gridRow: 2, zIndex: 1 }}>
+            <GainCellA value={a.gain} onChange={a.onGainChange} color={CYAN} ghost={isGhost('A.gain')} midiAction={{ type: 'DECK_GAIN', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 2, zIndex: 1 }}><IcGain /></div>
+          <div style={{ gridColumn: 3, gridRow: 2, zIndex: 1 }}>
+            <GainCellB value={b.gain} onChange={b.onGainChange} color={ORANGE} ghost={isGhost('B.gain')} midiAction={{ type: 'DECK_GAIN', deck: 'B' }} />
+          </div>
+
+          {/* â”€â”€ Row 4: HI (with EQ band background) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <div className="mixi-eq-band" style={{ gridColumn: '1 / -1', gridRow: 4 }} />
+          <div style={{ gridColumn: 1, gridRow: 4, zIndex: 1 }}>
+            <EqCellA value={a.eq.high} min={a.eqRange.min} max={a.eqRange.max} onChange={a.onEqChange('high')} color={CYAN} ghost={isGhost('A.eq.high')} killed={a.kills.high !== null} onKill={a.onKill('high')} midiAction={{ type: 'DECK_EQ_HIGH', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 4, zIndex: 1 }}><IcHi /></div>
+          <div style={{ gridColumn: 3, gridRow: 4, zIndex: 1 }}>
+            <EqCellB value={b.eq.high} min={b.eqRange.min} max={b.eqRange.max} onChange={b.onEqChange('high')} color={ORANGE} ghost={isGhost('B.eq.high')} killed={b.kills.high !== null} onKill={b.onKill('high')} midiAction={{ type: 'DECK_EQ_HIGH', deck: 'B' }} />
+          </div>
+
+          {/* â”€â”€ Row 6: MID (with EQ band background) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <div className="mixi-eq-band" style={{ gridColumn: '1 / -1', gridRow: 6 }} />
+          <div style={{ gridColumn: 1, gridRow: 6, zIndex: 1 }}>
+            <EqCellA value={a.eq.mid} min={a.eqRange.min} max={a.eqRange.max} onChange={a.onEqChange('mid')} color={CYAN} ghost={isGhost('A.eq.mid')} killed={a.kills.mid !== null} onKill={a.onKill('mid')} midiAction={{ type: 'DECK_EQ_MID', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 6, zIndex: 1 }}><IcMid /></div>
+          <div style={{ gridColumn: 3, gridRow: 6, zIndex: 1 }}>
+            <EqCellB value={b.eq.mid} min={b.eqRange.min} max={b.eqRange.max} onChange={b.onEqChange('mid')} color={ORANGE} ghost={isGhost('B.eq.mid')} killed={b.kills.mid !== null} onKill={b.onKill('mid')} midiAction={{ type: 'DECK_EQ_MID', deck: 'B' }} />
+          </div>
+
+          {/* â”€â”€ Row 8: LOW (with EQ band background) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <div className="mixi-eq-band" style={{ gridColumn: '1 / -1', gridRow: 8 }} />
+          <div style={{ gridColumn: 1, gridRow: 8, zIndex: 1 }}>
+            <EqCellA value={a.eq.low} min={a.eqRange.min} max={a.eqRange.max} onChange={a.onEqChange('low')} color={CYAN} ghost={isGhost('A.eq.low')} killed={a.kills.low !== null} onKill={a.onKill('low')} midiAction={{ type: 'DECK_EQ_LOW', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 8, zIndex: 1 }}><IcLow /></div>
+          <div style={{ gridColumn: 3, gridRow: 8, zIndex: 1 }}>
+            <EqCellB value={b.eq.low} min={b.eqRange.min} max={b.eqRange.max} onChange={b.onEqChange('low')} color={ORANGE} ghost={isGhost('B.eq.low')} killed={b.kills.low !== null} onKill={b.onKill('low')} midiAction={{ type: 'DECK_EQ_LOW', deck: 'B' }} />
+          </div>
+
+          {/* â”€â”€ Row 10: COLOR (with EQ band background) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+          <div className="mixi-eq-band" style={{ gridColumn: '1 / -1', gridRow: 10 }} />
+          <div style={{ gridColumn: 1, gridRow: 10, zIndex: 1 }}>
+            <Knob value={a.colorFx} min={-1} max={1} center={0} onChange={a.onColorFxChange} bipolar color={CYAN} scale={0.8} ghost={isGhost('A.colorFx')} midiAction={{ type: 'DECK_FILTER', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 10, zIndex: 1 }}><IcColor /></div>
+          <div style={{ gridColumn: 3, gridRow: 10, zIndex: 1 }}>
+            <Knob value={b.colorFx} min={-1} max={1} center={0} onChange={b.onColorFxChange} bipolar color={ORANGE} scale={0.8} ghost={isGhost('B.colorFx')} midiAction={{ type: 'DECK_FILTER', deck: 'B' }} />
+          </div>
+
+          {/* ── Row 12: Faders + VU Meters (auto-sized, fully visible) ── */}
+          <div style={{ gridColumn: 1, gridRow: 12, alignSelf: 'stretch', height: '100%' }}>
+            <MixerChannelFader deckId="A" color={CYAN} value={a.volume} onChange={a.onVolumeChange} vuSide="left" ghost={isGhost('A.volume')} midiAction={{ type: 'DECK_VOL', deck: 'A' }} />
+          </div>
+          <div style={{ gridColumn: 2, gridRow: 12, alignSelf: 'stretch', height: '100%' }} className="flex items-end justify-center">
+            <MasterVuMeter />
+          </div>
+          <div style={{ gridColumn: 3, gridRow: 12, alignSelf: 'stretch', height: '100%' }}>
+            <MixerChannelFader deckId="B" color={ORANGE} value={b.volume} onChange={b.onVolumeChange} vuSide="right" ghost={isGhost('B.volume')} midiAction={{ type: 'DECK_VOL', deck: 'B' }} />
+          </div>
+        </div>
+      </div>
+
+      {/* â”€â”€ HP / Master EQ (toggled, saves vertical space) â”€â”€â”€â”€ */}
+      {/* Extra top margin keeps the CUE/headphone buttons clear of the
+          fader blade's $0$ position at every point of its travel. */}
+      <div className="w-full mt-1">
+        <HpMasterStrip />
+      </div>
+
+      {/* Crossfader — extra bottom padding so its cap never gets clipped */}
+      <div className="mixi-crossfader-area w-full flex flex-col items-center gap-0 rounded-md bg-zinc-900/50 px-2 pt-1 pb-2 border border-zinc-800/40 mt-0.5">
+        <Fader value={crossfader} min={0} max={1} onChange={onCrossfaderChange} orientation="horizontal" length={240} color="#fff" ghost={isGhost('crossfader')} capSize={[40, 14]} midiAction={{ type: 'CROSSFADER' }} />
+        <div className="flex w-full items-center justify-between px-1 mt-0.5">
+          <span className="text-[12px] font-medium" style={{ color: CYAN }}>A</span>
+          <span className="text-[12px] font-medium" style={{ color: ORANGE }}>B</span>
+        </div>
+      </div>
+
+    </div>
+  );
+};
+
+// â”€â”€ HP / Master EQ â€” unified strip with toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+type StripPage = 'hp' | 'meq';
+const COLOR_MST = '#a855f7';
+
+const HpMasterStrip: FC = () => {
+  const [page, setPage] = useState<StripPage>('hp');
+
+  // Headphone state
+  const cueA = useMixiStore((s) => s.decks.A.cueActive);
+  const cueB = useMixiStore((s) => s.decks.B.cueActive);
+  const toggleCue = useMixiStore((s) => s.toggleCue);
+  const hpMix = useMixiStore((s) => s.headphones.mix);
+  const hpLevel = useMixiStore((s) => s.headphones.level);
+  const splitMode = useMixiStore((s) => s.headphones.splitMode);
+  const setHpMix = useMixiStore((s) => s.setHeadphoneMix);
+  const setHpLevel = useMixiStore((s) => s.setHeadphoneLevel);
+  const toggleSplit = useMixiStore((s) => s.toggleSplitMode);
+
+  // Master EQ state
+  const eqLow = useMixiStore((s) => s.master.eq.low);
+  const eqMid = useMixiStore((s) => s.master.eq.mid);
+  const eqHigh = useMixiStore((s) => s.master.eq.high);
+  const setMasterEq = useMixiStore((s) => s.setMasterEq);
+
+  const togglePage = useCallback(() => setPage((p) => p === 'hp' ? 'meq' : 'hp'), []);
+  const railColor = page === 'hp' ? COLOR_HP : COLOR_MST;
+
+  return (
+    <div className="w-full flex items-stretch rounded-md bg-zinc-900/50 border border-zinc-800/40 overflow-hidden">
+      {/* Left rail toggle */}
+      <button
+        type="button"
+        onClick={togglePage}
+        className="shrink-0 transition active:brightness-125"
+        style={{
+          width: 5,
+          background: `linear-gradient(180deg, ${railColor}44, ${railColor}cc, ${railColor}44)`,
+          border: 'none',
+          cursor: 'pointer',
+          borderRadius: '6px 0 0 6px',
+        }}
+        title={page === 'hp' ? 'Switch to Master EQ' : 'Switch to Headphones'}
+      />
+
+      {/* Content */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Label bar â€” pinned to top */}
+        <div className="flex items-center justify-around shrink-0" style={{ height: 10, background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+          {page === 'hp' ? (
+            <>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${CYAN}99` }}>CUE A</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_HP}88` }}>MIX</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_HP}88` }}>SPLIT</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_HP}88` }}>VOL</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${ORANGE}99` }}>CUE B</span>
+            </>
+          ) : (
+            <>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_MST}88` }}>HI</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_MST}88` }}>MID</span>
+              <span className="flex-1 text-center text-[6px] font-medium tracking-widest uppercase" style={{ color: `${COLOR_MST}88` }}>LO</span>
+            </>
+          )}
+        </div>
+
+        {/* Controls row — extra top padding pushes the CUE buttons and the
+            headphone volume knob down, away from the faders above. */}
+        <div className="flex-1 flex items-center justify-around px-2 pt-1 pb-0.5 gap-1">
+          {page === 'hp' ? (
+            <>
+              <StripBtn active={cueA} color={CYAN} onClick={() => toggleCue('A')} icon="cue" />
+              <div className="flex-1 flex justify-center [&_span]:!hidden">
+                <Knob value={hpMix} min={0} max={1} onChange={setHpMix} color={COLOR_HP} scale={0.5} />
+              </div>
+              <StripBtn active={splitMode} color={COLOR_HP} onClick={toggleSplit} icon="split" />
+              <div className="flex-1 flex justify-center [&_span]:!hidden">
+                <Knob value={hpLevel} min={0} max={1} onChange={setHpLevel} color={COLOR_HP} scale={0.5} />
+              </div>
+              <StripBtn active={cueB} color={ORANGE} onClick={() => toggleCue('B')} icon="cue" />
+            </>
+          ) : (
+            <>
+              <div className="flex-1 flex justify-center [&_span]:!hidden">
+                <Knob value={eqHigh} min={-12} max={12} center={0} onChange={(v) => setMasterEq('high', v)} bipolar color={COLOR_MST} scale={0.5} />
+              </div>
+              <div className="flex-1 flex justify-center [&_span]:!hidden">
+                <Knob value={eqMid} min={-12} max={12} center={0} onChange={(v) => setMasterEq('mid', v)} bipolar color={COLOR_MST} scale={0.5} />
+              </div>
+              <div className="flex-1 flex justify-center [&_span]:!hidden">
+                <Knob value={eqLow} min={-12} max={12} center={0} onChange={(v) => setMasterEq('low', v)} bipolar color={COLOR_MST} scale={0.5} />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Right rail toggle */}
+      <button
+        type="button"
+        onClick={togglePage}
+        className="shrink-0 transition active:brightness-125"
+        style={{
+          width: 5,
+          background: `linear-gradient(180deg, ${railColor}44, ${railColor}cc, ${railColor}44)`,
+          border: 'none',
+          cursor: 'pointer',
+          borderRadius: '0 6px 6px 0',
+        }}
+        title={page === 'hp' ? 'Switch to Master EQ' : 'Switch to Headphones'}
+      />
+    </div>
+  );
+};
+
+/** Rectangular button with rounded corners for the HP/MEQ strip. */
+const StripBtn: FC<{ active: boolean; color: string; onClick: () => void; icon: 'cue' | 'split' }> = ({ active, color, onClick, icon }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-label={icon === 'cue' ? 'Modo Cue' : 'Modo Split'}
+    className="mixi-btn flex items-center justify-center transition duration-150 shrink-0 active:scale-95"
+    style={stripBtnStyle(active, color)}
+  >
+    {icon === 'cue' ? (
+      <StripCueIcon active={active} color={color} />
+    ) : (
+      <StripSplitIcon active={active} color={color} />
+    )}
+  </button>
+);
+
+/** Estilo del botón del strip (helper puro). */
+function stripBtnStyle(active: boolean, color: string): React.CSSProperties {
+  return {
+    width: 30,
+    height: 22,
+    borderRadius: 5,
+    background: active ? `${color}18` : 'var(--srf-raised)',
+    border: `1.5px solid ${active ? `${color}88` : 'var(--srf-light)'}`,
+    boxShadow: active
+      ? `inset 0 0 6px ${color}22, 0 0 4px ${color}33`
+      : 'none',
+  };
+}
+
+/** Color de trazo de los iconos del strip (helper puro). */
+function stripStroke(active: boolean, color: string): string {
+  return active ? color : 'var(--txt-secondary)';
+}
+
+/** Icono Cue (auriculares). */
+const StripCueIcon: FC<{ active: boolean; color: string }> = ({ active, color }) => (
+  <svg width="14" height="12" viewBox="0 0 24 24" fill="none"
+    style={active ? { filter: `drop-shadow(0 0 3px ${color}88)` } : undefined}
+  >
+    <path d="M3 18v-6a9 9 0 0 1 18 0v6"
+      stroke={stripStroke(active, color)} strokeWidth={active ? 2.5 : 1.5} strokeLinecap="round" fill="none" />
+    <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5z"
+      stroke={stripStroke(active, color)} strokeWidth={active ? 2 : 1.5} fill={active ? color : 'none'} />
+    <path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z"
+      stroke={stripStroke(active, color)} strokeWidth={active ? 2 : 1.5} fill={active ? color : 'none'} />
+  </svg>
+);
+
+/** Icono Split (flechas a izquierda/derecha). */
+const StripSplitIcon: FC<{ active: boolean; color: string }> = ({ active, color }) => (
+  <svg width="14" height="12" viewBox="0 0 24 24" fill="none"
+    style={active ? { filter: `drop-shadow(0 0 3px ${color}88)` } : undefined}
+  >
+    <line x1="12" y1="4" x2="12" y2="20" stroke={stripStroke(active, color)} strokeWidth={active ? 2 : 1.5} strokeLinecap="round" />
+    <path d="M8 9L5 12L8 15" fill="none" stroke={stripStroke(active, color)} strokeWidth={active ? 2 : 1.5} strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M16 9L19 12L16 15" fill="none" stroke={stripStroke(active, color)} strokeWidth={active ? 2 : 1.5} strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
