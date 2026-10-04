@@ -1,0 +1,108 @@
+name: Build macOS Installer
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    name: Build macOS (.dmg / .zip)
+    runs-on: macos-latest
+
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # En runners macOS el PATH puede resolver `python` al framework del
+      # sistema (misma versión), que NO tiene las dependencias instaladas.
+      # Resolvemos la ruta absoluta del intérprete del toolcache de setup-python
+      # y la guardamos en PY_BIN para usarla en todos los pasos de Python.
+      - name: Resolve Python interpreter
+        shell: bash
+        run: echo "PY_BIN=${{ env.pythonLocation }}/bin/python" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          "$PY_BIN" -m pip install -r backend/requirements.txt
+          "$PY_BIN" -m pip install pyinstaller==6.22.1
+
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Bundle backend (PyInstaller)
+        shell: bash
+        run: |
+          "$PY_BIN" -m PyInstaller --noconfirm --onedir --noconsole --name ssa-backend \
+            --paths=backend \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=uvicorn.protocols.websockets.auto \
+            --hidden-import=uvicorn.lifespan.on \
+            backend/run_server.py
+
+      - name: Build installer (macOS)
+        run: npx electron-builder --mac --publish never
+
+      - name: Upload installer artifact (macOS)
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-set-architect-macos
+          path: |
+            release/*.dmg
+            release/*.zip
+          if-no-files-found: error
+
+      # Al crearse un Release, adjunta el .dmg y el .zip como assets.
+      # GitHub normaliza los espacios del nombre a puntos, así que se
+      # renombran a nombres estables con guiones antes de subirlos.
+      - name: Rename installers for release
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          for f in release/*.dmg; do
+            [ -e "$f" ] || continue
+            mv "$f" "release/Smart-Set-Architect.dmg"
+            break
+          done
+          for f in release/*.zip; do
+            [ -e "$f" ] || continue
+            mv "$f" "release/Smart-Set-Architect.zip"
+            break
+          done
+
+      - name: Upload assets to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            release/*.dmg
+            release/*.zip
+          fail_on_unmatched_files: true
