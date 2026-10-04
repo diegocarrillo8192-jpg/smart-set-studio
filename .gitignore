@@ -33,3 +33,10 @@ electron.out.log
 .idea/
 .vercel
 .env*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Python
+*.egg-info/

@@ -17,7 +17,8 @@
 //           (inner inset + outer spread) for diffused glow.
 //
 // The Play button is circular (CDJ-style).
-// The Sync button is a rounded pill with an inline SVG icon.
+// The Sync button is circular too, with an inline SVG icon; its state
+// label (SYNC / MASTER / FOLLOW) lives in DeckSection's TransportLabel.
 // ─────────────────────────────────────────────────────────────
 
 import { useCallback, type FC, type PointerEvent } from 'react';
@@ -105,6 +106,9 @@ export const NeonPlayButton: FC<PlayButtonProps> = ({
 };
 
 // ── Sync Button ─────────────────────────────────────────────
+// La etiqueta de estado (SYNC / MASTER / FOLLOW) la pinta el contenedor
+// (TransportLabel en DeckSection) en flujo normal: aquí NO hay texto
+// absoluto superpuesto. Activo = color ESTRICTO del deck (A cian / B morado).
 
 interface SyncButtonProps {
   isSynced: boolean;
@@ -141,7 +145,7 @@ export const NeonSyncButton: FC<SyncButtonProps> = ({
       type="button"
       onPointerDown={handlePress}
       disabled={!canSync}
-      title={isSynced ? 'Unsync' : 'Sync'}
+      title={isSynced ? 'SYNC activo: clic para liberar' : 'Sync'}
       className="relative rounded-full flex items-center justify-center transition duration-150 mixi-btn disabled:opacity-20 disabled:cursor-not-allowed focus:outline-none"
       style={{
         width: size,

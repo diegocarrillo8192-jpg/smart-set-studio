@@ -34,9 +34,8 @@ import {
   clampMenuPosition,
 } from './waveformInteractions';
 import {
-  POINTS_PER_SECOND,
-  BAR_STEP,
   PLAYHEAD_RATIO,
+  BASE_PIXELS_PER_SECOND,
 } from './waveformConstants';
 
 const COLOR_DOWNBEAT = 'rgba(255, 255, 255, 0.3)';
@@ -481,11 +480,13 @@ function setupWaveformWorker(
     const isSlipActive = engine.isInitialized && engine.isSlipActive(deckId);
     const slipRealTime = isSlipActive ? engine.getSlipRealTime(deckId) : -1;
 
-    // Update local zoom & startIndexRef so interaction functions still work correctly on the main thread
-    const barsLeftOfPlayhead = Math.round((widthRef.current * PLAYHEAD_RATIO) / BAR_STEP);
+    // Update local zoom & startIndexRef so interaction functions still work correctly on the main thread.
+    // startIndexRef now holds the audio time (seconds) at the left edge of the
+    // canvas, derived from a pure linear mapping against the playhead.
     const zoom = zoomRef.current;
-    const currentIndex = currentTime * POINTS_PER_SECOND;
-    startIndexRef.current = currentIndex - barsLeftOfPlayhead * zoom;
+    const centerPixel = widthRef.current * PLAYHEAD_RATIO;
+    const pixelsPerSecond = BASE_PIXELS_PER_SECOND * zoom;
+    startIndexRef.current = currentTime - centerPixel / pixelsPerSecond;
 
     // #57: reposo absoluto (ambos decks pausados, sin scrub, sin cambio de
     // zoom ni de estado PLAY/PAUSE) → no se postea nada al worker.

@@ -86,6 +86,10 @@ export interface DeckState {
   bpmConfidence: number;
   /** True if this deck has been synced to the other deck's tempo. */
   isSynced: boolean;
+  /** Role of this deck in a synced pair: null if not synced. */
+  syncRole: 'master' | 'follower' | null;
+  /** Deck that acts as master when this deck is a follower. */
+  syncMasterDeck: DeckId | null;
   /** Sync granularity: 'beat' (default), 'bar' (4-beat), 'phrase' (16-beat). */
   syncMode: 'beat' | 'bar' | 'phrase';
   /** 8 hot cue slots — timestamp in seconds, or null if empty. */

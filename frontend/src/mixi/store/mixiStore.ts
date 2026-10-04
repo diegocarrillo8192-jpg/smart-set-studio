@@ -61,6 +61,8 @@ export interface MixiActions {
   setDeckLoadingStage: (deck: DeckId, stage: string | null) => void;
   syncDeck: (deck: DeckId) => void;
   unsyncDeck: (deck: DeckId) => void;
+  /** Espeja el estado REAL de SYNC del motor en el store (ambos decks). */
+  syncFromEngine: () => void;
 
   setHotCue: (deck: DeckId, index: number, time: number) => void;
   triggerHotCue: (deck: DeckId, index: number) => void;
@@ -114,6 +116,8 @@ function defaultDeck() {
     detectedFirstBeatOffset: 0,
     bpmConfidence: 0,
     isSynced: false,
+    syncRole: null as 'master' | 'follower' | null,
+    syncMasterDeck: null as DeckId | null,
     syncMode: 'beat' as const,
     hotCues: new Array(HOT_CUE_COUNT).fill(null) as (number | null)[],
     activeLoop: null as LoopState | null,
@@ -179,19 +183,17 @@ export const useMixiStore = create<MixiStore>()(
       const d = get().decks[deck];
       // Conectado directamente al motor de audio nativo.
       if (playing) {
-        // Reanuda el AudioContext DENTRO del gesto del clic (policy de autoplay)
-        // para que el audio suene de inmediato, sin esperar a eventos tardíos.
-        void audioEngine.resume();
         const other = otherDeck(deck);
         const masterReady = get().decks[other].isTrackLoaded;
 
         // La sincronización/cuantización NUNCA debe impedir la reproducción.
+        // El estado del SYNC lo decide el MOTOR (fuente de verdad del audio):
+        // si está activo, play() commitea el enganche instantáneo por sí solo.
+        const synced = audioEngine.isSynced(deck);
         try {
-          if (d.isSynced && masterReady) {
-            audioEngine.syncTo(deck, other);
-          } else if (d.quantize && masterReady) {
+          if (!synced && d.quantize && masterReady) {
             audioEngine.alignToMasterOnce(deck, other);
-          } else if (d.quantize && d.originalBpm > 0) {
+          } else if (!synced && d.quantize && d.originalBpm > 0) {
             const el = audioEngine.getElement(deck);
             if (el) {
               // Rejilla en tiempo de fuente: BPM ORIGINAL (nunca el efectivo).
@@ -203,6 +205,9 @@ export const useMixiStore = create<MixiStore>()(
         } catch (err) {
           console.warn("[mixi] align on play failed", err);
         }
+        // play() resume el AudioContext DENTRO del gesto del clic (policy de
+        // autoplay) y commitea el SYNC si estaba activo: playbackRate ajustado
+        // al instante (reloj maestro del AudioContext) + snap de fase exacto.
         audioEngine.play(deck);
       } else {
         audioEngine.pause(deck);
@@ -229,8 +234,11 @@ export const useMixiStore = create<MixiStore>()(
     },
     setDeckPlaybackRate: (deck, v) => {
       audioEngine.setPitch(deck, (v - 1) * 100);
-      const d = get().decks[deck];
-      patch(set, deck, { playbackRate: v, bpm: d.originalBpm > 0 ? d.originalBpm * v : d.bpm });
+      // Mover el pitch a mano libera el SYNC en el motor (override manual, en
+      // cascada si este era el MASTER): el store espeja el estado REAL de
+      // AMBOS decks — roles y tempo efectivo — para que las etiquetas
+      // MASTER/FOLLOW nunca se crucen tras la liberación.
+      get().syncFromEngine();
     },
     setDeckWaveform: (deck, data, duration) => patch(set, deck, { waveformData: data, duration }),
 
@@ -259,17 +267,43 @@ export const useMixiStore = create<MixiStore>()(
     setDeckTrackLoaded: (deck, loaded) => patch(set, deck, { isTrackLoaded: loaded }),
 
     syncDeck: (deck) => {
-      const other = otherDeck(deck);
-      const d = get().decks[deck];
-      if (!(audioEngine.syncTo(deck, other) && d.originalBpm > 0)) return;
-      const rate = 1 + audioEngine.getPitch(deck) / 100;
-      patch(set, deck, { isSynced: true, playbackRate: rate, bpm: d.originalBpm * rate });
+      // Enganchar: el MOTOR asigna los roles (el OTRO deck queda como MASTER
+      // y este como FOLLOWER de él) y el store espeja el estado real al
+      // instante. La etiqueta del follower ("FOLLOW A"/"FOLLOW B") sale del
+      // master ACTIVO del motor — nunca de un estado guardado que pueda
+      // quedar cruzado tras una liberación en cascada.
+      audioEngine.syncTo(deck, otherDeck(deck));
+      get().syncFromEngine();
     },
     unsyncDeck: (deck) => {
+      // Liberar: el motor restaura el tempo manual (y disuelve la pareja en
+      // cascada si este era el MASTER); el store espeja el estado real de
+      // AMBOS decks (roles + tempo efectivo) tras la liberación.
       audioEngine.clearSync(deck);
-      const d = get().decks[deck];
-      const rate = 1 + audioEngine.getPitch(deck) / 100;
-      patch(set, deck, { isSynced: false, playbackRate: rate, bpm: d.originalBpm * rate });
+      get().syncFromEngine();
+    },
+    /** Espeja el estado REAL de SYNC del motor (fuente de verdad del audio)
+     *  en el store: enganche + roles Master/Follower + tempo efectivo de
+     *  AMBOS decks. Cualquier operación que pueda liberar el SYNC en el
+     *  motor (pitch manual, carga de track, eject, vinyl brake) la invoca:
+     *  las etiquetas MASTER / FOLLOW X siempre reflejan el Master ACTIVO y
+     *  jamás quedan cruzadas. */
+    syncFromEngine: () => {
+      for (const n of ['A', 'B'] as const) {
+        const st = audioEngine.getSyncState(n);
+        const d = get().decks[n];
+        const rate = 1 + audioEngine.getPitch(n) / 100;
+        patch(set, n, {
+          // Enganchado a la pareja: es esclavo (isSynced) o es el master
+          // activo (role) — en el motor el master es libre, su rol delata
+          // la pareja viva.
+          isSynced: st.isSynced || st.role === 'master',
+          syncRole: st.role,
+          syncMasterDeck: st.masterDeck,
+          playbackRate: rate,
+          bpm: d.originalBpm > 0 ? d.originalBpm * rate : d.bpm,
+        });
+      }
     },
 
     // ── Hot cues ──
@@ -325,6 +359,9 @@ export const useMixiStore = create<MixiStore>()(
         if (k < 1) requestAnimationFrame(step);
         else el.pause();
         audioEngine.setPitch(deck, 0);
+        // El brake resetea el pitch: si había SYNC enganchado (este deck o
+        // su pareja), el store espeja el estado real tras la liberación.
+        get().syncFromEngine();
       };
       requestAnimationFrame(step);
     },
@@ -371,7 +408,11 @@ export const useMixiStore = create<MixiStore>()(
       }
       patch(set, deck, { keyLock: enabled });
     },
-    toggleCue: (deck) => patch(set, deck, { cueActive: !get().decks[deck].cueActive }),
+    toggleCue: (deck) => {
+      const next = !get().decks[deck].cueActive;
+      audioEngine.setCueActive(deck, next);
+      patch(set, deck, { cueActive: next });
+    },
 
     // ── CUE estilo CDJ ──
     cueDeck: (deck) => {
@@ -404,10 +445,20 @@ export const useMixiStore = create<MixiStore>()(
     },
 
     // ── Headphones ──
-    setHeadphoneLevel: (v) => set((s) => ({ headphones: { ...s.headphones, level: v } })),
-    setHeadphoneMix: (v) => set((s) => ({ headphones: { ...s.headphones, mix: v } })),
+    setHeadphoneLevel: (v) => {
+      audioEngine.setHeadphoneLevel(v);
+      set((s) => ({ headphones: { ...s.headphones, level: v } }));
+    },
+    setHeadphoneMix: (v) => {
+      audioEngine.setHeadphoneMix(v);
+      set((s) => ({ headphones: { ...s.headphones, mix: v } }));
+    },
     toggleSplitMode: () =>
-      set((s) => ({ headphones: { ...s.headphones, splitMode: !s.headphones.splitMode } })),
+      set((s) => {
+        const next = !s.headphones.splitMode;
+        audioEngine.setSplitMode(next);
+        return { headphones: { ...s.headphones, splitMode: next } };
+      }),
 
     // ── AI ──
     setAiMode: (mode) => set((s) => ({ ai: { ...s.ai, mode } })),
@@ -421,6 +472,11 @@ export const useMixiStore = create<MixiStore>()(
     // ── Eject ──
     ejectDeck: (deck) => {
       audioEngine.releaseSource(deck);
+      // Eject libera el SYNC de este deck en el motor (y disuelve la pareja
+      // en cascada si este era el MASTER): el store espeja el estado real
+      // del OTRO deck antes de resetear este — su etiqueta/tempo quedan
+      // recalculados desde el motor, nunca cruzados.
+      get().syncFromEngine();
       patch(set, deck, { ...defaultDeck() });
     },
   }))

@@ -479,7 +479,7 @@ function GenerateButton({ generating, disabled, title, onGenerate }: GenerateBut
     <button
       onClick={onGenerate}
       disabled={disabled}
-      className="group relative flex h-[42px] min-w-[240px] flex-1 items-center justify-center gap-2 overflow-hidden rounded-xl border border-cyan-300/50 bg-cyan-500/15 px-4 text-sm font-black uppercase tracking-widest text-cyan-50 shadow-[0_0_18px_rgba(6,182,212,0.22)] backdrop-blur-md transition duration-300 hover:border-cyan-200/80 hover:bg-cyan-400/25 hover:shadow-[0_0_30px_rgba(6,182,212,0.5)] hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100"
+      className="group relative flex h-[42px] min-w-[240px] flex-1 items-center justify-center gap-2 overflow-hidden rounded-xl border border-cyan-300/50 bg-cyan-500/15 px-4 text-sm font-semibold uppercase tracking-widest text-cyan-50 shadow-[0_0_18px_rgba(6,182,212,0.22)] backdrop-blur-md transition duration-300 hover:border-cyan-200/80 hover:bg-cyan-400/25 hover:shadow-[0_0_30px_rgba(6,182,212,0.5)] hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100"
       title={title}
     >
       {/* Borde/brillo animado */}

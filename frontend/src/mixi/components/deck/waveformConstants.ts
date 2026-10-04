@@ -13,6 +13,11 @@ export const BAR_GAP = 1;
 export const BAR_STEP = BAR_WIDTH + BAR_GAP; // 4
 export const PLAYHEAD_RATIO = 1 / 3;
 
+/** Píxeles por segundo a zoom = 1. Deriva directamente de la densidad de datos
+ *  y el ancho físico de cada barra: 100 pts/s × 4 px/barra = 400 px/s.
+ *  A zoom N, la escala es BASE_PIXELS_PER_SECOND × N (idéntica en ambos decks). */
+export const BASE_PIXELS_PER_SECOND = BAR_STEP * POINTS_PER_SECOND; // 400
+
 /** Hot cue pad colors (Rekordbox standard, 8 slots). */
 export const CUE_COLORS = [
   '#22c55e', // 1 green

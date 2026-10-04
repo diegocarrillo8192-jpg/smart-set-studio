@@ -13,6 +13,7 @@ import {
   PLAYHEAD_RATIO,
   BAR_WIDTH,
   CUE_COLORS,
+  BASE_PIXELS_PER_SECOND,
 } from './waveformConstants';
 import type { WaveformPoint } from '../../types';
 
@@ -62,17 +63,12 @@ let width = 500;
 let height = 80;
 let dpr = 1;
 
-let isPlaying = false;
-let playbackRate = 1.0;
-let otherPlaybackRate = 1.0;
 let currentTime = 0;
-let otherTime = 0;
 let isSlipActive = false;
 let slipRealTime = -1;
 
 let zoom = 1.0;
 
-let lastTickLocalTime = 0;
 let lastDraw = 0;
 let rafId = 0;
 let gridFlash: { x: number; until: number } | null = null;
@@ -110,25 +106,18 @@ function draw() {
   }
   lastDraw = now;
 
-  let computedCurrentTime = currentTime;
-  let computedOtherTime = otherTime;
-
-  // Real-time interpolation to guarantee absolute smoothness during main-thread blocking
-  if (isPlaying && lastTickLocalTime > 0) {
-    const elapsed = (now - lastTickLocalTime) / 1000;
-    computedCurrentTime = currentTime + elapsed * playbackRate;
-  }
-
-  if (state.otherIsPlaying && lastTickLocalTime > 0) {
-    const elapsed = (now - lastTickLocalTime) / 1000;
-    computedOtherTime = otherTime + elapsed * otherPlaybackRate;
-  }
-
   const waveform = state.waveform;
-  const barsLeftOfPlayhead = Math.round((width * PLAYHEAD_RATIO) / BAR_STEP);
-  const playheadX = barsLeftOfPlayhead * BAR_STEP;
+  const centerPixel = width * PLAYHEAD_RATIO;
+  const pixelsPerSecond = BASE_PIXELS_PER_SECOND * zoom;
+  const startTime = currentTime - centerPixel / pixelsPerSecond;
   const halfHeight = height / 2;
   const totalBars = Math.ceil(width / BAR_STEP);
+
+  // Mapeo lineal puro: x = centerPixel + (t - currentTime) * pixelsPerSecond.
+  // La rejilla, la onda, los cues, los drops y el loop comparten EXACTAMENTE
+  // la misma función, evitando desfase acumulativo por redondeos de barras.
+  const timeAtX = (x: number): number => startTime + x / pixelsPerSecond;
+  const xAtTime = (t: number): number => centerPixel + (t - currentTime) * pixelsPerSecond;
 
   ctx.fillStyle = colors.COLOR_BG || '#0a0a0a';
   ctx.fillRect(0, 0, width, height);
@@ -145,34 +134,32 @@ function draw() {
     }
     ctx.globalAlpha = 1;
     ctx.fillStyle = colors.COLOR_PLAYHEAD || '#ff2222';
-    ctx.fillRect(playheadX, 0, 1, height);
+    ctx.fillRect(centerPixel | 0, 0, 1, height);
     rafId = requestAnimationFrame(draw);
     return;
   }
-
-  const currentIndex = computedCurrentTime * POINTS_PER_SECOND;
-  const startIndex = currentIndex - barsLeftOfPlayhead * zoom;
 
   // ── Energy shadow (total energy as grey backdrop) ──
   ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
   for (let i = 0; i < totalBars; i++) {
-    const dataIdx = (startIndex + i * zoom) | 0;
+    const x = i * BAR_STEP;
+    const dataIdx = (timeAtX(x) * POINTS_PER_SECOND) | 0;
     if (dataIdx < 0 || dataIdx >= waveform.length) continue;
     const pt = waveform[dataIdx];
     const maxE = Math.max(pt.low, pt.mid, pt.high);
     const h = (maxE * halfHeight) | 0;
-    ctx.fillRect(i * BAR_STEP, halfHeight - h, BAR_WIDTH, h * 2);
+    ctx.fillRect(x, halfHeight - h, BAR_WIDTH, h * 2);
   }
 
   // ── Waveform bands — additive 'screen' blend ──────────
   ctx.globalCompositeOperation = 'screen';
   for (let i = 0; i < totalBars; i++) {
-    const dataIdx = (startIndex + i * zoom) | 0;
+    const x = i * BAR_STEP;
+    const dataIdx = (timeAtX(x) * POINTS_PER_SECOND) | 0;
     if (dataIdx < 0 || dataIdx >= waveform.length) continue;
 
     const point = waveform[dataIdx];
-    const x = i * BAR_STEP;
 
     const hLow = (point.low * halfHeight) | 0;
     const hMid = (point.mid * halfHeight) | 0;
@@ -194,22 +181,19 @@ function draw() {
   const showOverlay = state.showPhaseOverlay;
   const otherWaveform = state.otherWaveform;
   if (showOverlay && state.otherIsPlaying && otherWaveform && otherWaveform.length > 0 && state.otherBpm > 0) {
-    const otherCurrentIndex = computedOtherTime * POINTS_PER_SECOND;
-    const otherBarsLeft = (playheadX / BAR_STEP) | 0;
-    const otherStartIndex = otherCurrentIndex - otherBarsLeft * zoom;
-
     ctx.globalCompositeOperation = 'screen';
 
     for (let i = 0; i < totalBars; i++) {
-      const myIdx = (startIndex + i * zoom) | 0;
-      const otherIdx = (otherStartIndex + i * zoom) | 0;
+      const x = i * BAR_STEP;
+      const t = timeAtX(x);
+      const myIdx = (t * POINTS_PER_SECOND) | 0;
+      const otherIdx = (t * POINTS_PER_SECOND) | 0;
 
       if (myIdx < 0 || myIdx >= waveform.length) continue;
       if (otherIdx < 0 || otherIdx >= otherWaveform.length) continue;
 
       const myPoint = waveform[myIdx];
       const otherPoint = otherWaveform[otherIdx];
-      const x = i * BAR_STEP;
 
       const myEnergy = myPoint.low;
       const otherEnergy = otherPoint.low;
@@ -238,8 +222,8 @@ function draw() {
 
   if (bpm > 0) {
     const beatPeriod = 60 / bpm;
-    const timeStart = startIndex / POINTS_PER_SECOND;
-    const timeEnd = (startIndex + totalBars * zoom) / POINTS_PER_SECOND;
+    const timeStart = timeAtX(0);
+    const timeEnd = timeAtX(width);
 
     const firstVisibleBeat = Math.floor((timeStart - firstBeatOffset) / beatPeriod);
     const lastVisibleBeat = Math.ceil((timeEnd - firstBeatOffset) / beatPeriod);
@@ -248,8 +232,7 @@ function draw() {
       const beatTime = firstBeatOffset + n * beatPeriod;
       if (beatTime < 0) continue;
 
-      const beatDataIdx = beatTime * POINTS_PER_SECOND;
-      const px = ((beatDataIdx - startIndex) / zoom) * BAR_STEP;
+      const px = xAtTime(beatTime);
       if (px < 0 || px > width) continue;
 
       const isDownbeat = ((n % 4) + 4) % 4 === 0;
@@ -283,10 +266,8 @@ function draw() {
   // ── Loop region overlay ─────────────────────────────
   const activeLoop = state.activeLoop;
   if (activeLoop && bpm > 0) {
-    const loopStartIdx = activeLoop.start * POINTS_PER_SECOND;
-    const loopEndIdx = activeLoop.end * POINTS_PER_SECOND;
-    const lx1 = ((loopStartIdx - startIndex) / zoom) * BAR_STEP;
-    const lx2 = ((loopEndIdx - startIndex) / zoom) * BAR_STEP;
+    const lx1 = xAtTime(activeLoop.start);
+    const lx2 = xAtTime(activeLoop.end);
     if (lx2 > 0 && lx1 < width) {
       const clampL = Math.max(0, lx1) | 0;
       const clampR = Math.min(width, lx2) | 0;
@@ -303,8 +284,7 @@ function draw() {
   for (let ci = 0; ci < hotCues.length; ci++) {
     const cueTime = hotCues[ci];
     if (cueTime === null) continue;
-    const cueIdx = cueTime * POINTS_PER_SECOND;
-    const cx = ((cueIdx - startIndex) / zoom) * BAR_STEP;
+    const cx = xAtTime(cueTime);
     if (cx < -5 || cx > width + 5) continue;
     const cc = CUE_COLORS[ci] || '#fff';
     ctx.fillStyle = cc + '88';
@@ -324,8 +304,7 @@ function draw() {
     const beatPeriodDrop = 60 / bpm;
     for (let di = 0; di < Math.min(dropBeats.length, 4); di++) {
       const dropTime = firstBeatOffset + dropBeats[di] * beatPeriodDrop;
-      const dropIdx = dropTime * POINTS_PER_SECOND;
-      const dx = ((dropIdx - startIndex) / zoom) * BAR_STEP;
+      const dx = xAtTime(dropTime);
       if (dx < -10 || dx > width + 10) continue;
       const mx = dx | 0;
       ctx.fillStyle = di === 0 ? colors.WAVE_DROP : colors.WAVE_DROP + '88';
@@ -348,6 +327,7 @@ function draw() {
   ctx.globalAlpha = 1;
 
   // ── Playhead ──
+  const playheadX = centerPixel | 0;
   ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
   ctx.fillRect(playheadX - 10, 0, 21, height);
   ctx.fillStyle = 'rgba(255, 255, 255, 0.10)';
@@ -361,9 +341,7 @@ function draw() {
 
   // ── Slip mode ghost playhead ──
   if (isSlipActive && slipRealTime >= 0) {
-    const slipDataIndex = slipRealTime * POINTS_PER_SECOND;
-    const slipBarOffset = ((slipDataIndex - startIndex) / zoom) | 0;
-    const slipX = (slipBarOffset * BAR_STEP) | 0;
+    const slipX = xAtTime(slipRealTime) | 0;
     if (slipX >= 0 && slipX < width) {
       ctx.globalAlpha = 0.35;
       ctx.fillStyle = '#22d3ee';
@@ -443,18 +421,13 @@ self.onmessage = (e: MessageEvent) => {
       break;
     }
     case 'tick': {
+      // Se usa el tiempo del audio tal como lo envía el hilo principal,
+      // derivado del reloj real del decoder / AudioContext. NO se interpola
+      // aquí con requestAnimationFrame para evitar desfases acumulativos.
       currentTime = data.currentTime;
-      otherTime = data.otherTime;
       isSlipActive = data.isSlipActive;
       slipRealTime = data.slipRealTime;
-      isPlaying = data.isPlaying;
-      playbackRate = data.playbackRate;
-      otherPlaybackRate = data.otherPlaybackRate;
       zoom = data.zoom;
-
-      // Adjust computed times by the message transfer latency
-      const now = performance.now();
-      lastTickLocalTime = now - Math.max(0, now - data.timestamp);
       break;
     }
     case 'flash': {

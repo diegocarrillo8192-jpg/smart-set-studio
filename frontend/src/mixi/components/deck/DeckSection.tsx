@@ -9,6 +9,11 @@
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Mixi â€“ Deck Section (responsive layout)
+//
+// DeckSection is intentionally thin: it owns only the deck-level eject guard
+// and composes focused subcomponents. Every render branch (transport controls,
+// mixer row, track-loader overlay, header) lives in its own component so the
+// control-flow complexity stays low and each piece is easy to reason about.
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import { useCallback, useEffect, useRef, useState, type FC } from 'react';
@@ -33,50 +38,57 @@ interface DeckSectionProps {
   color: string;
 }
 
+// ── Pure helpers (no React, no branches inside the components) ──────────
+
+type SyncRole = 'master' | 'follower' | null;
+
+interface SyncBadgeInfo {
+  label: string;
+  title: string;
+}
+
+/** Etiqueta y tooltip del estado de SYNC (una sola rama resuelta aquí).
+ *  El color activo es SIEMPRE el del deck (A cian / B morado): no hay
+ *  roleColors ajenos que rompan el código de colores estricto. */
+function syncBadgeInfo(
+  isSynced: boolean,
+  syncRole: SyncRole,
+  syncMasterDeck: DeckId | null,
+): SyncBadgeInfo {
+  if (!isSynced) return { label: 'SYNC', title: 'Sync' };
+  if (syncRole === 'master') {
+    return { label: 'MASTER', title: 'MASTER: este deck marca el tempo' };
+  }
+  if (syncRole === 'follower') {
+    return {
+      label: syncMasterDeck ? `FOLLOW ${syncMasterDeck}` : 'SYNC',
+      title: syncMasterDeck
+        ? `FOLLOWER: sincronizado al deck ${syncMasterDeck}`
+        : 'SYNC activo — clic para liberar',
+    };
+  }
+  return { label: 'SYNC', title: 'SYNC activo — clic para liberar' };
+}
+
+/** Clase del contenedor de contenido según el track esté cargado o no. */
+function deckContentClass(loaded: boolean): string {
+  const state = loaded ? 'opacity-100 blur-0' : 'pointer-events-none opacity-60 blur-[2px]';
+  return `grid flex-1 min-h-0 gap-1 transition duration-500 ease-out ${state}`;
+}
+
+// ── Deck Section (thin orchestrator) ────────────────────────────────────
+
 export const DeckSection: FC<DeckSectionProps> = ({ deckId, color }) => {
-  // Granular selectors â€” only re-render when the field we actually use changes
   const isPlaying = useMixiStore((s) => s.decks[deckId].isPlaying);
   const isTrackLoaded = useMixiStore((s) => s.decks[deckId].isTrackLoaded);
-  const isSynced = useMixiStore((s) => s.decks[deckId].isSynced);
-  const bpm = useMixiStore((s) => s.decks[deckId].bpm);
-  const bpmConfidence = useMixiStore((s) => s.decks[deckId].bpmConfidence);
-  const originalBpm = useMixiStore((s) => s.decks[deckId].originalBpm);
-  const trackName = useMixiStore((s) => s.decks[deckId].trackName);
-  const musicalKey = useMixiStore((s) => s.decks[deckId].musicalKey);
-  const cueActive = useMixiStore((s) => s.decks[deckId].cueActive);
-  const playbackRate = useMixiStore((s) => s.decks[deckId].playbackRate);
-  const deckTrack = useDeckTracks()[deckId];
-  const cueSet = useMixiStore((s) => s.decks[deckId].hotCues[0] != null);
-  const cueDeck = useMixiStore((s) => s.cueDeck);
-  const setPlaying = useMixiStore((s) => s.setDeckPlaying);
-  const setPlaybackRate = useMixiStore((s) => s.setDeckPlaybackRate);
-  const syncDeck = useMixiStore((s) => s.syncDeck);
-  const unsyncDeck = useMixiStore((s) => s.unsyncDeck);
-  const ejectDeck = useMixiStore((s) => s.ejectDeck);
-  const setDeckMode = useMixiStore((s) => s.setDeckMode);
   const volume = useMixiStore((s) => s.decks[deckId].volume);
   const deckMode = useMixiStore((s) => s.deckModes[deckId]);
+  const ejectDeck = useMixiStore((s) => s.ejectDeck);
+
   const [ejectPending, setEjectPending] = useState(false);
   const ejectTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  /** BPM inline editing state */
-  const [editingBpm, setEditingBpm] = useState(false);
-  const [bpmInput, setBpmInput] = useState('');
-  const bpmInputRef = useRef<HTMLInputElement>(null);
 
-  const togglePlay = useCallback(
-    () => setPlaying(deckId, !isPlaying),
-    [deckId, isPlaying, setPlaying],
-  );
-  const onPitchChange = useCallback(
-    (val: number) => setPlaybackRate(deckId, val),
-    [deckId, setPlaybackRate],
-  );
-  const toggleSync = useCallback(() => {
-    if (isSynced) unsyncDeck(deckId);
-    else syncDeck(deckId);
-  }, [deckId, isSynced, syncDeck, unsyncDeck]);
-
-  // â”€â”€ Eject safety guard (double-click when live) â”€â”€â”€â”€â”€â”€â”€â”€
+  // Eject safety guard (double-click when live).
   const handleEject = useCallback(() => {
     const isLive = isPlaying && volume > 0.05;
     if (!isLive) {
@@ -95,7 +107,231 @@ export const DeckSection: FC<DeckSectionProps> = ({ deckId, color }) => {
 
   useEffect(() => () => clearTimeout(ejectTimerRef.current), []);
 
-  // â”€â”€ BPM x2/Ã·2 + inline edit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const moduleColor = deckRegistry.findByMode(deckMode)?.accentColor;
+
+  return (
+    <div
+      className="flex flex-col gap-1 h-full overflow-hidden transition-opacity duration-500"
+      style={{ opacity: !isTrackLoaded && !isPlaying ? 0.6 : 1 }}
+    >
+      <DeckHeader
+        deckId={deckId}
+        color={color}
+        moduleColor={moduleColor}
+        ejectPending={ejectPending}
+        onEject={handleEject}
+      />
+
+      {/* ── Content ─────────────────────────────────────────────── */}
+      <div className="mixi-deck-content flex flex-1 flex-col px-1 pb-1 min-h-0 relative">
+        <TrackLoaderOverlay visible={!isTrackLoaded} deckId={deckId} color={color} />
+        <div className={deckContentClass(isTrackLoaded)} style={{ gridTemplateRows: 'minmax(0, 1fr) auto' }}>
+          <DeckMainRow deckId={deckId} color={color} />
+
+          {/* Fila inferior: pads de Hot Cues / Loops a todo el ancho del deck */}
+          <div className="min-h-0 pt-0.5" data-deck-pads>
+            <PerformancePads deckId={deckId} color={color} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── Track loader overlay (only mounts while there is no track) ──────────
+
+interface TrackLoaderOverlayProps {
+  visible: boolean;
+  deckId: DeckId;
+  color: string;
+}
+
+const TrackLoaderOverlay: FC<TrackLoaderOverlayProps> = ({ visible, deckId, color }) => {
+  const setDeckMode = useMixiStore((s) => s.setDeckMode);
+  if (!visible) return null;
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm rounded-xl m-1.5 pointer-events-auto p-6">
+      <TrackLoader
+        deckId={deckId}
+        color={color}
+        onSwitchToGroovebox={() => setDeckMode(deckId, 'groovebox')}
+        onSwitchModule={(mode) => setDeckMode(deckId, mode)}
+      />
+    </div>
+  );
+};
+
+// ── Main deck row: FX · JogWheel · Transport (mirrored for deck B) ──────
+
+interface DeckRowProps {
+  deckId: DeckId;
+  color: string;
+}
+
+/**
+ * Layout del deck en 3 columnas (izquierda → derecha):
+ *   · Columna externa → panel de FX.
+ *   · Columna central → JogWheel.
+ *   · Columna interna (pegada al mixer) → transporte PLAY/CUE/SYNC + Pitch.
+ * El Deck B refleja las columnas externa/interna (espejo A | B).
+ */
+const DeckMainRow: FC<DeckRowProps> = ({ deckId, color }) => {
+  const mirrored = deckId === 'B';
+  return (
+    <div className="grid min-h-0 gap-1 overflow-hidden" style={{ gridTemplateColumns: '1fr auto 1fr' }}>
+      <div
+        className={`flex h-full min-w-0 flex-col justify-center ${
+          mirrored ? 'order-3 items-end' : 'order-1 items-start'
+        }`}
+      >
+        <FxUnitPanel deckId={deckId} color={color} />
+      </div>
+
+      <div className="order-2 flex min-h-0 flex-col items-center justify-center">
+        <PremiumJogWheel deckId={deckId} color={color} size={380} />
+      </div>
+
+      <DeckTransport deckId={deckId} color={color} />
+    </div>
+  );
+};
+
+// ── Transport column (reads its own deck slice from the store) ──────────
+
+interface DeckTransportProps {
+  deckId: DeckId;
+  color: string;
+}
+
+const DeckTransport: FC<DeckTransportProps> = ({ deckId, color }) => {
+  const isPlaying = useMixiStore((s) => s.decks[deckId].isPlaying);
+  const isSynced = useMixiStore((s) => s.decks[deckId].isSynced);
+  const syncRole = useMixiStore((s) => s.decks[deckId].syncRole);
+  const syncMasterDeck = useMixiStore((s) => s.decks[deckId].syncMasterDeck);
+  const originalBpm = useMixiStore((s) => s.decks[deckId].originalBpm);
+  const playbackRate = useMixiStore((s) => s.decks[deckId].playbackRate);
+  const cueSet = useMixiStore((s) => s.decks[deckId].hotCues[0] != null);
+  const otherDeckId: DeckId = deckId === 'A' ? 'B' : 'A';
+  const otherBpm = useMixiStore((s) => s.decks[otherDeckId].bpm);
+  const setPlaying = useMixiStore((s) => s.setDeckPlaying);
+  const setPlaybackRate = useMixiStore((s) => s.setDeckPlaybackRate);
+  const syncDeck = useMixiStore((s) => s.syncDeck);
+  const unsyncDeck = useMixiStore((s) => s.unsyncDeck);
+  const cueDeck = useMixiStore((s) => s.cueDeck);
+
+  const mirrored = deckId === 'B';
+  const canSync = originalBpm > 0 && otherBpm > 0;
+  const badge = syncBadgeInfo(isSynced, syncRole, syncMasterDeck);
+
+  const togglePlay = useCallback(
+    () => setPlaying(deckId, !isPlaying),
+    [deckId, isPlaying, setPlaying],
+  );
+  const onPitchChange = useCallback(
+    (val: number) => setPlaybackRate(deckId, val),
+    [deckId, setPlaybackRate],
+  );
+  const toggleSync = useCallback(() => {
+    if (isSynced) unsyncDeck(deckId);
+    else syncDeck(deckId);
+  }, [deckId, isSynced, syncDeck, unsyncDeck]);
+
+  return (
+    <div
+      className={`flex h-full min-w-0 items-center gap-[20px] ${
+        mirrored ? 'order-1 justify-start' : 'order-3 justify-end'
+      }`}
+    >
+      <div
+        className="flex shrink-0 flex-col items-center justify-center gap-1.5"
+        style={{ order: mirrored ? 1 : 2 }}
+      >
+        <TransportLabel label="PLAY" active={isPlaying} activeColor={color}>
+          <NeonPlayButton
+            isPlaying={isPlaying}
+            onToggle={togglePlay}
+            color={color}
+            size={64}
+            midiAction={{ type: 'DECK_PLAY', deck: deckId }}
+          />
+        </TransportLabel>
+
+        <TransportLabel label="CUE" active={cueSet} activeColor={color}>
+          <NeonCueButton isSet={cueSet} onPress={() => cueDeck(deckId)} color={color} size={52} />
+        </TransportLabel>
+
+        <TransportLabel label={badge.label} active={isSynced} activeColor={color} title={badge.title}>
+          <NeonSyncButton
+            isSynced={isSynced}
+            canSync={canSync}
+            onToggle={toggleSync}
+            color={color}
+            size={52}
+            midiAction={{ type: 'DECK_SYNC', deck: deckId }}
+          />
+        </TransportLabel>
+      </div>
+
+      <div style={{ order: mirrored ? 2 : 1 }}>
+        <PitchStrip
+          value={playbackRate}
+          onChange={onPitchChange}
+          color={color}
+          deckId={deckId}
+          midiAction={{ type: 'DECK_PITCH', deck: deckId }}
+        />
+      </div>
+    </div>
+  );
+};
+
+interface TransportLabelProps {
+  label: string;
+  active: boolean;
+  activeColor: string;
+  title?: string;
+  children: React.ReactNode;
+}
+
+/** Botón de transporte con su etiqueta inferior (color según estado). */
+const TransportLabel: FC<TransportLabelProps> = ({ label, active, activeColor, title, children }) => (
+  <div className="flex flex-col items-center gap-0.5">
+    {children}
+    <span
+      className="text-[11px] font-medium tracking-[1.5px]"
+      title={title}
+      style={{ color: active ? activeColor : 'rgba(255,255,255,0.5)' }}
+    >
+      {label}
+    </span>
+  </div>
+);
+
+// ── Deck Header container (owns BPM inline editing) ─────────────────────
+
+interface DeckHeaderContainerProps {
+  deckId: DeckId;
+  color: string;
+  moduleColor: string | undefined;
+  ejectPending: boolean;
+  onEject: () => void;
+}
+
+const DeckHeader: FC<DeckHeaderContainerProps> = ({ deckId, color, moduleColor, ejectPending, onEject }) => {
+  const isPlaying = useMixiStore((s) => s.decks[deckId].isPlaying);
+  const cueActive = useMixiStore((s) => s.decks[deckId].cueActive);
+  const isTrackLoaded = useMixiStore((s) => s.decks[deckId].isTrackLoaded);
+  const trackName = useMixiStore((s) => s.decks[deckId].trackName);
+  const musicalKey = useMixiStore((s) => s.decks[deckId].musicalKey);
+  const bpm = useMixiStore((s) => s.decks[deckId].bpm);
+  const bpmConfidence = useMixiStore((s) => s.decks[deckId].bpmConfidence);
+  const deckTrack = useDeckTracks()[deckId];
+
+  /** BPM inline editing state. */
+  const [editingBpm, setEditingBpm] = useState(false);
+  const [bpmInput, setBpmInput] = useState('');
+  const bpmInputRef = useRef<HTMLInputElement>(null);
+
   const doubleBpm = useCallback(() => {
     const store = useMixiStore.getState();
     const d = store.decks[deckId];
@@ -127,128 +363,37 @@ export const DeckSection: FC<DeckSectionProps> = ({ deckId, color }) => {
     }
   }, [deckId, bpmInput]);
 
-  // â”€â”€ Module-aware gradient header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const activeModule = deckRegistry.findByMode(deckMode);
-  const moduleColor = activeModule?.accentColor;
-
-  const otherDeckId: DeckId = deckId === 'A' ? 'B' : 'A';
-  const otherBpm = useMixiStore((s) => s.decks[otherDeckId].bpm);
-  const canSync = originalBpm > 0 && otherBpm > 0;
+  const cancelBpmEdit = useCallback(() => setEditingBpm(false), []);
 
   return (
-    <div
-      className="flex flex-col gap-1 h-full overflow-hidden transition-opacity duration-500"
-      style={{ opacity: !isTrackLoaded && !isPlaying ? 0.6 : 1 }}
-    >
-      <DeckHeader
-        deckId={deckId}
-        color={color}
-        moduleColor={moduleColor}
-        isPlaying={isPlaying}
-        cueActive={cueActive}
-        isTrackLoaded={isTrackLoaded}
-        deckTrack={deckTrack}
-        trackName={trackName}
-        musicalKey={musicalKey}
-        bpm={bpm}
-        bpmConfidence={bpmConfidence}
-        editingBpm={editingBpm}
-        bpmInput={bpmInput}
-        bpmInputRef={bpmInputRef}
-        ejectPending={ejectPending}
-        onEject={handleEject}
-        onHalveBpm={halveBpm}
-        onDoubleBpm={doubleBpm}
-        onStartBpmEdit={startBpmEdit}
-        onBpmInput={setBpmInput}
-        onCommitBpmEdit={commitBpmEdit}
-        onCancelBpmEdit={() => setEditingBpm(false)}
-      />
-
-      {/* ── Content ─────────────────────────────────────────────── */}
-      <div className="mixi-deck-content flex flex-1 flex-col px-1 pb-1 min-h-0 relative">
-        {!isTrackLoaded && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm rounded-xl m-1.5 pointer-events-auto p-6">
-            <TrackLoader deckId={deckId} color={color} onSwitchToGroovebox={() => setDeckMode(deckId, 'groovebox')} onSwitchModule={(mode) => setDeckMode(deckId, mode)} />
-          </div>
-        )}
-        <div className={`grid flex-1 min-h-0 gap-1 transition duration-500 ease-out ${!isTrackLoaded ? 'pointer-events-none opacity-60 blur-[2px]' : 'opacity-100 blur-0'}`} style={{ gridTemplateRows: 'minmax(0, 1fr) auto' }}>
-          {/* Layout del deck en dos filas:
-                · Fila principal → 3 columnas (izquierda → derecha):
-                    - Columna externa → panel de FX.
-                    - Columna central → JogWheel.
-                    - Columna interna (pegada al mixer) → transporte PLAY/CUE/SYNC + Pitch.
-                  El Deck B refleja las columnas externa/interna (espejo A | B).
-                · Fila inferior → Pads de Hot Cues / Loops a todo el ancho. */}
-          <div
-            className="grid min-h-0 gap-1 overflow-hidden"
-            style={{ gridTemplateColumns: '1fr auto 1fr' }}
-          >
-            {/* Columna externa: panel de FX pegado al borde exterior del deck
-                (izquierda en A, derecha en B). Se centra verticalmente en su
-                celda para despegarlo de la info del track y repartir el margen
-                arriba/abajo de forma equilibrada. */}
-            <div
-              className={`flex h-full min-w-0 flex-col justify-center ${
-                deckId === 'B' ? 'order-3 items-end' : 'order-1 items-start'
-              }`}
-            >
-              <FxUnitPanel deckId={deckId} color={color} />
-            </div>
-
-            {/* Columna central: JogWheel */}
-            <div className="order-2 flex min-h-0 flex-col items-center justify-center">
-              <PremiumJogWheel deckId={deckId} color={color} size={380} />
-            </div>
-
-            {/* Columna interna (pegada al mixer central): transporte + Pitch.
-                El transporte mira siempre hacia el mixer (borde interior). */}
-            <div
-              className={`flex h-full min-w-0 items-center gap-[20px] ${
-                deckId === 'B' ? 'order-1 justify-start' : 'order-3 justify-end'
-              }`}
-            >
-              <div
-                className="flex shrink-0 flex-col items-center justify-center gap-1.5"
-                style={{ order: deckId === 'B' ? 1 : 2 }}
-              >
-                <div className="flex flex-col items-center gap-0.5">
-                  <NeonPlayButton isPlaying={isPlaying} onToggle={togglePlay} color={color} size={64} midiAction={{ type: 'DECK_PLAY', deck: deckId }} />
-                  <span className="text-[11px] font-medium tracking-[1.5px]" style={{ color: isPlaying ? color : 'rgba(255,255,255,0.5)' }}>PLAY</span>
-                </div>
-                <div className="flex flex-col items-center gap-0.5">
-                  <NeonCueButton isSet={cueSet} onPress={() => cueDeck(deckId)} color={color} size={52} />
-                  <span className="text-[11px] font-medium tracking-[1.5px]" style={{ color: cueSet ? color : 'rgba(255,255,255,0.5)' }}>CUE</span>
-                </div>
-                <div className="flex flex-col items-center gap-0.5">
-                  <NeonSyncButton isSynced={isSynced} canSync={canSync} onToggle={toggleSync} color={color} size={52} midiAction={{ type: 'DECK_SYNC', deck: deckId }} />
-                  <span className="text-[11px] font-medium tracking-[1.5px]" style={{ color: isSynced ? color : 'rgba(255,255,255,0.5)' }}>SYNC</span>
-                </div>
-              </div>
-
-              <div style={{ order: deckId === 'B' ? 2 : 1 }}>
-                <PitchStrip
-                  value={playbackRate}
-                  onChange={onPitchChange}
-                  color={color}
-                  deckId={deckId}
-                  midiAction={{ type: 'DECK_PITCH', deck: deckId }}
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Fila inferior: pads de Hot Cues / Loops a todo el ancho del deck */}
-          <div className="min-h-0 pt-0.5" data-deck-pads>
-            <PerformancePads deckId={deckId} color={color} />
-          </div>
-        </div>
-      </div>
-    </div>
+    <DeckHeaderView
+      deckId={deckId}
+      color={color}
+      moduleColor={moduleColor}
+      isPlaying={isPlaying}
+      cueActive={cueActive}
+      isTrackLoaded={isTrackLoaded}
+      deckTrack={deckTrack}
+      trackName={trackName}
+      musicalKey={musicalKey}
+      bpm={bpm}
+      bpmConfidence={bpmConfidence}
+      editingBpm={editingBpm}
+      bpmInput={bpmInput}
+      bpmInputRef={bpmInputRef}
+      ejectPending={ejectPending}
+      onEject={onEject}
+      onHalveBpm={halveBpm}
+      onDoubleBpm={doubleBpm}
+      onStartBpmEdit={startBpmEdit}
+      onBpmInput={setBpmInput}
+      onCommitBpmEdit={commitBpmEdit}
+      onCancelBpmEdit={cancelBpmEdit}
+    />
   );
 };
 
-// ── Deck Header (extraído: estado del deck + BPM inline edit) ───────────
+// ── Deck Header (presentational) ────────────────────────────────────────
 
 interface DeckHeaderProps {
   deckId: DeckId;
@@ -320,7 +465,7 @@ const KeyBadge: FC<{ musicalKey: string; color: string }> = ({ musicalKey, color
   );
 };
 
-const DeckHeader: FC<DeckHeaderProps> = ({
+const DeckHeaderView: FC<DeckHeaderProps> = ({
   deckId, color, moduleColor, isPlaying, cueActive, isTrackLoaded,
   deckTrack, trackName, musicalKey, bpm, bpmConfidence,
   editingBpm, bpmInput, bpmInputRef, ejectPending,
@@ -340,9 +485,9 @@ const DeckHeader: FC<DeckHeaderProps> = ({
     <span className="text-[13px] font-medium tracking-[0.15em] shrink-0" style={{ color }}>
       {deckId}
     </span>
-    {/* Headphone icon — visible when CUE is active */}
+    {/* Headphone icon — visible when CUE is active (color del deck) */}
     {cueActive && (
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--clr-b)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" style={{ filter: 'drop-shadow(0 0 3px rgba(168,85,247,0.6))' }}>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0" style={{ filter: `drop-shadow(0 0 3px ${color}99)` }}>
         <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
         <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3v5z" />
         <path d="M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3v5z" />
@@ -536,4 +681,3 @@ const BeatCounter: FC<{ deckId: DeckId; color: string }> = ({ deckId, color }) =
 };
 
 // FxStrip replaced by FxUnitPanel (imported from ./FxUnitPanel.tsx)
-

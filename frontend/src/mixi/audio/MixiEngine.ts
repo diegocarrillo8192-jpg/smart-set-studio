@@ -6,15 +6,18 @@
  * and delegates all audio to Smart Set Studio's native engine (src/lib/audio.ts),
  * which drives two HTMLAudioElements.
  *
- * SYNC = Hard Phase Lock de UN solo disparo (sin PLL):
- *   · playbackRate FIJO = BPM_Master / BPM_Original_del_deck (1:1 exacto),
- *     escrito UNA vez en el SYNC/PLAY y NUNCA re-modulado después. Zero
- *     variación dinámica posterior: sin watchdog, sin micro-nudges, sin
- *     rampas, sin timers que toquen rate o posición durante el Play.
- *   · Fase: Hard Alignment con seek único exacto a 0 ms de desfasaje
- *     (lib/mixi.ts → hardAlignShift, aplicado por la engine nativa).
- *   · applyPllRate / nudgeStart / nudgeStop son NO-OPs permanentes: el bucle
- *     de corrección continua está DESHABILITADO por completo.
+ * SYNC = Master Audio Clock + Phase Lock profesional (motor nativo):
+ *   · playbackRate base = BPM_Master / BPM_Original_del_deck (1:1 exacto),
+ *     escrito en cada commit del SYNC (enganche/PLAY/cambio de tempo del
+ *     maestro) por src/lib/audio.ts.
+ *   · Fase: Hard Alignment al enganchar (seek único exacto a 0 ms,
+ *     lib/mixi.ts → hardAlignShift) + servo PI continuo del motor nativo
+ *     (servoTick, 200 ms) que recorta el rate del esclavo (±0.15% en lock,
+ *     keylock activo) para mantener la fase CONGELADA en 0 ms durante todo
+ *     el set, sin deriva acumulativa (estándar Traktor/Rekordbox).
+ *   · applyPllRate / nudgeStart / nudgeStop siguen siendo NO-OPs: la
+ *     corrección continua vive DENTRO del motor nativo (audio.ts), no en
+ *     la UI — así el lock sigue activo aunque la vista no mueva nada.
  *
  * MIXI is licensed under the PolyForm Noncommercial License 1.0.0.
  */
@@ -186,8 +189,8 @@ export class MixiEngine {
   nudgeStop(_deck: DeckId): void {}
   enterSlipMode(_deck: DeckId): void {}
   exitSlipMode(_deck: DeckId): void {}
-  /** PLL DESHABILITADO: no-op permanente. El SYNC es Hard Lock de un solo
-   *  disparo (rate fijo + seek único); ninguna corrección continua. */
+  /** El PLL vive DENTRO del motor nativo (audio.ts · servoTick): esta façade
+   *  no necesita (ni debe) aplicar correcciones por su cuenta. */
   applyPllRate(_deck: DeckId, _rate: number): void {}
   postWorkletMessage(_deck: DeckId, _message: unknown): void {}
 
@@ -197,10 +200,18 @@ export class MixiEngine {
   setDistortion(_amount: number): void {}
   setPunch(_amount: number): void {}
   setColorFx(_deck: DeckId, _value: number): void {}
-  setCueActive(_deck: DeckId, _active: boolean): void {}
-  setHeadphoneLevel(_value: number): void {}
-  setHeadphoneMix(_mix: number): void {}
-  setSplitMode(_enabled: boolean): void {}
+  setCueActive(deck: DeckId, active: boolean): void {
+    audioEngine.setCueActive(deck, active);
+  }
+  setHeadphoneLevel(value: number): void {
+    audioEngine.setHeadphoneLevel(value);
+  }
+  setHeadphoneMix(mix: number): void {
+    audioEngine.setHeadphoneMix(mix);
+  }
+  setSplitMode(enabled: boolean): void {
+    audioEngine.setSplitMode(enabled);
+  }
   setKeyLock(deck: DeckId, enabled: boolean): void {
     const el = audioEngine.getElement(deck);
     if (el) {

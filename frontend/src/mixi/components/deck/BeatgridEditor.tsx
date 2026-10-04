@@ -29,8 +29,7 @@ import type { DeckId } from '../../types';
 import { doubleBpm as doubleBpmHelper, halveBpm as halveBpmHelper } from '../../audio/utils/mathUtils';
 
 // Waveform constants (must match WaveformDisplay.tsx)
-const BAR_STEP = 3;
-const POINTS_PER_SECOND = 100;
+import { BASE_PIXELS_PER_SECOND } from './waveformConstants';
 
 interface BeatgridEditorProps {
   deckId: DeckId;
@@ -65,8 +64,9 @@ export const BeatgridEditor: FC<BeatgridEditorProps> = ({ deckId, color, editMod
     if (!dragging || !editMode) return;
     const deltaPixel = e.clientX - dragStartX.current;
     const zoom = zoomRef?.current ?? 1;
-    // Convert pixels to seconds, accounting for zoom: deltaSec = (deltaPixel / BAR_STEP) * zoom / POINTS_PER_SECOND
-    const deltaSec = (deltaPixel / BAR_STEP) * zoom / POINTS_PER_SECOND;
+    // Convert pixels to seconds using the shared linear scale.
+    const pixelsPerSecond = BASE_PIXELS_PER_SECOND * zoom;
+    const deltaSec = deltaPixel / pixelsPerSecond;
     const newOffset = Math.max(0, dragStartOffset.current + deltaSec);
     // Apply directly to store (useMixiSync will forward to engine)
     useMixiStore.getState().setFirstBeatOffset(deckId, newOffset);

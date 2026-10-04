@@ -21,6 +21,11 @@ export default function SplashScreen({ leaving }: Props) {
         leaving ? "pointer-events-none opacity-0" : "opacity-100"
       }`}
     >
+      {/* Secuencia de aparición (3 etapas escalonadas):
+          1º el ISOTIPO (animate-splash-logo: visible desde el primer fotograma,
+             con settle de zoom/glow), 2º el NOMBRE principal (animate-splash-title,
+             delay 0.15s), 3º el ESLOGÁN (animate-splash-tagline, delay 0.75s):
+          la jerarquía visual es isotipo → nombre → tagline, nunca simultáneos. */}
       <div className="flex flex-col items-center gap-6">
         <div className="relative">
           <div className="animate-splash-ring absolute inset-0 rounded-full border-2" />
@@ -32,12 +37,14 @@ export default function SplashScreen({ leaving }: Props) {
             className="animate-splash-logo relative z-[1] h-28 w-28 rounded-[26px] object-cover shadow-[0_0_40px_rgba(139,92,246,0.35)] md:h-32 md:w-32"
           />
         </div>
-        <h1 className="animate-splash-title select-none text-sm font-bold uppercase text-slate-200">
-          Smart Set Architect
-        </h1>
-        <p className="text-[10px] font-semibold uppercase tracking-[0.45em] text-violet-300/70">
-          AI Set Builder
-        </p>
+        <div className="flex w-full flex-col items-center gap-1.5">
+          <h1 className="animate-splash-title select-none text-center text-sm font-bold uppercase text-slate-200">
+            Smart Set Architect
+          </h1>
+          <p className="animate-splash-tagline text-[10px] font-semibold uppercase tracking-[0.45em] text-violet-300/70">
+            AI Set Builder
+          </p>
+        </div>
       </div>
     </div>
   );

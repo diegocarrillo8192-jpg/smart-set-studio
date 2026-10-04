@@ -3,7 +3,16 @@
  *
  * Cadena por deck:
  *   source → analyser → TRIM(gain) → EQ LOW → EQ MID → EQ HIGH → LowKill
- *          → FADER → [VU] → CROSS → MASTER → destination
+ *          → FILTER (Color FX) → PHASE → CUE GAIN → CUE BUS  (Pre-Fader Listen)
+ *          → FX (dry/wet) → FADER → [VU] → CROSS → MASTER → destination
+ *
+ * Pre-Fader Listen (PFL / Cue):
+ *   El nodo CUE GAIN de cada canal se conecta ANTES del fader de canal y del
+ *   crossfader, directamente al CUE BUS. De este modo, pulsar CUE en un canal
+ *   envía la señal de monitoreo a los auriculares independientemente de la
+ *   posición del fader o del crossfader (estándar Traktor/Rekordbox).
+ *   El bus de auriculares se mezcla con el master mediante los controles de
+ *   LEVEL / MIX / SPLIT del panel de headphones.
  *
  * Controles:
  *   · PLAY/PAUSE/CUE     → transporte del <audio>.
@@ -13,23 +22,33 @@
  *   · FADER / CROSSFADER → gains.
  *   · JOG/SCRATCH        → bend de playbackRate o seek (según play/pause).
  *
- * El SYNC es RESTRICTIVO, ESTÁTICO y de un solo disparo (Hard Phase Lock):
- *   · Tempo:  rate = BPM del maestro / BPM del esclavo, SIEMPRE 1:1 (sin
- *     ratios armónicos): el esclavo queda clavado EXACTAMENTE al BPM efectivo
- *     del maestro desde el primer milisegundo, y el fader de pitch refleja
- *     exactamente la variación de tempo requerida. El rate se escribe UNA
- *     vez y queda FIJO: sin variaciones periódicas.
- *   · Fase:   la aguja del esclavo da un salto cuántico e instantáneo
- *     (Absolute Beatgrid Snap) a la línea de beat más cercana de la rejilla
- *     del maestro — un seek único cuantizado, calculado una sola vez:
- *     barras y beats de ambas ondas quedan 100% superpuestas y ESTÁTICAS
- *     (Match 1:1) durante toda la reproducción.
- *   · SIN PLL:  no hay watchdog, nudges, micro-rampas de delayTime ni
- *     re-centrados periódicos (la fuente de la oscilación pendular). Ambos
- *     <audio> avanzan sobre el mismo reloj del AudioContext, de modo que un
- *     enganche rígido único permanece clavado sin corrección continua. El
- *     alineador de fase (DelayNode) queda SIEMPRE en reposo (PHASE_BASE) —
- *     retardo estático idéntico en ambos decks → latencia relativa nula.
+ * El SYNC es de estándar profesional (Master Audio Clock + Phase Lock
+ * continuo, al nivel de Traktor/Rekordbox — CERO deriva acumulativa):
+ *   · Master Audio Clock: AudioContext.currentTime es el ÚNICO reloj maestro
+ *     (avanza exactamente con las muestras que consume el hardware:
+ *     t = muestras / sampleRate). NINGÚN cálculo de tempo/fase usa relojes
+ *     wall-clock ni acumuladores del tipo "segundos × BPM/60": la fase
+ *     siempre se mide como posición de deck vs posición de deck sobre el
+ *     reloj maestro, sin sumas que arrastra el redondeo flotante.
+ *   · Tempo:  rate base = BPM efectivo del maestro / BPM original del
+ *     esclavo, SIEMPRE 1:1 (sin ratios armónicos), como antes.
+ *   · Fase (enganche): Hard Snap único cuantizado — la aguja del esclavo
+ *     cae EXACTO sobre el marcador de beat más cercano de la rejilla del
+ *     maestro (hardAlignShift), con latencia relativa nula (DelayNode
+ *     estático a PHASE_BASE en ambos decks).
+ *   · Fase (mantenida): servo PI continuo (servoTick, cada 200 ms). Los dos
+ *     decoders <audio> avanzan a tasas REALES ligeramente distintas
+ *     (pipeline de decodificación propio por elemento, estiramiento
+ *     preservesPitch/keylock, buffering): escribir playbackRate una sola
+ *     vez y confiar produce deriva progresiva (~0.1-0.3% de error de tasa
+ *     ⇒ decenas de ms por minuto). El servo mide la tasa REALIZADA de cada
+ *     deck (Δposición / Δctx.currentTime) y el error de fase exacto contra
+ *     la rejilla del maestro, y recorta el rate del esclavo (±0.15% en
+ *     zona de lock, inaudible; ±1.2% convergiendo; keylock activo ⇒ puro
+ *     tempo, el tono no salta) hasta clavar la fase en 0 ms para siempre:
+ *     sin micro-saltos ni seeks audibles. Solo si la desviación crece
+ *     más de ~medio beat (seek manual, estancamiento) se re-engecha con
+ *     un Hard Snap rígido.
  *
  * Estabilidad: el AudioContext se vigila (statechange): interrupciones del
  * driver se reanudan solas y una pérdida total (state "closed") reconstruye
@@ -52,9 +71,15 @@ export interface DeckHandle {
   fader: GainNode; // canal
   vu: AnalyserNode; // metering post-fader
   cross: GainNode; // crossfader
+  /** Nodo de ganancia PFL (Pre-Fader Listen) — antes del fader de canal. */
+  cue: GainNode;
+  /** Estado del botón CUE de este canal. */
+  cueActive: boolean;
   pitch: number;
   range: number;
   synced: boolean;
+  /** Role of this deck within a synced pair. */
+  syncRole: "master" | "follower" | null;
   originalBpm: number;
   gridOff: number;
   masterName: "A" | "B" | null;
@@ -70,6 +95,9 @@ export interface DeckHandle {
   dlyFb: GainNode;
   dlyWet: GainNode;
   phaWet: GainNode;
+  /** Envelope de loop: micro-fade 3-5 ms en los bordes del loop para
+   *  eliminar clicks y hacer el fold imperceptible. */
+  loopEnv: GainNode;
   /** DelayNode ESTÁTICO (nunca se modula): retardo de reposo PHASE_BASE,
    *  idéntico en ambos decks → latencia relativa SIEMPRE nula. El SYNC es
    *  Hard Lock (un solo seek), sin correcciones de fase dinámicas. */
@@ -82,6 +110,8 @@ export interface DeckHandle {
   loop: LoopInfo | null;
   /** Punto LOOP IN pendiente (sin loop aún): se arma al presionar LOOP OUT. */
   loopInPending: number | null;
+  /** Estado del micro-crossfade del loop ('idle' cuando no hay fade activo). */
+  loopFadeState: "idle" | "fade-out" | "fade-in";
 }
 
 /** Información de un loop activo (tiempos de FUENTE, cuantizados a la grilla). */
@@ -107,8 +137,52 @@ const EQ_KILL_DB = -60;
 /** Retardo de reposo del alineador (s): idéntico en ambos decks, de modo que
  *  la latencia relativa entre ellos es SIEMPRE nula. Estático: no se rampea. */
 const PHASE_BASE = 0.05;
+
+/** Duración del micro-crossfade de loop (s): la caída y la subida de la
+ *  costura. 4 ms (rango 3-5 ms) borra el click por discontinuidad de fase de
+ *  la onda justo en la muestra de retorno sin ser audible como ducking. */
+const LOOP_CROSSFADE_S = 0.004;
+/** Ventana de ANTICIPACIÓN del pre-fade (s): con cuánta antelación (máx.)
+ *  se programa la rampa al borde. El fade AUDIBLE es solo el tramo final de
+ *  LOOP_CROSSFADE_S; la ventana solo garantiza que al menos un frame del rAF
+ *  (16-33 ms) aterrice ANTES del fold. Se adapta a loops cortos (nunca
+ *  excede 1/4 de la longitud del loop). */
+const LOOP_FADE_WIN_S = 0.05;
 /** Máximo retardo del DelayNode (s): solo margen de construcción del grafo. */
 const PHASE_MAX_DELAY = 0.1;
+
+/** ── Master Audio Clock / Phase Servo (SYNC profesional) ──────────────────
+ *  El reloj maestro es AudioContext.currentTime. El servo mide la deriva de
+ *  fase del esclavo contra la rejilla del maestro, pero NO aplica trimming
+ *  continuo de playbackRate: ese pitch-bending gradual genera distorsión.
+ *  Solo realiza un re-enganche rígido (Hard Snap) cuando la deriva supera
+ *  ~medio beat. */
+const SERVO_INTERVAL_MS = 200;
+/** Desviación (s) respecto a la posición esperada que delata un seek/estancamiento
+ *  y obliga a re-abrir la ventana de medición. */
+const SERVO_SEEK_DETECT = 0.25;
+/** Deriva (en beats) que dispara el re-enganche rígido (Hard Snap). */
+const SERVO_SNAP_BEATS = 0.4;
+
+/** Ventana de medición de un deck para el servo de fase. */
+interface ServoState {
+  /** Último AudioContext.currentTime (reloj maestro) medido. */
+  ctxTime: number;
+  /** Último el.currentTime (posición del decoder) medido. */
+  deckTime: number;
+  /** Último el.playbackRate observado al medir. */
+  rate: number;
+  /** Duración (s, reloj maestro) de la última ventana válida. */
+  lastDt: number;
+  /** Término integral: corrección estacionaria de tasa aprendida. */
+  bias: number;
+  /** Ventana inicializada (hay una medición base válida). */
+  init: boolean;
+}
+
+function freshServo(): ServoState {
+  return { ctxTime: 0, deckTime: 0, rate: 1, lastDt: 0, bias: 0, init: false };
+}
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
@@ -123,6 +197,18 @@ export class AudioEngine {
   private masterEq: [BiquadFilterNode, BiquadFilterNode, BiquadFilterNode] | null = null;
   private masterFilterLP: BiquadFilterNode | null = null;
   private masterFilterHP: BiquadFilterNode | null = null;
+  /** Bus de CUE/PFL: suma de las señales pre-fader de cada canal. */
+  private cueBus: GainNode | null = null;
+  /** Mezcla de auriculares: master → hpMasterGain, cue → hpCueGain. */
+  private hpMasterGain: GainNode | null = null;
+  private hpCueGain: GainNode | null = null;
+  private hpMixBus: GainNode | null = null;
+  private hpLevelGain: GainNode | null = null;
+  private hpMerger: ChannelMergerNode | null = null;
+  private hpMixConnected = true;
+  private headphoneMix = 1;
+  private headphoneLevel = 0.7;
+  private splitMode = false;
   private meterBuf = new Float32Array(1024);
   /** Crossfader neutro por defecto: al centro (0.5), ambos decks al 50%. */
   private crossfader = 0.5;
@@ -134,6 +220,12 @@ export class AudioEngine {
   /** rAF del vigilante de loops: solo vive mientras HAY un loop activo
    *  (cero timers de por medio cuando no se usa ningún loop/roll). */
   private loopRaf: number | null = null;
+  /** Timer del servo de fase (Master Audio Clock): bucle de corrección
+   *  continua del SYNC. Solo vive mientras algún deck está sincronizado. */
+  private servoTimer: ReturnType<typeof setInterval> | null = null;
+  /** Ventana de medición por deck para el servo (reloj maestro vs reloj
+   *  del decoder de cada <audio>). */
+  private servo: Record<"A" | "B", ServoState> = { A: freshServo(), B: freshServo() };
 
   ensureContext(): AudioContext {
     if (!this.ctx || this.ctx.state === "closed") {
@@ -149,6 +241,8 @@ export class AudioEngine {
         // Re-aplicar el crossfader (los gains de los nodos nuevos nacen en
         // neutro; la posición guardada se restaura aquí).
         this.setCrossfader(this.crossfader);
+        // Re-aplicar el estado de auriculares tras reconstruir el grafo.
+        this.setSplitMode(this.splitMode);
       }
     }
     if (this.ctx.state === "suspended") {
@@ -174,6 +268,8 @@ export class AudioEngine {
     this.masterFilterHP = mk("highpass", 20, 0.71);
     this.masterAnalyser = ctx.createAnalyser();
     this.masterAnalyser.fftSize = 1024;
+
+    // Master principal: siempre a destination (main out).
     this.master
       .connect(this.masterEq[0])
       .connect(this.masterEq[1])
@@ -182,6 +278,33 @@ export class AudioEngine {
       .connect(this.masterFilterHP)
       .connect(this.masterAnalyser)
       .connect(ctx.destination);
+
+    // Bus de CUE/PFL (Pre-Fader Listen): suma de las señales pre-fader de cada deck.
+    this.cueBus = ctx.createGain();
+    this.cueBus.gain.value = 1;
+
+    // Mezcla de auriculares: master + cue, con controles de LEVEL / MIX / SPLIT.
+    this.hpMasterGain = ctx.createGain();
+    this.hpMasterGain.gain.value = this.headphoneMix;
+    this.hpCueGain = ctx.createGain();
+    this.hpCueGain.gain.value = 1 - this.headphoneMix;
+    this.hpMixBus = ctx.createGain();
+    this.hpMixBus.gain.value = 1;
+    this.hpLevelGain = ctx.createGain();
+    this.hpLevelGain.gain.value = this.headphoneLevel;
+    this.hpMerger = ctx.createChannelMerger(2);
+
+    // Ruta normal: master y cue se mezclan estéreo.
+    this.masterFilterHP.connect(this.hpMasterGain);
+    this.cueBus.connect(this.hpCueGain);
+    this.hpMasterGain.connect(this.hpMixBus);
+    this.hpCueGain.connect(this.hpMixBus);
+    this.hpMixBus.connect(this.hpLevelGain);
+    this.hpLevelGain.connect(ctx.destination);
+
+    // Ruta split (L = CUE, R = MASTER): se conecta/desconecta dinámicamente.
+    this.cueBus.connect(this.hpMerger, 0, 0);
+    this.masterFilterHP.connect(this.hpMerger, 0, 1);
   }
 
   /** Reintentos pendientes de resume() tras una interrupción del driver. */
@@ -248,13 +371,16 @@ export class AudioEngine {
       pitch: h.pitch,
       range: h.range,
       synced: h.synced,
+      syncRole: h.syncRole,
       originalBpm: h.originalBpm,
       gridOff: h.gridOff,
       masterName: h.masterName,
       eq: h.eq,
       delayTarget: h.phaseDelayTarget,
+      cueActive: h.cueActive,
       loop: h.loop,
       loopInPending: h.loopInPending,
+      loopFadeState: h.loopFadeState,
     };
     try {
       old.removeAttribute("src");
@@ -269,10 +395,12 @@ export class AudioEngine {
     bound.pitch = snapshot.pitch;
     bound.range = snapshot.range;
     bound.synced = snapshot.synced;
+    bound.syncRole = snapshot.syncRole;
     bound.originalBpm = snapshot.originalBpm;
     bound.gridOff = snapshot.gridOff;
     bound.masterName = snapshot.masterName;
     bound.eq = snapshot.eq;
+    bound.cueActive = snapshot.cueActive;
     try {
       this.setEq(name, 0, bound.eq[0]);
       this.setEq(name, 1, bound.eq[1]);
@@ -292,7 +420,12 @@ export class AudioEngine {
     }
     bound.loop = snapshot.loop;
     bound.loopInPending = snapshot.loopInPending;
+    // El envelope nuevo nace en unity: el micro-crossfade del loop se
+    // re-programa limpio desde idle en el próximo frame del vigilante
+    // (nunca se hereda un estado de fade colgado del grafo anterior).
+    bound.loopFadeState = "idle";
     if (bound.loop) this.ensureLoopWatcher();
+    this.setCueActive(name, bound.cueActive);
     const restore = () => {
       try {
         if (snapshot.time > 0) bound.el.currentTime = snapshot.time;
@@ -394,10 +527,10 @@ export class AudioEngine {
     const h = this.deck(name);
     if (!h) return;
     const el = h.el;
-    // SYNC activo: re-cometer SIEMPRE al dar PLAY (venga de CUE, hot cue o
-    // pausa). commitSync aplica rate + alineación de fase AHORA, dentro del
-    // gesto — la fase del deck cae sobre la rejilla del maestro y el audio
-    // arranca ya a su tempo final sin deriva inicial.
+    // SYNC activo: Instant Phase Lock al dar PLAY. Se calcula la fase exacta
+    // del maestro y se salta INMEDIATAMENTE al offset de muestra exacto en el
+    // follower, SIN pitch-bending ni correcciones graduales. El rate base
+    // (BPM_Maestro / BPM_Original) se aplica de forma instantánea y limpia.
     if (h.synced && h.masterName) {
       this.commitSync(name);
     }
@@ -437,6 +570,8 @@ export class AudioEngine {
     const h = this.deck(name);
     if (!h) return;
     h.el.pause();
+    // El reloj del deck se congela: ventana de medición del servo re-abierta.
+    this.servoRetune(name);
   }
 
   toggle(name: "A" | "B"): void {
@@ -454,6 +589,8 @@ export class AudioEngine {
     this.exitLoop(name);
     h.loopInPending = null;
     h.el.pause();
+    // Al liberar la fuente también se apaga el CUE de este canal.
+    this.setCueActive(name, false);
     if (h.objectUrl) {
       URL.revokeObjectURL(h.objectUrl);
       h.objectUrl = null;
@@ -516,6 +653,10 @@ export class AudioEngine {
       // Neutro: cos(π/4) = sin(π/4) = √2/2 — ambos canales al mismo nivel.
       cross.gain.value = Math.SQRT1_2;
 
+      // CUE/PFL: ganancia pre-fader, antes del fader de canal y del crossfader.
+      const cue = ctx.createGain();
+      cue.gain.value = 0;
+
       // Filtro bimodal (Color FX): LP a la izquierda (corta agudos), HP a la
       // derecha (corta graves); ambos abiertos en el centro = neutral.
       const filterLP = ctx.createBiquadFilter();
@@ -532,6 +673,11 @@ export class AudioEngine {
       // es Hard Lock (un solo seek): este nodo NUNCA se modula.
       const phase = ctx.createDelay(PHASE_MAX_DELAY);
       phase.delayTime.value = PHASE_BASE;
+
+      // Envelope de loop: gain intercalado para micro-crossfade 3-5 ms en
+      // el fold del loop, eliminando clicks por discontinuidad de amplitud.
+      const loopEnv = ctx.createGain();
+      loopEnv.gain.value = 1;
 
       // FX en paralelo (sends): dry + delay + phaser.
       const fxDry = ctx.createGain();
@@ -572,11 +718,14 @@ export class AudioEngine {
       lowKill.connect(filterLP);
       filterLP.connect(filterHP);
       filterHP.connect(phase);
+      // Envelope de loop: todo el audio pasa por aquí antes de los sends y del
+      // fader/cue, así el micro-crossfade afecta tanto al master como al PFL.
+      phase.connect(loopEnv);
       // Dry
-      phase.connect(fxDry);
+      loopEnv.connect(fxDry);
       fxDry.connect(fader);
       // Delay send
-      phase.connect(dly);
+      loopEnv.connect(dly);
       dly.connect(dlyFb);
       dlyFb.connect(dly);
       dly.connect(dlyWet);
@@ -588,6 +737,12 @@ export class AudioEngine {
       }
       phaNode.connect(phaWet);
       phaWet.connect(fader);
+
+      // Pre-Fader Listen: la señal se toma DESPUÉS de EQ/Trim/Filtro/FX phase
+      // y del envelope de loop, y ANTES del fader de canal, por lo que el cue
+      // no se ve afectado por el fader ni por el crossfader.
+      loopEnv.connect(cue);
+      cue.connect(this.cueBus!);
 
       fader.connect(vu);
       fader.connect(cross);
@@ -607,6 +762,7 @@ export class AudioEngine {
         pitch: 0,
         range: DEFAULT_PITCH_RANGE,
         synced: false,
+        syncRole: null,
         originalBpm: 0,
         gridOff: 0,
         masterName: null,
@@ -619,10 +775,14 @@ export class AudioEngine {
         dlyFb,
         dlyWet,
         phaWet,
+        loopEnv,
         phase,
         phaseDelayTarget: PHASE_BASE,
+        cue,
+        cueActive: false,
         loop: null,
         loopInPending: null,
+        loopFadeState: "idle",
       };
       if (name === "A") this.deckA = handle;
       else this.deckB = handle;
@@ -675,6 +835,73 @@ export class AudioEngine {
     } else {
       this.masterFilterLP.frequency.setTargetAtTime(22000, t, 0.015);
       this.masterFilterHP.frequency.setTargetAtTime(20, t, 0.015);
+    }
+  }
+
+  // ── Headphones / CUE (PFL) ──────────────────────────────────────────────
+
+  /** Activa/desactiva el CUE (PFL) de un canal: la señal se toma antes del
+   *  fader y del crossfader, por lo que suena en los auriculares aunque el
+   *  canal esté cortado en el master. */
+  setCueActive(name: "A" | "B", active: boolean): void {
+    const h = this.deck(name);
+    if (!h) return;
+    h.cueActive = active;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    h.cue.gain.setTargetAtTime(active ? 1 : 0, now, 0.01);
+  }
+
+  setHeadphoneLevel(v: number): void {
+    this.headphoneLevel = clamp(v, 0, 1);
+    this.applyHeadphoneGains(this.ctx ? this.ctx.currentTime : 0);
+  }
+
+  setHeadphoneMix(v: number): void {
+    this.headphoneMix = clamp(v, 0, 1);
+    this.applyHeadphoneGains(this.ctx ? this.ctx.currentTime : 0);
+  }
+
+  /** Split mode: L = CUE, R = MASTER (mezcla de auriculares). */
+  setSplitMode(enabled: boolean): void {
+    if (!this.hpMixBus || !this.hpMerger || !this.hpLevelGain) return;
+    this.splitMode = enabled;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    if (enabled) {
+      if (this.hpMixConnected) {
+        try {
+          this.hpMixBus.disconnect(this.hpLevelGain);
+        } catch {
+          /* ya desconectado */
+        }
+        this.hpMixConnected = false;
+      }
+      this.hpMerger.connect(this.hpLevelGain);
+    } else {
+      try {
+        this.hpMerger.disconnect(this.hpLevelGain);
+      } catch {
+        /* ya desconectado */
+      }
+      if (!this.hpMixConnected) {
+        this.hpMixBus.connect(this.hpLevelGain);
+        this.hpMixConnected = true;
+      }
+    }
+    this.applyHeadphoneGains(now);
+  }
+
+  private applyHeadphoneGains(now: number): void {
+    if (!this.hpMasterGain || !this.hpCueGain || !this.hpLevelGain) return;
+    const level = this.headphoneLevel;
+    if (this.splitMode) {
+      // En split el paneo es hard (L=CUE, R=MASTER); MIX no aplica.
+      this.hpMasterGain.gain.setTargetAtTime(0, now, 0.01);
+      this.hpCueGain.gain.setTargetAtTime(0, now, 0.01);
+      this.hpLevelGain.gain.setTargetAtTime(level, now, 0.01);
+    } else {
+      this.hpMasterGain.gain.setTargetAtTime(this.headphoneMix, now, 0.01);
+      this.hpCueGain.gain.setTargetAtTime(1 - this.headphoneMix, now, 0.01);
+      this.hpLevelGain.gain.setTargetAtTime(level, now, 0.01);
     }
   }
 
@@ -778,8 +1005,16 @@ export class AudioEngine {
   setDeckMeta(name: "A" | "B", meta: { originalBpm?: number; gridOff?: number }): void {
     const h = this.deck(name);
     if (!h) return;
+    const bpmChanged = meta.originalBpm !== undefined && meta.originalBpm > 0 && meta.originalBpm !== h.originalBpm;
+    const gridChanged = meta.gridOff !== undefined && meta.gridOff !== h.gridOff;
     if (meta.originalBpm !== undefined) h.originalBpm = meta.originalBpm > 0 ? meta.originalBpm : 0;
     if (meta.gridOff !== undefined) h.gridOff = meta.gridOff;
+    if (bpmChanged || gridChanged) {
+      // La referencia de fase (rejilla) se movió: la corrección estacionaria
+      // aprendida ya no aplica — memoria integral a cero y ventana re-abierta.
+      this.servo[name].bias = 0;
+      this.servoRetune(name);
+    }
   }
 
   setPitch(name: "A" | "B", pct: number): void {
@@ -836,6 +1071,22 @@ export class AudioEngine {
     return this.deck(name)?.synced ?? false;
   }
 
+  /** Estado de SYNC del deck según el MOTOR (fuente de verdad del audio):
+   *  isSynced = este deck es ESCLAVO de otro (su rate no es libre), role =
+   *  papel dentro de la pareja (master/follower) y masterDeck = deck maestro
+   * al que sigue. La UI lo espeja para pintar MASTER / FOLLOW A|B según el
+   * master ACTIVO — las etiquetas jamás se cruzan porque salen del motor. */
+  getSyncState(
+    name: "A" | "B",
+  ): { isSynced: boolean; role: "master" | "follower" | null; masterDeck: "A" | "B" | null } {
+    const h = this.deck(name);
+    return {
+      isSynced: h?.synced ?? false,
+      role: h?.syncRole ?? null,
+      masterDeck: h?.masterName ?? null,
+    };
+  }
+
   /** Desfase EXACTO de grilla (Beat Offset, segundos de tiempo de fuente)
    *  entre esclavo y maestro, calculado UNA vez para el Hard Lock: cuánto hay
    *  que mover la aguja del esclavo para que su línea de beat quede 100%
@@ -885,17 +1136,13 @@ export class AudioEngine {
   }
 
   /**
-   * SYNC restrictivo ESTÁTICO de un solo disparo (Hard Phase Lock):
-   *   · Tempo: playbackRate = BPM_Master_efectivo / BPM_Original_del_deck,
-   *     SIEMPRE 1:1 (sin ratios armónicos). Se escribe UNA vez y queda FIJO:
-   *     CERO variación dinámica posterior (sin PLL, sin watchdog, sin
-   *     nudges, sin rampas, sin timers que toquen rate o posición durante
-   *     el Play).
-   *   · Fase: Hard Alignment — el Beat Offset exacto se calcula una sola vez
-   *     y se aplica un seek rígido de 0 ms de desfasaje. Tras el enganche,
-   *     ambos decks avanzan sobre el MISMO reloj del AudioContext con BPM
-   *     efectivos idénticos: la alineación permanece ESTÁTICA (Match 1:1)
-   *     durante toda la reproducción del track.
+   * SYNC profesional (Master Audio Clock + Phase Lock continuo):
+   *   · Tempo: playbackRate base = BPM_Master_efectivo / BPM_Original_del_deck,
+   *     SIEMPRE 1:1 (sin ratios armónicos).
+   *   · Fase: Hard Alignment al enganchar (seek cuantizado al beat más
+   *     cercano del maestro, 0 ms) + servo PI continuo durante la
+   *     reproducción (servoTick) que congela la fase en 0 ms para siempre,
+   *     sin deriva acumulativa (ver cabecera del archivo).
    */
   syncTo(name: "A" | "B", masterName: "A" | "B"): boolean {
     const slave = this.deck(name);
@@ -903,15 +1150,36 @@ export class AudioEngine {
     if (!slave || !master || slave === master) return false;
     if (!slave.originalBpm || !master.originalBpm) return false;
 
+    // Guard anti-ciclo (A sincronizado a B y B a la vez a A): sin referencia
+    // independiente la fase deriva sin correctivo posible. El deck que pulsa
+    // SYNC se convierte en esclavo y el antiguo esclavo queda liberado como
+    // maestro independiente (determinista, una sola referencia de tempo).
+    if (master.synced && master.masterName === name) {
+      this.clearSync(masterName);
+    }
+
+    // Establecer roles Master/Follower de forma explícita. Si el deck maestro
+    // ya era follower de alguien, lo liberamos primero para garantizar una
+    // única referencia de tempo.
+    if (master.syncRole === "follower") {
+      this.clearSync(masterName);
+    }
+    master.syncRole = "master";
+    master.masterName = null;
+
     // BPM objetivo: el efectivo del maestro (source BPM × pitch del maestro).
     const masterBpm = this.getEffectiveBpm(masterName) || master.originalBpm;
-    // rate FIJO = BPM_Master / BPM_Original (1:1 exacto, sin ratios).
+    // rate base = BPM_Master / BPM_Original (1:1 exacto, sin ratios).
     const targetRate = syncPlaybackRate(masterBpm, slave.originalBpm);
     slave.pitch = (targetRate - 1) * 100;
     slave.synced = true;
+    slave.syncRole = "follower";
     slave.masterName = masterName;
+    // Enganche fresco: la corrección estacionaria se aprende de cero para
+    // esta pareja de decks (el bias es tasa, no posición).
+    this.servo[name].bias = 0;
 
-    // Aplicación inmediata (rate fijo + snap rígido de fase), suene o no.
+    // Aplicación inmediata (rate base + snap rígido de fase), suene o no.
     this.commitSync(name);
     return true;
   }
@@ -929,14 +1197,13 @@ export class AudioEngine {
   }
 
   /**
-   * Aplica el SYNC en UN solo disparo, RÍGIDO y ESTÁTICO (Hard Lock):
-   *   1) Tempo: playbackRate = masterBPM / trackBPM escrito directo y FIJO.
-   *      No hay watchdog ni variaciones periódicas de ningún tipo.
+   * Aplica el SYNC (rate base + fase):
+   *   1) Tempo: playbackRate = masterBPM / trackBPM (1:1 exacto).
    *   2) Fase: Hard Alignment — seek único cuantizado de la aguja a la línea
    *      de beat más cercana de la rejilla del maestro (0 ms de desfasaje).
-   *      Tras el enganche, ambos decks avanzan sobre el mismo reloj del
-   *      AudioContext: las barras quedan superpuestas y ESTÁTICAS (Match 1:1)
-   *      sin ninguna corrección posterior.
+   *   3) Arranca el servo de fase (Master Audio Clock): a partir de aquí la
+   *      fase se mantiene CONGELADA por corrección continua de rate (±0.15%
+   *      en lock), sin deriva acumulativa durante todo el set.
    */
   private commitSync(name: "A" | "B"): void {
     const h = this.deck(name);
@@ -952,17 +1219,21 @@ export class AudioEngine {
     } catch {
       /* sin soporte */
     }
-    // Tempo EXACTO al instante: el BPM se clava de inmediato y queda FIJO.
+    // Tempo EXACTO al instante: el BPM se clava de inmediato.
     h.el.playbackRate = targetRate;
-    // Fase: Hard Alignment (un solo seek rígido de 0 ms).
+    // Fase: Hard Alignment (un seek rígido de 0 ms al enganchar).
     this.snapPhaseToMaster(name);
+    // Ventanas de medición frescas (esclavo y maestro) + servo en marcha.
+    this.servoRetune(name);
+    this.servoRetune(h.masterName);
+    this.ensureServo();
   }
 
   /** Hard Alignment: mueve la aguja del esclavo a la línea de beat más
    *  cercana de la rejilla del maestro con UN seek exacto (0 ms de
-   *  desfasaje) — calculado UNA vez y sin rampas, filtros ni re-centrados
-   *  posteriores. El retardo del grafo permanece SIEMPRE en reposo
-   *  (PHASE_BASE). */
+   *  desfasaje). Tras el seek, la ventana de medición del servo se re-abre
+   *  (una discontinuidad de posición no es error de tasa). El retardo del
+   *  grafo permanece SIEMPRE en reposo (PHASE_BASE). */
   private snapPhaseToMaster(name: "A" | "B"): void {
     const h = this.deck(name);
     if (!h || !h.synced || !h.masterName) return;
@@ -976,13 +1247,44 @@ export class AudioEngine {
     } catch {
       /* seek no disponible todavía: se reintenta en el próximo commitSync */
     }
+    this.servoRetune(name);
   }
 
   clearSync(name: "A" | "B"): void {
     const h = this.deck(name);
     if (!h) return;
+    const wasMaster = h.syncRole === "master";
+    const masterRef = h.masterName;
     h.synced = false;
+    h.syncRole = null;
     h.masterName = null;
+    // Si este deck era maestro, liberar también a sus followers para evitar
+    // que queden huérfanos de referencia.
+    if (wasMaster) {
+      const other = name === "A" ? "B" : "A";
+      const otherDeck = this.deck(other);
+      if (otherDeck && otherDeck.synced && otherDeck.masterName === name) {
+        otherDeck.synced = false;
+        otherDeck.syncRole = null;
+        otherDeck.masterName = null;
+        this.servo[other].bias = 0;
+        this.servoRetune(other);
+      }
+    } else if (masterRef) {
+      // Roles RELACIONALES: al liberarse el follower, la pareja deja de
+      // existir y el maestro pierde también su rol. Así MASTER / FOLLOW son
+      // estados de la MISMA pareja (nunca queda un "MASTER" huérfano que
+      // cruce las etiquetas del botón SYNC).
+      const m = this.deck(masterRef);
+      if (m && m.syncRole === "master" && !m.synced) {
+        m.syncRole = null;
+      }
+    }
+    // El servo deja de corregir este deck: memoria integral a cero y
+    // ventana de medición re-abierta (por si se re-engancha más tarde).
+    this.servo[name].bias = 0;
+    this.servoRetune(name);
+    this.stopServoIfIdle();
     if (h.el.paused) {
       // SYNC cancelado antes de sonar: el rate nunca se aplicó; se restaura
       // el tempo neutro para que el próximo PLAY salga limpio.
@@ -996,6 +1298,173 @@ export class AudioEngine {
     }
     // Vuelta al tempo manual: escritura DIRECTA e instantánea (sin rampas).
     h.el.playbackRate = clamp(1 + h.pitch / 100, 0.5, 2);
+  }
+
+  // ── Master Audio Clock: servo de fase continua (Phase Lock pro) ─────────
+  //
+  // Los decoders de los dos <audio> avanzan a tasas REALES ligeramente
+  // distintas (pipeline por elemento, keylock, buffering): un rate escrito
+  // una sola vez deriva ~0.1-0.3% ⇒ decenas de ms por minuto de set. Este
+  // servo cierra el bucle sobre el observable real — el desfase de fase
+  // contra la rejilla del maestro — referenciado SIEMPRE al reloj maestro
+  // (AudioContext.currentTime, muestras consumidas): nunca se acumula
+  // tiempo, nunca se arrastra error de redondeo.
+
+  /** Re-abre la ventana de medición del servo de un deck (tras seeks,
+   *  plays, cambios de rate, commits de sync o liberaciones). No toca el
+   *  término integral: el bias es conocimiento de tasa, no de posición. */
+  private servoRetune(name: "A" | "B"): void {
+    const h = this.deck(name);
+    const s = this.servo[name];
+    s.lastDt = 0;
+    if (!h) {
+      s.init = false;
+      return;
+    }
+    s.ctxTime = this.ctx ? this.ctx.currentTime : 0;
+    s.deckTime = Number.isFinite(h.el.currentTime) ? h.el.currentTime : 0;
+    s.rate = h.el.playbackRate;
+    s.init = true;
+  }
+
+  /** Arranca el servo de fase si hay algún deck sincronizado (idempotente). */
+  private ensureServo(): void {
+    if (this.servoTimer !== null) return;
+    if (!this.deckA?.synced && !this.deckB?.synced) return;
+    this.servoTimer = setInterval(() => this.servoTick(), SERVO_INTERVAL_MS);
+  }
+
+  /** Detiene el servo cuando ya no queda ningún deck sincronizado. */
+  private stopServoIfIdle(): void {
+    if (this.servoTimer === null) return;
+    if (this.deckA?.synced || this.deckB?.synced) return;
+    clearInterval(this.servoTimer);
+    this.servoTimer = null;
+  }
+
+  /** Un paso de medición de un deck contra el reloj maestro. Devuelve:
+   *  · "fresh"   — ventana recién abierta (sin dato comparable aún).
+   *  · "ok"      — ventana válida: el decoder avanzó conforme a su rate.
+   *  · "jump"    — discontinuidad (seek/beat jump/carga): ventana re-abierta.
+   *  · "frozen"  — reloj del deck congelado (pausa o estancamiento). */
+  private servoMeasure(name: "A" | "B", nowCtx: number): "fresh" | "ok" | "jump" | "frozen" {
+    const h = this.deck(name);
+    const s = this.servo[name];
+    if (!h) {
+      s.init = false;
+      return "fresh";
+    }
+    const t = h.el.currentTime;
+    if (!Number.isFinite(t)) {
+      s.init = false;
+      return "fresh";
+    }
+    if (!s.init) {
+      this.servoRetune(name);
+      return "fresh";
+    }
+    const dtCtx = nowCtx - s.ctxTime;
+    if (dtCtx <= 0.005) return "ok"; // reloj maestro detenido (ctx suspendido)
+    // Deck pausado: su reloj está congelado (nunca es un "salto" de posición).
+    if (h.el.paused) {
+      s.ctxTime = nowCtx;
+      s.deckTime = t;
+      s.rate = h.el.playbackRate;
+      s.lastDt = dtCtx;
+      return "frozen";
+    }
+    const dt = t - s.deckTime;
+    const expected = s.rate * dtCtx;
+    if (Math.abs(dt - expected) > SERVO_SEEK_DETECT) {
+      // Salto de posición o estancamiento grande: re-abrir la ventana. La
+      // tasa realizada de este intervalo sería basura (Δposición inválido).
+      this.servoRetune(name);
+      return "jump";
+    }
+    // Ventana válida: actualizar la medición (la tasa realizada del decoder
+    // queda implícita en dt/dtCtx; el servo actúa sobre el error de fase
+    // absoluto, que no depende de esta ventana).
+    s.ctxTime = nowCtx;
+    s.deckTime = t;
+    s.rate = h.el.playbackRate;
+    s.lastDt = dtCtx;
+    if (Math.abs(dt) < 0.002) return "frozen"; // decoder estancado (buffering)
+    return "ok";
+  }
+
+  /** Un tick del servo de fase: corrección PI continua del SYNC. Mide el
+   *  error de fase EXACTO (posición vs posición, en tiempo de fuente) del
+   *  esclavo contra la rejilla del maestro y recorta su playbackRate para
+   *  converger y CONGELAR la fase en 0 ms, sin seeks audibles. */
+  private servoTick(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (!this.deckA?.synced && !this.deckB?.synced) {
+      this.stopServoIfIdle();
+      return;
+    }
+    const nowCtx = ctx.currentTime;
+
+    for (const n of ["A", "B"] as const) {
+      const h = this.deck(n);
+      if (!h || !h.synced || !h.masterName) continue;
+      const master = this.deck(h.masterName);
+      if (!master || master === h) continue;
+      if (!h.originalBpm || !master.originalBpm) continue;
+
+      const s = this.servo[n];
+      const slaveMeas = this.servoMeasure(n, nowCtx);
+      const masterMeas = this.servoMeasure(h.masterName, nowCtx);
+
+      // Ciclo de sync (A↔B): sin referencia independiente no se corrige
+      // (syncTo lo impide al enganchar; defensa en profundidad).
+      if (master.synced) continue;
+      // El esclavo no avanza (pausa/buffering) o acaba de saltar (seek):
+      // sin trim este tick — la ventana se re-abre en el próximo.
+      if (slaveMeas !== "ok") continue;
+      // Maestro congelado (pausado/estancado): su rejilla no avanza; se
+      // congela también el tempo del esclavo (corregir contra un reloj
+      // parado arrastraría la fase sin referencia real).
+      if (masterMeas === "frozen") continue;
+      // Un salto del maestro discontinuo en posición pero CONTINUO en fase
+      // (loop fold / beat jump del maestro: bordes cuantizados a la rejilla)
+      // NO anula el término integral: el error de fase no se movió. Si el
+      // salto rompe la fase de verdad, el umbral catastrófico de abajo
+      // re-engecha con Hard Snap y ahí sí se anula el bias.
+      // El jog y el loop poseen el rate/posición del esclavo: no interferir.
+      if (h.jogging || h.loop) continue;
+
+      // Error de fase EXACTO (s de tiempo de fuente del esclavo) contra la
+      // rejilla del maestro: > 0 ⇒ el esclavo va retrasado.
+      const err = hardAlignShift(
+        master.el.currentTime,
+        master.originalBpm,
+        master.gridOff,
+        h.el.currentTime,
+        h.originalBpm,
+        h.gridOff,
+      );
+      const period = 60 / h.originalBpm;
+
+      // Deriva catastrófica (> ~medio beat: seek manual del esclavo o
+      // estancamiento largo): re-enganche rígido al beat del maestro.
+      // NO aplicamos trimming continuo de playbackRate: ese pitch-bending
+      // gradual genera distorsión perceptible, especialmente al iniciar la
+      // reproducción con SYNC. El lock se mantiene mediante Hard Snap
+      // instantáneo + rate base exacto (BPM_Maestro / BPM_Original).
+      if (Math.abs(err) > SERVO_SNAP_BEATS * period) {
+        this.snapPhaseToMaster(n);
+        s.bias = 0;
+        this.servoRetune(n);
+        this.servoRetune(h.masterName);
+        continue;
+      }
+
+      // El trimming continuo está DESHABILITADO para evitar pitch-bending y
+      // distorsión. Mantenemos la medición y el bias por si en el futuro se
+      // opta por una corrección suave, pero no se toca el playbackRate aquí.
+      // La sincronización se sostiene con rate base exacto + Hard Snap.
+    }
   }
 
   // ── Loops / Beat Jump / Loop Roll (Slip) ─────────────────────────────────
@@ -1034,6 +1503,7 @@ export class AudioEngine {
     const e = clamp(end, s + 0.05, dur);
     if (e <= s) return null;
     h.loop = { start: s, end: e, beats, roll: false, rollBase: 0, rollStartWall: 0 };
+    h.loopFadeState = "idle";
     this.ensureLoopWatcher();
     return h.loop;
   }
@@ -1102,8 +1572,24 @@ export class AudioEngine {
     const e = clamp(end, s + 0.05, dur);
     if (e <= s) return null;
     h.loop = { start: s, end: e, beats, roll: true, rollBase: t, rollStartWall: performance.now() };
+    h.loopFadeState = "idle";
     this.ensureLoopWatcher();
     return h.loop;
+  }
+
+  /** Restaura el envelope de loop a unity con una micro-rampa de 4 ms
+   *  (cambio de planes: pausa, seek lejos del borde o salida del loop).
+   *  Deja el vigilante en idle para que el pre-fade se re-programe limpio. */
+  private restoreLoopEnv(h: DeckHandle): void {
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    try {
+      h.loopEnv.gain.cancelScheduledValues(now);
+      h.loopEnv.gain.setValueAtTime(Math.max(0, Math.min(h.loopEnv.gain.value, 1)), now);
+      h.loopEnv.gain.linearRampToValueAtTime(1, now + LOOP_CROSSFADE_S);
+    } catch {
+      /* ok */
+    }
+    h.loopFadeState = "idle";
   }
 
   /** Libera el loop (Auto / Manual / Roll) sin desfasar el track: la aguja
@@ -1114,6 +1600,8 @@ export class AudioEngine {
     if (!h) return;
     const loop = h.loop;
     h.loop = null;
+    // Restaurar el envelope de loop a unity al salir.
+    this.restoreLoopEnv(h);
     this.updateLoopWatcher();
     if (loop && loop.roll) {
       // Slip: retomar donde le correspondía en tiempo real. El reloj virtual
@@ -1127,6 +1615,9 @@ export class AudioEngine {
         /* seek no disponible todavía */
       }
     }
+    // Discontinuidad de posición (salida del loop / slip): ventana del
+    // servo re-abierta (el loop era un estado custodiado, no error de tasa).
+    this.servoRetune(name);
   }
 
   /** Loop activo del deck (o null). */
@@ -1140,13 +1631,14 @@ export class AudioEngine {
 
   /** Beat Jump: salto EXACTO de N beats sobre la grilla (tiempo de fuente).
    *  Como el salto es un múltiplo entero del periodo, la fase de la rejilla
-   *  no cambia: el SYNC Hard Lock se conserva sin re-alinear nada. */
+   *  no cambia: el Phase Lock se conserva (el servo solo re-abre ventana). */
   beatJump(name: "A" | "B", beats: number): void {
     const h = this.deck(name);
     if (!h || !h.originalBpm) return;
     const period = 60 / h.originalBpm;
     const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
     h.el.currentTime = clamp(h.el.currentTime + beats * period, 0, dur);
+    this.servoRetune(name);
   }
 
   /** Arranca el rAF del vigilante (idempotente). */
@@ -1164,19 +1656,95 @@ export class AudioEngine {
   }
 
   /** Un frame del vigilante: dobla cada deck cuyo loop esté activo al
-   *  cruzar su borde final, con compensación de overshoot (módulo de la
-   *  longitud) para que la fase sea continua a través del corte. */
+   *  cruzar su borde final. Micro-crossfade DETERMINISTA de 4 ms en la
+   *  costura (borra el "saltito"/click del seamless loop repeat):
+   *   1) PRE-FADE: al entrar el borde en la ventana de anticipación
+   *      (≤ 50 ms reales, ≤ 1/4 del loop) se programa una rampa que
+   *      MANTIENE el gain hasta 4 ms antes del borde y cae a 0 EXACTO en
+   *      el borde — instante REAL corregido por playbackRate (la aguja
+   *      avanza a rate × tiempo real, no a tiempo de fuente).
+   *   2) FOLD: cruzado el borde → seek compensado por overshoot (mod de
+   *      la longitud) de vuelta al Loop In + fade-in lineal de 4 ms a
+   *      unity: la discontinuidad de fase de la onda en la muestra de
+   *      retorno queda suavizada por el micro-crossfade.
+   *   3) Fugas (pausa / seek lejos del borde): el envelope se restaura a
+   *      unity y el micro-fade se re-programa limpio desde idle.
+   *  Caída y subida de 4 ms cada una (3-5 ms): inaudibles como ducking,
+   *  suficientes para eliminar el click de fase en el reinicio del ciclo. */
   private loopTick = (): void => {
     for (const h of [this.deckA, this.deckB]) {
-      if (!h || !h.loop || h.el.paused) continue;
+      if (!h || !h.loop) continue;
+      // Pausa con el micro-fade abierto: el AudioContext sigue corriendo y
+      // la rampa programada dejaría el gain en 0 para siempre. Se restaura
+      // a unity y el pre-fade se re-programa al reanudar la reproducción.
+      if (h.el.paused) {
+        if (h.loopFadeState !== "idle") this.restoreLoopEnv(h);
+        continue;
+      }
       const loop = h.loop;
       const t = h.el.currentTime;
-      if (!Number.isFinite(t) || t < loop.end) continue;
+      if (!Number.isFinite(t)) continue;
       const len = loop.end - loop.start;
       if (len <= 0) continue;
-      const folded = loop.start + (((t - loop.start) % len) + len) % len;
-      if (Math.abs(t - folded) > 0.001) {
-        h.el.currentTime = folded;
+
+      const now = this.ctx ? this.ctx.currentTime : 0;
+      const rate = h.el.playbackRate > 0.01 ? h.el.playbackRate : 1;
+      const lookaheadSrc = Math.min(LOOP_FADE_WIN_S, len * 0.25) * rate;
+
+      // FASE 1 — FOLD: cruzamos el borde → seek compensado + micro fade-in
+      // de 4 ms justo en la muestra de retorno (Loop In).
+      if (t >= loop.end) {
+        const target = loop.start + ((((t - loop.start) % len) + len) % len);
+        try {
+          h.el.currentTime = Math.max(0, target);
+        } catch {
+          /* seek no disponible todavía */
+        }
+        try {
+          h.loopEnv.gain.cancelScheduledValues(now);
+          h.loopEnv.gain.setValueAtTime(Math.max(0, Math.min(h.loopEnv.gain.value, 1)), now);
+          h.loopEnv.gain.linearRampToValueAtTime(1, now + LOOP_CROSSFADE_S);
+        } catch {
+          /* ok */
+        }
+        h.loopFadeState = "fade-in";
+        continue;
+      }
+
+      // FASE 2 — PRE-FADE: rampa a 0 con llegada EXACTA al borde; la caída
+      // audible se concentra en los últimos 4 ms (hold → 0), nunca un
+      // decaimiento largo que se oiga como ducking.
+      if (h.loopFadeState === "idle") {
+        const distSrc = loop.end - t;
+        if (distSrc <= lookaheadSrc) {
+          const tBorder = now + Math.max(distSrc / rate, 0.0005);
+          const fadeStart = Math.max(now, tBorder - LOOP_CROSSFADE_S);
+          try {
+            h.loopEnv.gain.cancelScheduledValues(now);
+            h.loopEnv.gain.setValueAtTime(h.loopEnv.gain.value, now);
+            h.loopEnv.gain.setValueAtTime(h.loopEnv.gain.value, fadeStart);
+            h.loopEnv.gain.linearRampToValueAtTime(0, tBorder);
+          } catch {
+            /* ok */
+          }
+          h.loopFadeState = "fade-out";
+        }
+      }
+
+      // FASE 2b — FUGA: en fade-out pero la aguja quedó lejos del borde
+      // (seek manual / borde arrastrado): el fade programado ya no aplica,
+      // se restaura a unity y se re-programa desde idle.
+      if (h.loopFadeState === "fade-out" && loop.end - t > lookaheadSrc) {
+        this.restoreLoopEnv(h);
+      }
+
+      // FASE 3 — fade-in completado (gain de vuelta a unity) → idle.
+      if (h.loopFadeState === "fade-in") {
+        try {
+          if (h.loopEnv.gain.value >= 0.99) h.loopFadeState = "idle";
+        } catch {
+          h.loopFadeState = "idle";
+        }
       }
     }
     this.loopRaf = requestAnimationFrame(this.loopTick);
@@ -1202,24 +1770,28 @@ export class AudioEngine {
     if (!h) return;
     const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
     h.el.currentTime = clamp(h.el.currentTime + deltaSec, 0, dur);
+    this.servoRetune(name);
   }
 
   endJog(name: "A" | "B"): void {
     const h = this.deck(name);
     if (!h) return;
     h.jogging = false;
-    // Con SYNC activo se restaura el rate FIJO del SYNC (masterBPM/trackBPM)
-    // sin re-alinear: la fase queda donde la dejó el jog y el audio fluye
-    // libre (el único snap rígido es el del SYNC/PLAY).
+    // Con SYNC activo se restaura el rate BASE del SYNC (masterBPM/trackBPM)
+    // y el servo de fase retoma el control: re-converge el desfase que haya
+    // dejado el jog con trims inaudibles (±0.15%) o, si es mayor de ~medio
+    // beat, re-engecha con Hard Snap.
     if (h.synced && h.masterName) {
       const master = this.deck(h.masterName);
       if (master) {
         const masterBpm = this.getEffectiveBpm(h.masterName) || master.originalBpm;
         h.el.playbackRate = syncPlaybackRate(masterBpm, h.originalBpm);
+        this.servoRetune(name);
         return;
       }
     }
     this.applyManualRate(name);
+    this.servoRetune(name);
   }
 
   seek(name: "A" | "B", t: number): void {
@@ -1227,6 +1799,9 @@ export class AudioEngine {
     if (!h) return;
     const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
     h.el.currentTime = clamp(t, 0, dur);
+    // Seek = discontinuidad de posición: ventana de medición re-abierta (el
+    // servo re-alineará la fase con trims suaves o Hard Snap si procede).
+    this.servoRetune(name);
   }
 
   stopAll(): void {

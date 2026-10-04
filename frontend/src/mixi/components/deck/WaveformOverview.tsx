@@ -35,6 +35,7 @@ import { useMixiStore } from '../../store/mixiStore';
 import { MixiEngine } from '../../audio/MixiEngine';
 import type { DeckId } from '../../types';
 import { CUE_COLORS, themeVar } from '../../theme';
+import { BASE_PIXELS_PER_SECOND } from './waveformConstants';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -306,9 +307,9 @@ function paintOverlayFrame(
   ctx.fillRect(0, 0, cursorX, height);
 
   // ── Viewport rectangle (what's visible in main waveform)
-  // Estimate ~4s visible window, playhead at 1/3
-  // viewSec scales with zoom: at zoom 1 = ~4s, zoom 0.25 = ~16s, zoom 4 = ~1s
-  const viewSec = 4 / zoom;
+  // Ventana visible de la forma de onda principal, derivada de la misma
+  // escala lineal compartida: width px / (BASE_PPS * zoom) segundos.
+  const viewSec = width / (BASE_PIXELS_PER_SECOND * zoom);
   const viewStartT = Math.max(0, currentTime - viewSec / 3);
   const viewEndT = Math.min(dur, currentTime + (viewSec * 2) / 3);
   const vx1 = Math.floor((viewStartT / dur) * width);

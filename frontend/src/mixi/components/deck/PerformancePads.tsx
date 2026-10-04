@@ -93,20 +93,20 @@ const PerformancePadsBase: FC<PerformancePadsProps> = ({ deckId, color, compact 
       <div className="flex w-[150px] flex-col gap-1">
         <div className="grid grid-cols-2 gap-1">
           <ModeTab label="HOT CUE" active={mode === 'hotcue'} onClick={() => setMode('hotcue')} color={color} />
-          <ModeTab label="AUTO LOOP" active={mode === 'loop'} onClick={() => setMode('loop')} color="var(--clr-b)" />
-          <ModeTab label="BEAT JUMP" active={mode === 'beatjump'} onClick={() => setMode('beatjump')} color="var(--clr-master)" />
-          <ModeTab label="LOOP ROLL" active={mode === 'looproll'} onClick={() => setMode('looproll')} color="#22d3ee" />
+          <ModeTab label="AUTO LOOP" active={mode === 'loop'} onClick={() => setMode('loop')} color={color} />
+          <ModeTab label="BEAT JUMP" active={mode === 'beatjump'} onClick={() => setMode('beatjump')} color={color} />
+          <ModeTab label="LOOP ROLL" active={mode === 'looproll'} onClick={() => setMode('looproll')} color={color} />
         </div>
-        <PadGrid mode={mode} deckId={deckId} gridClass="grid grid-cols-2 gap-1 [&_button]:h-7" />
+        <PadGrid mode={mode} deckId={deckId} color={color} gridClass="grid grid-cols-2 gap-1 [&_button]:h-7" />
         {/* (base del deck despejada) */}
         <button
           type="button"
           onClick={toggleQuantize}
           className="rounded-md py-1 text-[11px] font-medium uppercase tracking-[0.15em] transition active:scale-95"
           style={{
-            background: quantize ? 'rgba(168,85,247,0.2)' : 'rgba(255,255,255,0.03)',
-            border: `1px solid ${quantize ? 'var(--clr-master)' : 'var(--brd-default)'}`,
-            color: quantize ? 'var(--clr-master)' : 'rgba(148, 163, 184, 0.7)',
+            background: quantize ? `${color}33` : 'rgba(255,255,255,0.03)',
+            border: `1px solid ${quantize ? color : 'var(--brd-default)'}`,
+            color: quantize ? color : 'rgba(148, 163, 184, 0.7)',
           }}
           title="Quantize: snap cues & loops to the beat grid"
         >
@@ -127,9 +127,9 @@ const PerformancePadsBase: FC<PerformancePadsProps> = ({ deckId, color, compact 
         {/* Mode tabs — compactas horizontalmente (ancho según su texto) */}
         <div className="flex gap-2 items-center flex-1 justify-start">
           <ModeTab label="HOT CUE" active={mode === 'hotcue'} onClick={() => setMode('hotcue')} color={color} />
-          <ModeTab label="AUTO LOOP" active={mode === 'loop'} onClick={() => setMode('loop')} color="var(--clr-b)" />
-          <ModeTab label="BEAT JUMP" active={mode === 'beatjump'} onClick={() => setMode('beatjump')} color="var(--clr-master)" />
-          <ModeTab label="LOOP ROLL" active={mode === 'looproll'} onClick={() => setMode('looproll')} color="#22d3ee" />
+          <ModeTab label="AUTO LOOP" active={mode === 'loop'} onClick={() => setMode('loop')} color={color} />
+          <ModeTab label="BEAT JUMP" active={mode === 'beatjump'} onClick={() => setMode('beatjump')} color={color} />
+          <ModeTab label="LOOP ROLL" active={mode === 'looproll'} onClick={() => setMode('looproll')} color={color} />
         </div>
 
         {/* QT label — same underline style as mode tabs but fixed gray */}
@@ -146,10 +146,11 @@ const PerformancePadsBase: FC<PerformancePadsProps> = ({ deckId, color, compact 
         </div>
 
         {/* Pad grid — 2 filas × 4 columnas (2×4): etiquetas de loop legibles */}
-        <PadGrid mode={mode} deckId={deckId} gridClass="grid grid-cols-4 gap-1.5 flex-1 min-w-0" />
+        <PadGrid mode={mode} deckId={deckId} color={color} gridClass="grid grid-cols-4 gap-1.5 flex-1 min-w-0" />
 
         {/* Quantize — right column, aligned with pitch strip above */}
         <QuantizeColumn
+          color={color}
           quantize={quantize}
           qLabel={qVal.label}
           onToggleQuantize={toggleQuantize}
@@ -165,37 +166,40 @@ const PerformancePadsBase: FC<PerformancePadsProps> = ({ deckId, color, compact 
 export const PerformancePads = memo(PerformancePadsBase);
 
 // ── Pad grid por modo (4 variantes: hotcue / loop / beatjump / looproll) ──
+// El color activo de cada pad es SIEMPRE el del deck (A cian / B morado);
+// solo los hot cues conservan la paleta Rekordbox por slot.
 
-const PadGrid: FC<{ mode: PadMode; deckId: DeckId; gridClass: string }> = ({ mode, deckId, gridClass }) => (
+const PadGrid: FC<{ mode: PadMode; deckId: DeckId; color: string; gridClass: string }> = ({ mode, deckId, color, gridClass }) => (
   <div className={gridClass}>
     {mode === 'hotcue'
       ? Array.from({ length: 8 }, (_, i) => <HotCuePad key={i} deckId={deckId} index={i} />)
       : mode === 'loop'
-        ? Array.from({ length: 8 }, (_, i) => <LoopPad key={i} deckId={deckId} index={i} />)
+        ? Array.from({ length: 8 }, (_, i) => <LoopPad key={i} deckId={deckId} index={i} color={color} />)
         : mode === 'beatjump'
-          ? Array.from({ length: 8 }, (_, i) => <BeatJumpPad key={i} deckId={deckId} index={i} />)
-          : Array.from({ length: 8 }, (_, i) => <LoopRollPad key={i} deckId={deckId} index={i} />)}
+          ? Array.from({ length: 8 }, (_, i) => <BeatJumpPad key={i} deckId={deckId} index={i} color={color} />)
+          : Array.from({ length: 8 }, (_, i) => <LoopRollPad key={i} deckId={deckId} index={i} color={color} />)}
   </div>
 );
 
 // ── Columna Quantize (Q on/off + resolución) ──────────────────
 
 const QuantizeColumn: FC<{
+  color: string;
   quantize: boolean;
   qLabel: string;
   onToggleQuantize: () => void;
   onCycleQValue: () => void;
-}> = ({ quantize, qLabel, onToggleQuantize, onCycleQValue }) => (
+}> = ({ color, quantize, qLabel, onToggleQuantize, onCycleQValue }) => (
   <div className="flex flex-col gap-1.5 shrink-0" style={{ width: 48 }}>
     <button
       type="button"
       onClick={onToggleQuantize}
       className="flex-1 rounded-md text-[11px] font-medium uppercase tracking-[0.15em] transition active:scale-95"
       style={{
-        background: quantize ? 'rgba(168, 85, 247, 0.2)' : 'rgba(255,255,255,0.03)',
-        border: `1px solid ${quantize ? 'var(--clr-master)' : 'var(--brd-default)'}`,
-        color: quantize ? 'var(--clr-master)' : 'rgba(148, 163, 184, 0.7)',
-        boxShadow: quantize ? '0 0 8px rgba(168,85,247,0.2)' : 'none',
+        background: quantize ? `${color}33` : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${quantize ? color : 'var(--brd-default)'}`,
+        color: quantize ? color : 'rgba(148, 163, 184, 0.7)',
+        boxShadow: quantize ? `0 0 8px ${color}33` : 'none',
       }}
       title="Quantize: snap cues & loops to the beat grid"
     >
@@ -206,9 +210,9 @@ const QuantizeColumn: FC<{
       onClick={onCycleQValue}
       className="flex-1 rounded-md text-[11px] font-medium font-mono tabular-nums transition active:scale-95"
       style={{
-        background: quantize ? 'rgba(168, 85, 247, 0.08)' : 'rgba(255,255,255,0.03)',
-        border: `1px solid ${quantize ? 'rgba(168,85,247,0.2)' : 'var(--brd-default)'}`,
-        color: quantize ? 'var(--clr-master)' : 'rgba(148, 163, 184, 0.7)',
+        background: quantize ? `${color}14` : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${quantize ? `${color}55` : 'var(--brd-default)'}`,
+        color: quantize ? color : 'rgba(148, 163, 184, 0.7)',
       }}
       title={`Quantize resolution: ${qLabel} beat`}
     >
@@ -312,7 +316,7 @@ const HotCuePad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => 
 
 // ── Loop Pad ─────────────────────────────────────────────────
 
-const LoopPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
+const LoopPad: FC<{ deckId: DeckId; index: number; color: string }> = ({ deckId, index, color }) => {
   const activeLoop = useMixiStore((s) => s.decks[deckId].activeLoop);
   const setAutoLoop = useMixiStore((s) => s.setAutoLoop);
   const exitLoopAction = useMixiStore((s) => s.exitLoop);
@@ -329,8 +333,6 @@ const LoopPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
     }
   }, [deckId, beats, isActive, setAutoLoop, exitLoopAction]);
 
-  const LOOP_COLOR = 'var(--clr-b)'; // orange
-
   return (
     <button
       type="button"
@@ -340,12 +342,12 @@ const LoopPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
       className="mixi-pad relative flex items-center justify-center rounded-[6px] h-9 text-[11px] font-medium transition select-none"
       style={{
         background: isActive
-          ? `${LOOP_COLOR}08`
+          ? `${color}08`
           : 'var(--srf-mid)',
-        border: `1px solid ${isActive ? LOOP_COLOR : 'var(--srf-light)'}`,
-        color: isActive ? LOOP_COLOR : 'rgba(148, 163, 184, 0.7)',
+        border: `1px solid ${isActive ? color : 'var(--srf-light)'}`,
+        color: isActive ? color : 'rgba(148, 163, 184, 0.7)',
         boxShadow: isActive
-          ? `inset 0 0 25px ${LOOP_COLOR}b3, 0 0 10px ${LOOP_COLOR}44, 0 2px 4px rgba(0,0,0,0.4)`
+          ? `inset 0 0 25px ${color}b3, 0 0 10px ${color}44, 0 2px 4px rgba(0,0,0,0.4)`
           : 'inset 0 2px 6px rgba(0,0,0,0.6), inset 0 -1px 0 #252525, 0 1px 0 rgba(255,255,255,0.015)',
         animation: isActive ? 'pulse 2s ease-in-out infinite' : 'none',
       }}
@@ -357,7 +359,7 @@ const LoopPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
 
 // ── Loop Roll Pad (momentary: hold = loop + slip, release = snap back) ──
 
-const LoopRollPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
+const LoopRollPad: FC<{ deckId: DeckId; index: number; color: string }> = ({ deckId, index, color }) => {
   const startLoopRoll = useMixiStore((s) => s.startLoopRoll);
   const exitLoopAction = useMixiStore((s) => s.exitLoop);
   const setSlipMode = useMixiStore((s) => s.setSlipMode);
@@ -365,7 +367,6 @@ const LoopRollPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) =
   const beats = LOOP_BEATS[index];
   const label = LOOP_LABELS[index];
   const [held, setHeld] = useState(false);
-  const ROLL_COLOR = '#22d3ee';
 
   const handleDown = useCallback(() => {
     setHeld(true);
@@ -391,11 +392,11 @@ const LoopRollPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) =
       onPointerCancel={handleUp}
       className="mixi-pad relative flex items-center justify-center rounded-[6px] h-9 text-[11px] font-medium transition select-none touch-none"
       style={{
-        background: held ? `${ROLL_COLOR}15` : 'var(--srf-mid)',
-        border: `1px solid ${held ? ROLL_COLOR : 'var(--srf-light)'}`,
-        color: held ? ROLL_COLOR : 'rgba(148, 163, 184, 0.7)',
+        background: held ? `${color}15` : 'var(--srf-mid)',
+        border: `1px solid ${held ? color : 'var(--srf-light)'}`,
+        color: held ? color : 'rgba(148, 163, 184, 0.7)',
         boxShadow: held
-          ? `inset 0 0 25px ${ROLL_COLOR}88, 0 0 10px ${ROLL_COLOR}44, 0 2px 4px rgba(0,0,0,0.4)`
+          ? `inset 0 0 25px ${color}88, 0 0 10px ${color}44, 0 2px 4px rgba(0,0,0,0.4)`
           : 'inset 0 2px 6px rgba(0,0,0,0.6), inset 0 -1px 0 #252525, 0 1px 0 rgba(255,255,255,0.015)',
         animation: held ? 'pulse 0.5s ease-in-out infinite' : 'none',
       }}
@@ -407,12 +408,11 @@ const LoopRollPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) =
 
 // ── Beat Jump Pad ───────────────────────────────────────────
 
-const BeatJumpPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) => {
+const BeatJumpPad: FC<{ deckId: DeckId; index: number; color: string }> = ({ deckId, index, color }) => {
   const beatJump = useMixiStore((s) => s.beatJump);
 
   const beats = JUMP_BEATS[index];
   const label = JUMP_LABELS[index];
-  const JUMP_COLOR = 'var(--clr-master)';
 
   const [flash, setFlash] = useState(false);
 
@@ -430,11 +430,11 @@ const BeatJumpPad: FC<{ deckId: DeckId; index: number }> = ({ deckId, index }) =
       }}
       className="mixi-pad relative flex items-center justify-center rounded-[6px] h-9 text-[11px] font-medium font-mono transition select-none"
       style={{
-        background: flash ? `${JUMP_COLOR}20` : 'var(--srf-mid)',
-        border: `1px solid ${flash ? JUMP_COLOR : 'var(--srf-light)'}`,
-        color: flash ? JUMP_COLOR : 'rgba(148, 163, 184, 0.7)',
+        background: flash ? `${color}20` : 'var(--srf-mid)',
+        border: `1px solid ${flash ? color : 'var(--srf-light)'}`,
+        color: flash ? color : 'rgba(148, 163, 184, 0.7)',
         boxShadow: flash
-          ? `inset 0 0 15px ${JUMP_COLOR}55, 0 0 8px ${JUMP_COLOR}33`
+          ? `inset 0 0 15px ${color}55, 0 0 8px ${color}33`
           : 'inset 0 2px 6px rgba(0,0,0,0.6), inset 0 -1px 0 #252525, 0 1px 0 rgba(255,255,255,0.015)',
       }}
     >

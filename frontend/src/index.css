@@ -110,16 +110,34 @@ body,
   from {
     opacity: 0;
     transform: translateY(10px);
-    letter-spacing: 0.6em;
   }
   to {
     opacity: 1;
     transform: none;
-    letter-spacing: 0.34em;
   }
 }
+/* Secuencia del splash: 1º ISOTIPO (splash-logo, desde el frame 0), 2º el
+   NOMBRE principal (delay 0.15s), 3º el ESLOGÁN (delay 1.1s, tras completar
+   el nombre). */
 .animate-splash-title {
-  animation: splash-title 1.2s ease-out both;
+  animation: splash-title 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+
+/* El ESLOGÁN entra en TERCER lugar (tras el isotipo y el nombre): delay
+   escalonado para que la jerarquía visual sea isotipo 1º → nombre 2º →
+   tagline 3º (nunca simultáneos). */
+@keyframes splash-tagline {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-splash-tagline {
+  animation: splash-tagline 0.7s ease-out 1.1s both;
 }
 
 ::-webkit-scrollbar {

@@ -14,30 +14,32 @@
 // All functions are pure — no React, no DOM, no side effects.
 // ─────────────────────────────────────────────────────────────
 
-import { POINTS_PER_SECOND, BAR_STEP } from './waveformConstants';
-export { BAR_STEP };
+import { BAR_STEP, BASE_PIXELS_PER_SECOND } from './waveformConstants';
+export { BAR_STEP, BASE_PIXELS_PER_SECOND };
 
 // ── Coordinate conversion ───────────────────────────────────
 
-/** Convert a screen X offset (pixels from canvas left) to a time in seconds. */
+/** Convert a screen X offset (pixels from canvas left) to a time in seconds.
+ *  `startTime` is the audio time at the left edge of the canvas (seconds);
+ *  `zoom` is the zoom factor applied to BASE_PIXELS_PER_SECOND. */
 export function screenXToTime(
   clickX: number,
-  startIndex: number,
+  startTime: number,
   zoom: number,
 ): number {
-  const barIndex = clickX / BAR_STEP;
-  const dataIndex = startIndex + barIndex * zoom;
-  return Math.max(0, dataIndex / POINTS_PER_SECOND);
+  const pixelsPerSecond = BASE_PIXELS_PER_SECOND * zoom;
+  return Math.max(0, startTime + clickX / pixelsPerSecond);
 }
 
-/** Convert a time (seconds) to a screen X offset (pixels from canvas left). */
+/** Convert a time (seconds) to a screen X offset (pixels from canvas left).
+ *  Pure linear mapping: x = (time - startTime) * pixelsPerSecond. */
 export function timeToScreenX(
   time: number,
-  startIndex: number,
+  startTime: number,
   zoom: number,
 ): number {
-  const dataIdx = time * POINTS_PER_SECOND;
-  return ((dataIdx - startIndex) / zoom) * BAR_STEP;
+  const pixelsPerSecond = BASE_PIXELS_PER_SECOND * zoom;
+  return (time - startTime) * pixelsPerSecond;
 }
 
 // ── Snap to beat ────────────────────────────────────────────
@@ -112,24 +114,25 @@ export function hitTest(
 // ── Zoom on mouse ───────────────────────────────────────────
 
 /**
- * Compute the new startIndex after zooming, keeping the data point
- * under the mouse cursor fixed on screen.
+ * Compute the new startTime after zooming, keeping the time under the
+ * mouse cursor fixed on screen.
  *
  * @param mouseX        Mouse X position in canvas pixels
- * @param oldStartIndex Current startIndex (data-space)
+ * @param oldStartTime  Current startTime (seconds at left edge)
  * @param oldZoom       Current zoom level
  * @param newZoom       New zoom level after scroll
- * @returns             New startIndex
+ * @returns             New startTime (seconds)
  */
 export function zoomAtPoint(
   mouseX: number,
-  oldStartIndex: number,
+  oldStartTime: number,
   oldZoom: number,
   newZoom: number,
 ): number {
-  const mouseBarIndex = mouseX / BAR_STEP;
-  const dataIndexUnderMouse = oldStartIndex + mouseBarIndex * oldZoom;
-  return dataIndexUnderMouse - mouseBarIndex * newZoom;
+  const oldPixelsPerSecond = BASE_PIXELS_PER_SECOND * oldZoom;
+  const newPixelsPerSecond = BASE_PIXELS_PER_SECOND * newZoom;
+  const timeUnderMouse = oldStartTime + mouseX / oldPixelsPerSecond;
+  return timeUnderMouse - mouseX / newPixelsPerSecond;
 }
 
 // ── Loop resize validation ──────────────────────────────────

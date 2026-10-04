@@ -215,6 +215,11 @@ export default function DjConsole({ deckATrack, deckBTrack, onDropTrack, onDeckP
       const decodeBuf = raw.slice(0);
       const blob = new Blob([playbackBuf], { type: mime });
       await MixiEngine.getInstance().loadTrack(deck, blob);
+      // La carga de un track nuevo libera el SYNC de este deck en el motor
+      // (y disuelve la pareja en cascada si este era el MASTER): el store
+      // espeja el estado real de ambos decks para que las etiquetas
+      // MASTER/FOLLOW y el tempo del otro deck queden honestos tras la carga.
+      store.syncFromEngine();
       audioEngine.setDeckMeta(deck, { originalBpm: track.bpm ?? 0 });
       if (track.bpm) store.setDeckBpm(deck, track.bpm, 0, 1);
       store.setDeckTrackLoaded(deck, true);

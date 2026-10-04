@@ -2,28 +2,29 @@
  * Motor de SYNC portado de MIXI
  * (github.com/fabriziosalmi/mixi · PolyForm Noncommercial 1.0.0).
  *
- * SYNC ESTÁTICO DE UN SOLO DISPARO (Hard Phase Lock, sin PLL):
+ * Matemática PURA del Phase Lock (sin estado, sin relojes):
  *
- *   1) Tempo: playbackRate = BPM_Master_efectivo / BPM_Original_del_deck,
- *      calculado UNA vez y FIJO para siempre durante el Play. NO existe
- *      ninguna corrección periódica posterior: sin PLL, sin watchdog, sin
- *      micro-nudges, sin rampas, sin setInterval/requestAnimationFrame que
- *      toquen el rate o la posición del audio durante la reproducción.
+ *   1) Tempo: syncPlaybackRate() = rate base del esclavo =
+ *      BPM_Master_efectivo / BPM_Original_del_deck (1:1 exacto, sin ratios
+ *      armónicos). Es la base sobre la que el servo de fase del motor
+ *      (lib/audio.ts · servoTick) aplica sus trims de corrección continua.
  *
  *   2) Fase: hardAlignShift() calcula la diferencia EXACTA de fase (Beat
  *      Offset, en segundos de tiempo de fuente) entre el esclavo y el
- *      maestro y devuelve el desplazamiento único que deja ambas marcas de
- *      beat al 100% superpuestas (0 ms de desfasaje). El motor aplica ese
- *      seek UNA sola vez en el SYNC/PLAY y deja que el audio fluya libre a
- *      velocidad fija: con el mismo BPM efectivo y la misma rejilla, la
- *      alineación permanece clavada (Match 1:1) durante todo el track,
- *      exactamente como Rekordbox/Traktor.
+ *      maestro: el desplazamiento que deja ambas marcas de beat al 100%
+ *      superpuestas (0 ms de desfasaje). El motor lo usa en dos puntos:
+ *        · Enganche (SYNC/PLAY): seek rígido único cuantizado al beat del
+ *          maestro (Absolute Beatgrid Snap).
+ *        · Mantenida (servo, cada 200 ms): medición del error de fase
+ *          para recortar el rate del esclavo (±0.15% en lock) hasta
+ *          congelar la fase en 0 ms — nunca se acumula tiempo: siempre
+ *          se mide posición vs posición.
  *
  * La fase se mide SIEMPRE en TIEMPO DE FUENTE con el periodo original
- * (60 / BPM_Original): la rejilla (gridOffset) vive en tiempo de fuente y
- * ambos <audio> avanzan sobre el mismo reloj del AudioContext, de modo que
- * dos fases de fuente iguales con BPM efectivos iguales permanecen iguales
- * para siempre, sin deriva ni oscilación.
+ * (60 / BPM_Original): la rejilla (gridOffset) vive en tiempo de fuente,
+ * de modo que dos fases de fuente iguales con BPM efectivos iguales
+ * significan grids superpuestos — exactamente el estándar de
+ * Rekordbox/Traktor.
  */
 
 /** Periodo de beat en tiempo de fuente (segundos) de un deck. */
@@ -47,8 +48,10 @@ export function wrapPhaseDelta(delta: number): number {
 /**
  * Hard Alignment: desplazamiento EXACTO (segundos de tiempo de fuente) que
  * debe aplicarse a la aguja del esclavo para que su línea de beat quede 100%
- * superpuesta (0 ms) sobre la rejilla del maestro. Función PURA y estática:
- * se calcula UNA vez en el SYNC/PLAY y nunca se re-modula en bucle.
+ * superpuesta (0 ms) sobre la rejilla del maestro. Función PURA y sin estado:
+ * en el enganche define el Hard Snap único; en el servo de fase del motor
+ * (servoTick) mide el error de fase vivo en cada tick. Signo: > 0 ⇒ el
+ * esclavo va retrasado respecto a la rejilla del maestro.
  */
 export function hardAlignShift(
   masterTimeSec: number,
@@ -68,10 +71,10 @@ export function hardAlignShift(
 }
 
 /**
- * playbackRate FIJO del esclavo bajo SYNC 1:1 exacto:
+ * playbackRate BASE del esclavo bajo SYNC 1:1 exacto:
  * rate = BPM_Master_efectivo / BPM_Original_del_esclavo.
- * Constante: se escribe UNA vez y queda clavado, sin variación dinámica
- * posterior de ningún tipo.
+ * El servo de fase del motor aplica sus trims de corrección continua
+ * SOBRE esta base (rate_final = base × (1 + trim)).
  */
 export function syncPlaybackRate(masterEffectiveBpm: number, slaveOriginalBpm: number): number {
   if (masterEffectiveBpm <= 0 || slaveOriginalBpm <= 0) return 1;

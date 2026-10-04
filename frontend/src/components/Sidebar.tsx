@@ -584,7 +584,7 @@ export default function Sidebar({
   const { pickFolder, hiddenInput } = useFolderPicker();
   const { pickAudioFiles, audioInput } = useAudioFilesPicker();
   const pollRef = useRef<Record<number, number>>({});
-  const [libraryOpen, setLibraryOpen] = useState(true);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [setsOpen, setSetsOpen] = useState(false);
 
   useEffect(() => {
