@@ -4,7 +4,7 @@
  * The real MIXI engine (Rust/Wasm DSP, AudioWorklet, BufferSource graph) is not
  * vendored. This façade implements the API surface the vendored Mixi views call
  * and delegates all audio to Smart Set Studio's native engine (src/lib/audio.ts),
- * which drives two HTMLAudioElements.
+ * which drives two AudioBufferSourceNodes (Web Audio API).
  *
  * SYNC = Master Audio Clock + Phase Lock profesional (motor nativo):
  *   · playbackRate base = BPM_Master / BPM_Original_del_deck (1:1 exacto),
@@ -29,6 +29,8 @@ const EQ_INDEX: Record<EqBand, 0 | 1 | 2> = { low: 0, mid: 1, high: 2 };
 
 export class MixiEngine {
   private static _instance: MixiEngine | null = null;
+  /** Buffer estéreo reutilizado por getMasterStereoData (evita alloc por frame). */
+  private masterStereoBuf: Float32Array | null = null;
 
   static getInstance(): MixiEngine {
     if (!MixiEngine._instance) MixiEngine._instance = new MixiEngine();
@@ -104,7 +106,10 @@ export class MixiEngine {
     const an = audioEngine.getMasterAnalyser();
     if (!an) return 0;
     const n = Math.min(outL.length, an.fftSize);
-    const tmp = new Float32Array(n);
+    if (!this.masterStereoBuf || this.masterStereoBuf.length !== n) {
+      this.masterStereoBuf = new Float32Array(n);
+    }
+    const tmp = this.masterStereoBuf;
     an.getFloatTimeDomainData(tmp);
     outL.set(tmp.subarray(0, outL.length));
     outR.set(tmp.subarray(0, outR.length));

@@ -1,5 +1,5 @@
 import { useCallback, useState, type FC } from "react";
-import { audioEngine } from "../../lib/audio";
+import { audioEngine, type DeckElement } from "../../lib/audio";
 import { CUE_PAD_COLORS } from "./theme";
 
 /**
@@ -14,7 +14,7 @@ const PAD_IDS = [0, 1, 2, 3, 4, 5, 6, 7];
 
 interface Props {
   name: "A" | "B";
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   trackId?: number | null;
   onActive?: () => void;
 }

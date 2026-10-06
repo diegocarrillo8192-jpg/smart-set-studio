@@ -138,6 +138,24 @@ function otherDeck(deck: DeckId): DeckId {
 
 const EQ_INDEX: Record<EqBand, 0 | 1 | 2> = { low: 0, mid: 1, high: 2 };
 
+/** Margen de enganche (snap) en fracciones de beat (1/8 = 12.5 %). */
+const SNAP_BEAT_MARGIN = 1 / 8;
+
+/** Engancha `time` al beat más cercano de la rejilla SI cae dentro del margen
+ *  (1/8 de beat); si está lejos de una línea, devuelve `time` sin tocar. */
+function snapToNearestBeat(time: number, originalBpm: number, firstBeatOffset: number): number {
+  if (originalBpm <= 0) return time;
+  const period = 60 / originalBpm;
+  const beat = (time - firstBeatOffset) / period;
+  const frac = ((beat % 1) + 1) % 1;
+  const dist = Math.min(frac, 1 - frac);
+  if (dist <= SNAP_BEAT_MARGIN) {
+    const k = Math.round(beat);
+    return Math.max(0, firstBeatOffset + k * period);
+  }
+  return time;
+}
+
 /** Update one deck immutably. */
 function patch(set: (fn: (s: MixiStore) => Partial<MixiStore>) => void, deck: DeckId, p: object) {
   set((s) => ({ decks: { ...s.decks, [deck]: { ...s.decks[deck], ...p } } }));
@@ -183,27 +201,19 @@ export const useMixiStore = create<MixiStore>()(
       const d = get().decks[deck];
       // Conectado directamente al motor de audio nativo.
       if (playing) {
-        const other = otherDeck(deck);
-        const masterReady = get().decks[other].isTrackLoaded;
-
-        // La sincronización/cuantización NUNCA debe impedir la reproducción.
-        // El estado del SYNC lo decide el MOTOR (fuente de verdad del audio):
-        // si está activo, play() commitea el enganche instantáneo por sí solo.
-        const synced = audioEngine.isSynced(deck);
+        // Quantize / Snap on Play: engancha la aguja al beat más cercano de la
+        // rejilla (margen 1/8 de beat) ANTES de arrancar, si quantize está
+        // activo y hay BPM. Aplica con SYNC activo o apagado: solo reposiciona
+        // en pausa (inaudible), sin tocar el motor de audio ni el SYNC.
         try {
-          if (!synced && d.quantize && masterReady) {
-            audioEngine.alignToMasterOnce(deck, other);
-          } else if (!synced && d.quantize && d.originalBpm > 0) {
+          if (d.quantize && d.originalBpm > 0) {
             const el = audioEngine.getElement(deck);
-            if (el) {
-              // Rejilla en tiempo de fuente: BPM ORIGINAL (nunca el efectivo).
-              const period = 60 / d.originalBpm;
-              const k = Math.round((el.currentTime - d.firstBeatOffset) / period);
-              audioEngine.seek(deck, Math.max(0, d.firstBeatOffset + k * period));
-            }
+            const t = el ? el.currentTime : 0;
+            const snapped = snapToNearestBeat(t, d.originalBpm, d.firstBeatOffset);
+            if (snapped !== t) audioEngine.seek(deck, snapped);
           }
         } catch (err) {
-          console.warn("[mixi] align on play failed", err);
+          console.warn("[mixi] snap on play failed", err);
         }
         // play() resume el AudioContext DENTRO del gesto del clic (policy de
         // autoplay) y commitea el SYNC si estaba activo: playbackRate ajustado
@@ -422,10 +432,8 @@ export const useMixiStore = create<MixiStore>()(
       const cue = d.hotCues[0];
       const snap = (t: number) => {
         if (!d.quantize || d.originalBpm <= 0) return t;
-        // Rejilla en tiempo de fuente: BPM ORIGINAL.
-        const period = 60 / d.originalBpm;
-        const k = Math.round((t - d.firstBeatOffset) / period);
-        return d.firstBeatOffset + k * period;
+        // Snap al beat más cercano (margen 1/8 de beat, rejilla en tiempo de fuente).
+        return snapToNearestBeat(t, d.originalBpm, d.firstBeatOffset);
       };
       if (d.isPlaying) {
         // Reproduciendo: pausa y vuelve al CUE (o al inicio).
@@ -435,7 +443,7 @@ export const useMixiStore = create<MixiStore>()(
       } else if (cue != null) {
         audioEngine.seek(deck, cue);
       } else {
-        // Sin CUE: fija uno en la posición actual (cuantizada al beat).
+        // Sin CUE: fija uno en la posición actual (con snap al beat cercano).
         const t = Math.max(0, snap(el.currentTime));
         const cues = [...d.hotCues];
         cues[0] = t;

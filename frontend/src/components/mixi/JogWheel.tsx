@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type FC } from "react";
-import { audioEngine } from "../../lib/audio";
+import { audioEngine, type DeckElement } from "../../lib/audio";
 
 /**
  * Jog wheel estilo MIXI (adaptado de components/deck/JogWheel.tsx +
@@ -16,7 +16,7 @@ const RATE_PER_DEG = 0.004;
 
 interface Props {
   name: "A" | "B";
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   playing: boolean;
   color: string;
   size?: number;

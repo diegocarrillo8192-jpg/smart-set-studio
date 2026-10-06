@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { audioEngine } from "../lib/audio";
+import { audioEngine, type DeckElement } from "../lib/audio";
 
 /**
  * Estado y controladores de LOOP / BEAT JUMP de un deck nativo.
@@ -18,7 +18,7 @@ import { audioEngine } from "../lib/audio";
  */
 export function useDeckLoopControls(
   name: "A" | "B",
-  el: HTMLAudioElement | null,
+  el: DeckElement | null,
   trackBpm: number | null,
   onActivate: (() => void) | undefined,
   trackKey: string | number | null,

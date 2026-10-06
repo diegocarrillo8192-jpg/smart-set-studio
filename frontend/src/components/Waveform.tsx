@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { AnalysisBar, HotCue, Phrase, TrackAnalysis, VocalZone } from "../types";
+import type { DeckElement } from "../lib/audio";
 
 interface Props {
   analyser: AnalyserNode | null;
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   bpm: number | null;
   gridOffsetSec?: number;
   color?: string;

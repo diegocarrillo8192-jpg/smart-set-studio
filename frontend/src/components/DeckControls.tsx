@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { Filter, Link2, Pause, Play, RotateCcw, Timer } from "lucide-react";
 import type { Track } from "../types";
 import { fmtBpm, fmtTime } from "../lib/format";
+import type { DeckElement } from "../lib/audio";
 
 /** Glow neón del botón PLAY según el deck (constante: no se recrea por render). */
 const GLOW_PLAY: Record<"A" | "B", string> = {
@@ -30,7 +31,7 @@ const BEAT_JUMPS = [
 interface Props {
   name: "A" | "B";
   accent: string;
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   track: Track | null;
   masterBpm?: number | null;
   playing: boolean;

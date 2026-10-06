@@ -187,7 +187,7 @@ const DeckMainRow: FC<DeckRowProps> = ({ deckId, color }) => {
         <FxUnitPanel deckId={deckId} color={color} />
       </div>
 
-      <div className="order-2 flex min-h-0 flex-col items-center justify-center">
+      <div className="order-2 flex min-h-0 flex-col items-center justify-center" style={{ transform: 'translateY(-24px)' }}>
         <PremiumJogWheel deckId={deckId} color={color} size={380} />
       </div>
 

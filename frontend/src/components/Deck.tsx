@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Track } from "../types";
-import type { DeckHandle } from "../lib/audio";
+import type { DeckHandle, DeckElement } from "../lib/audio";
 import { audioEngine, DEFAULT_PITCH_RANGE } from "../lib/audio";
 import { fmtBpm, fmtTime } from "../lib/format";
 import { hexRgba } from "../lib/color";
@@ -103,7 +103,7 @@ function DeckInfoHeader({ name, track, accent, effectiveBpm }: DeckInfoHeaderPro
 interface DeckWaveformProps {
   track: Track | null;
   analyser: AnalyserNode | null;
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   color: string;
   onSeek: (t: number) => void;
 }
@@ -152,7 +152,7 @@ function DeckTimeCounter({ time, duration }: DeckTimeCounterProps) {
 
 interface DeckScratchSectionProps {
   name: "A" | "B";
-  el: HTMLAudioElement | null;
+  el: DeckElement | null;
   playing: boolean;
   color: string;
   track: Track | null;

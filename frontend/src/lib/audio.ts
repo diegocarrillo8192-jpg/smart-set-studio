@@ -1,117 +1,84 @@
 /**
  * Motor de audio de la consola DJ nativa (Decks A/B + Mixer estilo MIXI).
  *
+ * Reproducción por deck sobre AudioBufferSourceNode (Web Audio API), NO sobre
+ * <audio>: esto habilita loops 100 % sample-accurate (loopStart/loopEnd) y un
+ * SYNC sin deriva (los dos decks comparten el MISMO reloj — AudioContext.
+ * currentTime — de modo que la fase no puede desviarse como ocurría con los
+ * relojes independientes de dos <audio>).
+ *
  * Cadena por deck:
- *   source → analyser → TRIM(gain) → EQ LOW → EQ MID → EQ HIGH → LowKill
- *          → FILTER (Color FX) → PHASE → CUE GAIN → CUE BUS  (Pre-Fader Listen)
+ *   source ──(KEY LOCK: phase-vocoder AudioWorklet)──> analyser
+ *          → TRIM(gain) → EQ LOW → EQ MID → EQ HIGH → LowKill
+ *          → FILTER (Color FX) → CUE GAIN → CUE BUS (Pre-Fader Listen)
  *          → FX (dry/wet) → FADER → [VU] → CROSS → MASTER → destination
  *
- * Pre-Fader Listen (PFL / Cue):
- *   El nodo CUE GAIN de cada canal se conecta ANTES del fader de canal y del
- *   crossfader, directamente al CUE BUS. De este modo, pulsar CUE en un canal
- *   envía la señal de monitoreo a los auriculares independientemente de la
- *   posición del fader o del crossfader (estándar Traktor/Rekordbox).
- *   El bus de auriculares se mezcla con el master mediante los controles de
- *   LEVEL / MIX / SPLIT del panel de headphones.
+ * KEY LOCK:
+ *   AudioBufferSourceNode cambia el TONO al cambiar playbackRate. Para
+ *   preservar el tono (key lock) se inserta un phase-vocoder (AudioWorklet,
+ *   lib/phaseVocoder.worklet.js) que aplica un pitch-shift por factor 1/rate:
+ *   el source suena a `rate` (tempo) y el vocoder devuelve el tono original
+ *   sin tocar el tempo (hop de síntesis == hop de análisis). Con Key Lock OFF
+ *   el vocoder se bypasea (comportamiento vinyl: el tono sigue al tempo).
  *
  * Controles:
- *   · PLAY/PAUSE/CUE     → transporte del <audio>.
- *   · PITCH/TEMPO        → playbackRate = 1 + pitch/100 (keylock por preservesPitch).
- *   · SYNC               → un solo disparo: rate = targetBPM / trackBPM + fase.
+ *   · PLAY/PAUSE/CUE → start()/stop() del source + posición sobre el reloj ctx.
+ *   · PITCH/TEMPO   → source.playbackRate (AudioParam, rampa con setTargetAtTime).
+ *   · SYNC          → rate = BPM_Master / BPM_Original (1:1) + fase cuantizada
+ *                     al beatgrid con audioContext.currentTime (sin deriva).
  *   · GAIN / EQ 3 bandas → nodos Web Audio (trim + Biquads).
  *   · FADER / CROSSFADER → gains.
- *   · JOG/SCRATCH        → bend de playbackRate o seek (según play/pause).
+ *   · JOG/SCRATCH    → bend de playbackRate o seek (según play/pause).
  *
- * El SYNC es de estándar profesional (Master Audio Clock + Phase Lock
- * continuo, al nivel de Traktor/Rekordbox — CERO deriva acumulativa):
- *   · Master Audio Clock: AudioContext.currentTime es el ÚNICO reloj maestro
- *     (avanza exactamente con las muestras que consume el hardware:
- *     t = muestras / sampleRate). NINGÚN cálculo de tempo/fase usa relojes
- *     wall-clock ni acumuladores del tipo "segundos × BPM/60": la fase
- *     siempre se mide como posición de deck vs posición de deck sobre el
- *     reloj maestro, sin sumas que arrastra el redondeo flotante.
- *   · Tempo:  rate base = BPM efectivo del maestro / BPM original del
- *     esclavo, SIEMPRE 1:1 (sin ratios armónicos), como antes.
- *   · Fase (enganche): Hard Snap único cuantizado — la aguja del esclavo
- *     cae EXACTO sobre el marcador de beat más cercano de la rejilla del
- *     maestro (hardAlignShift), con latencia relativa nula (DelayNode
- *     estático a PHASE_BASE en ambos decks).
- *   · Fase (mantenida): servo PI continuo (servoTick, cada 200 ms). Los dos
- *     decoders <audio> avanzan a tasas REALES ligeramente distintas
- *     (pipeline de decodificación propio por elemento, estiramiento
- *     preservesPitch/keylock, buffering): escribir playbackRate una sola
- *     vez y confiar produce deriva progresiva (~0.1-0.3% de error de tasa
- *     ⇒ decenas de ms por minuto). El servo mide la tasa REALIZADA de cada
- *     deck (Δposición / Δctx.currentTime) y el error de fase exacto contra
- *     la rejilla del maestro, y recorta el rate del esclavo (±0.15% en
- *     zona de lock, inaudible; ±1.2% convergiendo; keylock activo ⇒ puro
- *     tempo, el tono no salta) hasta clavar la fase en 0 ms para siempre:
- *     sin micro-saltos ni seeks audibles. Solo si la desviación crece
- *     más de ~medio beat (seek manual, estancamiento) se re-engecha con
- *     un Hard Snap rígido.
- *
- * Estabilidad: el AudioContext se vigila (statechange): interrupciones del
- * driver se reanudan solas y una pérdida total (state "closed") reconstruye
- * todo el grafo sobre elementos <audio> nuevos sin congelar la UI ni perder
- * la posición (el reloj de cada <audio> es independiente del contexto).
+ * SYNC (Master Audio Clock + Phase Lock, sin deriva):
+ *   · Reloj maestro = AudioContext.currentTime. Ambos sources se programan
+ *     sobre ese MISMO reloj, así que dos rates iguales avanzan en fase
+ *     exacta para siempre (cero deriva acumulativa por construcción).
+ *   · Tempo: rate base = BPM_Master_efectivo / BPM_Original_del_esclavo (1:1).
+ *   · Fase (enganche): alinear el offset del esclavo al beat más cercano de la
+ *     rejilla del maestro. Con el deck en pausa es un seek inaudible; sonando,
+ *     el servo converge la fase con un trim SUAVE de rate (sin seek audible).
+ *   · Fase (mantenida): servo PI cada 200 ms que recorta el rate del esclavo
+ *     (trim ±4 % convergiendo, ~0 % en lock) para clavar la fase en 0 ms. Al
+ *     no existir deriva, el bias aprende solo el residuo mínimo de redondeo.
  */
 
 import { hardAlignShift, syncPlaybackRate } from "./mixi";
 
 export type EqBand = 0 | 1 | 2; // 0 = LOW, 1 = MID, 2 = HIGH
 
-export interface DeckHandle {
-  el: HTMLAudioElement;
-  analyser: AnalyserNode; // waveform (pre-fader)
-  trim: GainNode; // GAIN
-  eqLow: BiquadFilterNode;
-  eqMid: BiquadFilterNode;
-  eqHi: BiquadFilterNode;
-  lowKill: BiquadFilterNode; // FILTER (pasa-altos)
-  fader: GainNode; // canal
-  vu: AnalyserNode; // metering post-fader
-  cross: GainNode; // crossfader
-  /** Nodo de ganancia PFL (Pre-Fader Listen) — antes del fader de canal. */
-  cue: GainNode;
-  /** Estado del botón CUE de este canal. */
-  cueActive: boolean;
-  pitch: number;
-  range: number;
-  synced: boolean;
-  /** Role of this deck within a synced pair. */
-  syncRole: "master" | "follower" | null;
-  originalBpm: number;
-  gridOff: number;
-  masterName: "A" | "B" | null;
-  jogging: boolean;
-  eq: [number, number, number]; // dB (-26..+6; -30 = kill)
-  /** Blob URL vigente del deck (se revoca al reemplazar la fuente). */
-  objectUrl: string | null;
-  /** Filtro bimodal: LP (izquierda) + HP (derecha) en serie; neutro en el centro. */
-  filterLP: BiquadFilterNode;
-  filterHP: BiquadFilterNode;
-  /** FX: Delay (send paralelo) + Phaser (allpass + LFO). */
-  dly: DelayNode;
-  dlyFb: GainNode;
-  dlyWet: GainNode;
-  phaWet: GainNode;
-  /** Envelope de loop: micro-fade 3-5 ms en los bordes del loop para
-   *  eliminar clicks y hacer el fold imperceptible. */
-  loopEnv: GainNode;
-  /** DelayNode ESTÁTICO (nunca se modula): retardo de reposo PHASE_BASE,
-   *  idéntico en ambos decks → latencia relativa SIEMPRE nula. El SYNC es
-   *  Hard Lock (un solo seek), sin correcciones de fase dinámicas. */
-  phase: DelayNode;
-  /** Objetivo estático del alineador (s) = PHASE_BASE, sin correcciones. */
-  phaseDelayTarget: number;
-  /** Loop activo (Auto Loop / Manual / Roll), cuantizado a la grilla.
-   *  roll = Loop Roll con Slip: el audio buclea mientras el tiempo REAL
-   *  virtual avanza (rollBase + wall-clock × rate) y se retoma al soltar. */
-  loop: LoopInfo | null;
-  /** Punto LOOP IN pendiente (sin loop aún): se arma al presionar LOOP OUT. */
-  loopInPending: number | null;
-  /** Estado del micro-crossfade del loop ('idle' cuando no hay fade activo). */
-  loopFadeState: "idle" | "fade-out" | "fade-in";
+export const CROSSFADE_CUTOFF = 0.8;
+export const DEFAULT_PITCH_RANGE = 8;
+export const EQ_MIN_DB = -26;
+export const EQ_MAX_DB = 6;
+const EQ_KILL_DB = -60;
+
+/** Tau (s) de la rampa suave de playbackRate/Key Lock (AudioParam). */
+const RATE_TAU = 0.012;
+
+/** ── Master Audio Clock / Phase Servo (SYNC profesional) ────────────────── */
+const SERVO_INTERVAL_MS = 200;
+/** Deriva (en beats) que dispara el re-enganche rígido (Hard Snap). */
+const SERVO_SNAP_BEATS = 0.4;
+/** Constante de tiempo del corrector proporcional de fase (s): trim = err/C. */
+const SERVO_CONVERGE_S = 0.25;
+/** Máximo trim de tasa durante la convergencia (±4 %, inaudible con key lock). */
+const SERVO_MAX_TRIM = 0.04;
+/** Ganancia integral (1/s) para clavar el error estacionario residual. */
+const SERVO_I_GAIN = 1.5;
+
+/** Estado del servo de fase por deck. */
+interface ServoState {
+  /** Término integral: corrección estacionaria de tasa aprendida. */
+  bias: number;
+}
+
+function freshServo(): ServoState {
+  return { bias: 0 };
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
 }
 
 /** Información de un loop activo (tiempos de FUENTE, cuantizados a la grilla). */
@@ -124,68 +91,162 @@ export interface LoopInfo {
   roll: boolean;
   /** Posición de fuente al entrar en el roll (base del reloj virtual). */
   rollBase: number;
-  /** wall-clock (performance.now) de entrada al roll. */
-  rollStartWall: number;
+  /** AudioContext.currentTime de entrada al roll (reloj maestro). */
+  rollStartCtx: number;
 }
 
-export const CROSSFADE_CUTOFF = 0.8;
-export const DEFAULT_PITCH_RANGE = 8;
-export const EQ_MIN_DB = -26;
-export const EQ_MAX_DB = 6;
-const EQ_KILL_DB = -60;
+// ── DeckElement: shim con interfaz de media element ────────────────────────
+// Los decks exponen un objeto que emula el HTMLAudioElement que antes usaba el
+// reproductor compacto (components/Deck.tsx · DualDeck.tsx): currentTime,
+// playbackRate, play/pause, eventos. Toda la semántica delega en el motor ABSS.
+type DeckListener = (ev?: unknown) => void;
 
-/** Retardo de reposo del alineador (s): idéntico en ambos decks, de modo que
- *  la latencia relativa entre ellos es SIEMPRE nula. Estático: no se rampea. */
-const PHASE_BASE = 0.05;
+export class DeckElement {
+  onerror: ((e?: unknown) => void) | null = null;
+  muted = false;
+  crossOrigin: string | null = null;
+  preload = "auto";
+  dataset: Record<string, string> = {};
 
-/** Duración del micro-crossfade de loop (s): la caída y la subida de la
- *  costura. 4 ms (rango 3-5 ms) borra el click por discontinuidad de fase de
- *  la onda justo en la muestra de retorno sin ser audible como ducking. */
-const LOOP_CROSSFADE_S = 0.004;
-/** Ventana de ANTICIPACIÓN del pre-fade (s): con cuánta antelación (máx.)
- *  se programa la rampa al borde. El fade AUDIBLE es solo el tramo final de
- *  LOOP_CROSSFADE_S; la ventana solo garantiza que al menos un frame del rAF
- *  (16-33 ms) aterrice ANTES del fold. Se adapta a loops cortos (nunca
- *  excede 1/4 de la longitud del loop). */
-const LOOP_FADE_WIN_S = 0.05;
-/** Máximo retardo del DelayNode (s): solo margen de construcción del grafo. */
-const PHASE_MAX_DELAY = 0.1;
+  private _src = "";
+  private listeners = new Map<string, Set<DeckListener>>();
 
-/** ── Master Audio Clock / Phase Servo (SYNC profesional) ──────────────────
- *  El reloj maestro es AudioContext.currentTime. El servo mide la deriva de
- *  fase del esclavo contra la rejilla del maestro, pero NO aplica trimming
- *  continuo de playbackRate: ese pitch-bending gradual genera distorsión.
- *  Solo realiza un re-enganche rígido (Hard Snap) cuando la deriva supera
- *  ~medio beat. */
-const SERVO_INTERVAL_MS = 200;
-/** Desviación (s) respecto a la posición esperada que delata un seek/estancamiento
- *  y obliga a re-abrir la ventana de medición. */
-const SERVO_SEEK_DETECT = 0.25;
-/** Deriva (en beats) que dispara el re-enganche rígido (Hard Snap). */
-const SERVO_SNAP_BEATS = 0.4;
+  constructor(
+    private engine: AudioEngine,
+    private name: "A" | "B",
+  ) {}
 
-/** Ventana de medición de un deck para el servo de fase. */
-interface ServoState {
-  /** Último AudioContext.currentTime (reloj maestro) medido. */
-  ctxTime: number;
-  /** Último el.currentTime (posición del decoder) medido. */
-  deckTime: number;
-  /** Último el.playbackRate observado al medir. */
+  addEventListener(type: string, cb: DeckListener): void {
+    let s = this.listeners.get(type);
+    if (!s) {
+      s = new Set();
+      this.listeners.set(type, s);
+    }
+    s.add(cb);
+  }
+
+  removeEventListener(type: string, cb: DeckListener): void {
+    this.listeners.get(type)?.delete(cb);
+  }
+
+  /** Emite un evento (usado por el motor en play/pause/ended/loadedmetadata). */
+  emit(type: string, ev?: unknown): void {
+    const s = this.listeners.get(type);
+    if (s) for (const cb of Array.from(s)) cb(ev);
+  }
+
+  get currentTime(): number {
+    const h = this.engine.deck(this.name);
+    return h ? this.engine.deckPosition(h) : 0;
+  }
+  set currentTime(v: number) {
+    this.engine.seek(this.name, v);
+  }
+
+  get playbackRate(): number {
+    return this.engine.deck(this.name)?.rate ?? 1;
+  }
+  set playbackRate(v: number) {
+    this.engine.setRate(this.name, v, false);
+  }
+
+  get duration(): number {
+    return this.engine.deck(this.name)?.buffer?.duration ?? 0;
+  }
+
+  get paused(): boolean {
+    return !(this.engine.deck(this.name)?.playing ?? false);
+  }
+
+  get readyState(): number {
+    return this.engine.deck(this.name)?.buffer ? 4 : 0;
+  }
+
+  get preservesPitch(): boolean {
+    return this.engine.deck(this.name)?.keylockEnabled ?? false;
+  }
+  set preservesPitch(v: boolean) {
+    this.engine.setKeyLock(this.name, v);
+  }
+
+  get src(): string {
+    return this._src;
+  }
+  set src(url: string) {
+    this._src = url;
+    this.engine.loadSource(this.name, url);
+  }
+  load(): void {
+    /* no-op: el fetch/decode lo hace loadSource */
+  }
+
+  play(): Promise<void> {
+    this.engine.play(this.name);
+    return Promise.resolve();
+  }
+  pause(): void {
+    this.engine.pause(this.name);
+  }
+}
+
+/** Mango de un deck del motor (estado de transporte ABSS + nodos del grafo). */
+export interface DeckHandle {
+  // ── transporte ABSS ──
+  buffer: AudioBuffer | null;
+  source: AudioBufferSourceNode | null;
+  keylockNode: AudioWorkletNode | null;
+  keylockEnabled: boolean;
+  playing: boolean;
+  /** ctx.currentTime en el que arrancó el source actual. */
+  startCtxTime: number;
+  /** Offset en el buffer (s) en startCtxTime. */
+  startOffset: number;
+  /** performance.now() en startCtxTime (para recuperar posición tras un crash
+   *  del AudioContext, cuando ya no hay reloj ctx que consultar). */
+  wallTime: number;
+  /** playbackRate actual (s de contenido / s reales). */
   rate: number;
-  /** Duración (s, reloj maestro) de la última ventana válida. */
-  lastDt: number;
-  /** Término integral: corrección estacionaria de tasa aprendida. */
-  bias: number;
-  /** Ventana inicializada (hay una medición base válida). */
-  init: boolean;
-}
+  /** Posición (s) al pausar. */
+  pausedAt: number;
+  /** Token de carga: descarta decodificaciones obsoletas. */
+  loadingToken: number;
 
-function freshServo(): ServoState {
-  return { ctxTime: 0, deckTime: 0, rate: 1, lastDt: 0, bias: 0, init: false };
-}
+  // ── grafo (pre-fader) ──
+  analyser: AnalyserNode;
+  trim: GainNode;
+  eqLow: BiquadFilterNode;
+  eqMid: BiquadFilterNode;
+  eqHi: BiquadFilterNode;
+  lowKill: BiquadFilterNode;
+  filterLP: BiquadFilterNode;
+  filterHP: BiquadFilterNode;
+  fader: GainNode;
+  vu: AnalyserNode;
+  cross: GainNode;
+  cue: GainNode;
+  dly: DelayNode;
+  dlyFb: GainNode;
+  dlyWet: GainNode;
+  phaWet: GainNode;
 
-function clamp(v: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, v));
+  // ── pitch / sync ──
+  pitch: number;
+  range: number;
+  synced: boolean;
+  syncRole: "master" | "follower" | null;
+  originalBpm: number;
+  gridOff: number;
+  masterName: "A" | "B" | null;
+  jogging: boolean;
+  eq: [number, number, number]; // dB (-26..+6; -30 = kill)
+  cueActive: boolean;
+
+  // ── loop ──
+  loop: LoopInfo | null;
+  loopInPending: number | null;
+
+  // ── shim ──
+  el: DeckElement;
 }
 
 export class AudioEngine {
@@ -210,22 +271,19 @@ export class AudioEngine {
   private headphoneLevel = 0.7;
   private splitMode = false;
   private meterBuf = new Float32Array(1024);
-  /** Crossfader neutro por defecto: al centro (0.5), ambos decks al 50%. */
   private crossfader = 0.5;
-  private boundElements = new WeakSet<HTMLAudioElement>();
   private recDest: MediaStreamAudioDestinationNode | null = null;
   private recorder: MediaRecorder | null = null;
   private recChunks: Blob[] = [];
   private recording = false;
-  /** rAF del vigilante de loops: solo vive mientras HAY un loop activo
-   *  (cero timers de por medio cuando no se usa ningún loop/roll). */
-  private loopRaf: number | null = null;
-  /** Timer del servo de fase (Master Audio Clock): bucle de corrección
-   *  continua del SYNC. Solo vive mientras algún deck está sincronizado. */
+  /** Timer del servo de fase (solo vive mientras hay SYNC activo). */
   private servoTimer: ReturnType<typeof setInterval> | null = null;
-  /** Ventana de medición por deck para el servo (reloj maestro vs reloj
-   *  del decoder de cada <audio>). */
+  /** Ventana/estado del servo por deck. */
   private servo: Record<"A" | "B", ServoState> = { A: freshServo(), B: freshServo() };
+  /** Promesa de carga del módulo AudioWorklet (key lock). */
+  private workletPromise: Promise<void> | null = null;
+
+  // ── Contexto de audio ────────────────────────────────────────────────────
 
   ensureContext(): AudioContext {
     if (!this.ctx || this.ctx.state === "closed") {
@@ -234,14 +292,11 @@ export class AudioEngine {
       ctx.onstatechange = () => this.handleCtxState();
       this.buildMasterChain(ctx);
       // Reconstrucción tras una pérdida total (state "closed"): los decks se
-      // re-enganchan al grafo nuevo con elementos <audio> nuevos, conservando
-      // posición, tempo y SYNC (el reloj de cada <audio> es independiente).
+      // re-enganchan al grafo nuevo conservando buffer (AudioBuffer sobrevive
+      // al contexto), posición, tempo y SYNC.
       if (this.deckA || this.deckB) {
         for (const n of ["A", "B"] as const) this.rebindDeckAfterCtxLoss(n);
-        // Re-aplicar el crossfader (los gains de los nodos nuevos nacen en
-        // neutro; la posición guardada se restaura aquí).
         this.setCrossfader(this.crossfader);
-        // Re-aplicar el estado de auriculares tras reconstruir el grafo.
         this.setSplitMode(this.splitMode);
       }
     }
@@ -249,6 +304,17 @@ export class AudioEngine {
       void this.ctx.resume().catch(() => undefined);
     }
     return this.ctx;
+  }
+
+  /** Carga (una sola vez) el módulo del phase-vocoder. */
+  private ensureWorklet(): Promise<void> {
+    if (!this.ctx) return Promise.reject(new Error("no ctx"));
+    if (!this.workletPromise) {
+      this.workletPromise = this.ctx.audioWorklet
+        .addModule(new URL("./phaseVocoder.worklet.js", import.meta.url))
+        .then(() => undefined);
+    }
+    return this.workletPromise;
   }
 
   /** Cadena master (EQ global + filtro bimodal + analizador). */
@@ -269,7 +335,6 @@ export class AudioEngine {
     this.masterAnalyser = ctx.createAnalyser();
     this.masterAnalyser.fftSize = 1024;
 
-    // Master principal: siempre a destination (main out).
     this.master
       .connect(this.masterEq[0])
       .connect(this.masterEq[1])
@@ -279,11 +344,9 @@ export class AudioEngine {
       .connect(this.masterAnalyser)
       .connect(ctx.destination);
 
-    // Bus de CUE/PFL (Pre-Fader Listen): suma de las señales pre-fader de cada deck.
     this.cueBus = ctx.createGain();
     this.cueBus.gain.value = 1;
 
-    // Mezcla de auriculares: master + cue, con controles de LEVEL / MIX / SPLIT.
     this.hpMasterGain = ctx.createGain();
     this.hpMasterGain.gain.value = this.headphoneMix;
     this.hpCueGain = ctx.createGain();
@@ -294,7 +357,6 @@ export class AudioEngine {
     this.hpLevelGain.gain.value = this.headphoneLevel;
     this.hpMerger = ctx.createChannelMerger(2);
 
-    // Ruta normal: master y cue se mezclan estéreo.
     this.masterFilterHP.connect(this.hpMasterGain);
     this.cueBus.connect(this.hpCueGain);
     this.hpMasterGain.connect(this.hpMixBus);
@@ -302,22 +364,16 @@ export class AudioEngine {
     this.hpMixBus.connect(this.hpLevelGain);
     this.hpLevelGain.connect(ctx.destination);
 
-    // Ruta split (L = CUE, R = MASTER): se conecta/desconecta dinámicamente.
     this.cueBus.connect(this.hpMerger, 0, 0);
     this.masterFilterHP.connect(this.hpMerger, 0, 1);
   }
 
-  /** Reintentos pendientes de resume() tras una interrupción del driver. */
   private ctxResumeAttempts = 0;
 
-  /** Vigilante del ciclo de vida del AudioContext (crashes e interrupciones). */
   private handleCtxState(): void {
     const ctx = this.ctx;
     if (!ctx) return;
     if (ctx.state === "closed") {
-      // Pérdida total del contexto de audio (crash del driver/GPU): se anula
-      // el grafo y se reconstruye todo en caliente. La UI no se congela ni se
-      // reinicia: los <audio> mantienen su reloj y su posición.
       console.warn("[audio] AudioContext cerrado — reconstruyendo el grafo de audio");
       this.master = null;
       this.masterEq = null;
@@ -326,11 +382,9 @@ export class AudioEngine {
       this.masterAnalyser = null;
       this.recDest = null;
       this.ctx = null;
+      this.workletPromise = null;
       void this.ensureContext();
     } else if (ctx.state === "suspended" && this.ctxResumeAttempts < 4) {
-      // Interrupción transitoria (driver de audio / ahorro de energía): se
-      // reintenta el resume con backoff; si el sistema lo sigue negando, el
-      // próximo gesto del usuario (PLAY) lo reanudará igualmente.
       this.ctxResumeAttempts += 1;
       setTimeout(() => {
         const c = this.ctx;
@@ -348,106 +402,6 @@ export class AudioEngine {
     }
   }
 
-  /** Re-engancha un deck al grafo tras reconstruir el AudioContext. El
-   *  elemento <audio> viejo no se puede reutilizar (MediaElementSource es
-   *  único por elemento), así que se crea uno nuevo y se restaura todo el
-   *  estado: posición, tempo, keylock, SYNC y offset del alineador. */
-  private rebindDeckAfterCtxLoss(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const old = h.el;
-    let keylock = false;
-    try {
-      keylock = old.preservesPitch;
-    } catch {
-      keylock = false;
-    }
-    const snapshot = {
-      src: h.objectUrl ?? old.getAttribute("src"),
-      time: Number.isFinite(old.currentTime) ? old.currentTime : 0,
-      paused: old.paused,
-      rate: old.playbackRate,
-      keylock,
-      pitch: h.pitch,
-      range: h.range,
-      synced: h.synced,
-      syncRole: h.syncRole,
-      originalBpm: h.originalBpm,
-      gridOff: h.gridOff,
-      masterName: h.masterName,
-      eq: h.eq,
-      delayTarget: h.phaseDelayTarget,
-      cueActive: h.cueActive,
-      loop: h.loop,
-      loopInPending: h.loopInPending,
-      loopFadeState: h.loopFadeState,
-    };
-    try {
-      old.removeAttribute("src");
-      old.load();
-    } catch {
-      /* sin soporte */
-    }
-    const el = this.createDeckElement(name);
-    if (snapshot.src) el.src = snapshot.src;
-    const bound = this.bindDeck(name, el);
-    if (!bound) return;
-    bound.pitch = snapshot.pitch;
-    bound.range = snapshot.range;
-    bound.synced = snapshot.synced;
-    bound.syncRole = snapshot.syncRole;
-    bound.originalBpm = snapshot.originalBpm;
-    bound.gridOff = snapshot.gridOff;
-    bound.masterName = snapshot.masterName;
-    bound.eq = snapshot.eq;
-    bound.cueActive = snapshot.cueActive;
-    try {
-      this.setEq(name, 0, bound.eq[0]);
-      this.setEq(name, 1, bound.eq[1]);
-      this.setEq(name, 2, bound.eq[2]);
-    } catch {
-      /* ok */
-    }
-    try {
-      bound.el.preservesPitch = snapshot.keylock;
-    } catch {
-      /* sin soporte */
-    }
-    bound.el.playbackRate = snapshot.rate;
-    bound.phaseDelayTarget = clamp(snapshot.delayTarget, 0, PHASE_MAX_DELAY);
-    if (this.ctx) {
-      bound.phase.delayTime.setValueAtTime(bound.phaseDelayTarget, this.ctx.currentTime);
-    }
-    bound.loop = snapshot.loop;
-    bound.loopInPending = snapshot.loopInPending;
-    // El envelope nuevo nace en unity: el micro-crossfade del loop se
-    // re-programa limpio desde idle en el próximo frame del vigilante
-    // (nunca se hereda un estado de fade colgado del grafo anterior).
-    bound.loopFadeState = "idle";
-    if (bound.loop) this.ensureLoopWatcher();
-    this.setCueActive(name, bound.cueActive);
-    const restore = () => {
-      try {
-        if (snapshot.time > 0) bound.el.currentTime = snapshot.time;
-      } catch {
-        /* ok */
-      }
-      if (!snapshot.paused) {
-        void bound.el.play().catch(() => undefined);
-      }
-    };
-    if (bound.el.readyState >= 1) restore();
-    else bound.el.addEventListener("loadedmetadata", restore, { once: true });
-    if (snapshot.synced && snapshot.masterName && !snapshot.paused) {
-      this.commitSync(name);
-    }
-  }
-
-  /**
-   * Reanuda el AudioContext. Debe invocarse SIEMPRE dentro del gesto del
-   * usuario (clic en Play): si no, la policy de autoplay del navegador rechaza
-   * la promesa y el motor queda suspendido (sin sonido). El error se ignora.
-   */
   resume(): Promise<void> {
     const ctx = this.ensureContext();
     if (ctx.state === "suspended") {
@@ -456,24 +410,16 @@ export class AudioEngine {
     return Promise.resolve();
   }
 
-  private deck(name: "A" | "B"): DeckHandle | null {
+  deck(name: "A" | "B"): DeckHandle | null {
     return name === "A" ? this.deckA : this.deckB;
   }
 
-  /** Accesores para la UI de la consola MIXI. */
-  getElement(name: "A" | "B"): HTMLAudioElement | null {
-    return this.deck(name)?.el ?? null;
+  getElement(name: "A" | "B"): DeckElement | null {    return this.deck(name)?.el ?? null;
   }
 
-  /** Tiempo EFECTIVO de salida del deck: la posición del <audio>. El DelayNode
-   *  del grafo es ESTÁTICO (PHASE_BASE en ambos decks), así que la latencia
-   *  relativa entre decks es siempre nula y el tiempo de salida coincide con
-   *  el de fuente. El medidor de fase lo usa para mostrar la alineación. */
   getOutputTime(name: "A" | "B"): number {
     const h = this.deck(name);
-    if (!h) return 0;
-    const t = h.el.currentTime;
-    return Number.isFinite(t) ? t : 0;
+    return h ? this.deckPosition(h) : 0;
   }
 
   getAnalyser(name: "A" | "B"): AnalyserNode | null {
@@ -485,308 +431,168 @@ export class AudioEngine {
     return this.masterAnalyser;
   }
 
-  /** Carga una fuente (URL/blob/ArrayBuffer) en el deck y la deja lista.
-   *  Para fuentes Blob devuelve la función de limpieza que revoca su Blob
-   *  URL (la misma liberación que hace releaseSource al soltar el deck). */
-  loadSource(name: "A" | "B", source: string | Blob | ArrayBuffer): (() => void) | undefined {
-    const h = this.deck(name);
-    if (!h) return undefined;
-    this.clearSync(name);
-    this.exitLoop(name);
-    h.loopInPending = null;
-    h.el.pause();
-    const previous = h.objectUrl;
-    h.objectUrl = null;
-    if (previous) URL.revokeObjectURL(previous);
+  // ── Construcción del grafo de un deck ────────────────────────────────────
 
-    if (typeof source === "string") {
-      h.el.src = source;
-      h.el.load();
-      return undefined;
-    }
+  /** Crea todos los nodos estáticos del deck (sin source ni buffer). */
+  private buildDeckGraph(name: "A" | "B"): DeckHandle {
+    const ctx = this.ensureContext();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.75;
 
-    const blob = source instanceof ArrayBuffer ? new Blob([source]) : source;
-    return this.loadBlobSource(h, blob);
-  }
+    const trim = ctx.createGain();
+    trim.gain.value = 1;
 
-  /** Carga un Blob en el deck y devuelve la función que revoca su Blob URL:
-   *  el ciclo create→revoke queda cerrado y verificable. */
-  private loadBlobSource(h: DeckHandle, blob: Blob): () => void {
-    const url = URL.createObjectURL(blob);
-    h.objectUrl = url;
-    h.el.src = url;
-    h.el.load();
-    return () => URL.revokeObjectURL(url);
-  }
-
-  /** PLAY/PAUSE explícito del deck (resume el AudioContext en el gesto).
-   *  Disparo inmediato: todo es síncrono dentro del mismo gesto del clic —
-   *  commitSync (rate + fase), resume() del contexto y el.play() se lanzan
-   *  en el milisegundo exacto, sin esperas ni micro-pausas. */
-  play(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const el = h.el;
-    // SYNC activo: Instant Phase Lock al dar PLAY. Se calcula la fase exacta
-    // del maestro y se salta INMEDIATAMENTE al offset de muestra exacto en el
-    // follower, SIN pitch-bending ni correcciones graduales. El rate base
-    // (BPM_Maestro / BPM_Original) se aplica de forma instantánea y limpia.
-    if (h.synced && h.masterName) {
-      this.commitSync(name);
-    }
-    // Reanuda el AudioContext (policy de autoplay) en el MISMO gesto del clic.
-    void this.resume();
-    try {
-      el.muted = false;
-    } catch {
-      /* ok */
-    }
-    const attempt = () => {
-      const p = el.play();
-      if (p && typeof p.catch === "function") {
-        p.catch((err) => {
-          console.warn("[audio] play deck", name, err);
-          // Si aún no hay datos suficientes, reintenta al poder reproducir.
-          if (el.readyState < 3) {
-            const retry = () => {
-              el.removeEventListener("canplay", retry);
-              // Si el primer commitSync no pudo seekear (elemento sin datos),
-              // se re-comite AHORA: rate 1:1 + snap de fase exacto (0 ms)
-              // justo antes de arrancar — el Play jamás sale desalineado.
-              if (h.synced && h.masterName) {
-                this.commitSync(name);
-              }
-              void el.play().catch(() => undefined);
-            };
-            el.addEventListener("canplay", retry, { once: true });
-          }
-        });
-      }
+    const mkEq = (type: BiquadFilterType, freq: number, q?: number) => {
+      const f = ctx.createBiquadFilter();
+      f.type = type;
+      f.frequency.value = freq;
+      if (q !== undefined) f.Q.value = q;
+      f.gain.value = 0;
+      return f;
     };
-    attempt();
-  }
+    const eqLow = mkEq("lowshelf", 200);
+    const eqMid = mkEq("peaking", 1000, 0.8);
+    const eqHi = mkEq("highshelf", 3500);
 
-  pause(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    h.el.pause();
-    // El reloj del deck se congela: ventana de medición del servo re-abierta.
-    this.servoRetune(name);
-  }
+    const lowKill = ctx.createBiquadFilter();
+    lowKill.type = "highpass";
+    lowKill.frequency.value = 20;
+    lowKill.Q.value = 0.71;
 
-  toggle(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    if (h.el.paused) this.play(name);
-    else this.pause(name);
-  }
+    const fader = ctx.createGain();
+    fader.gain.value = 1;
 
-  /** Libera la fuente del deck (pausa, revoca Blob URL y limpia el src). */
-  releaseSource(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    this.clearSync(name);
-    this.exitLoop(name);
-    h.loopInPending = null;
-    h.el.pause();
-    // Al liberar la fuente también se apaga el CUE de este canal.
-    this.setCueActive(name, false);
-    if (h.objectUrl) {
-      URL.revokeObjectURL(h.objectUrl);
-      h.objectUrl = null;
+    const vu = ctx.createAnalyser();
+    vu.fftSize = 1024;
+
+    const cross = ctx.createGain();
+    cross.gain.value = Math.SQRT1_2;
+
+    const cue = ctx.createGain();
+    cue.gain.value = 0;
+
+    const filterLP = ctx.createBiquadFilter();
+    filterLP.type = "lowpass";
+    filterLP.frequency.value = 22000;
+    filterLP.Q.value = 0.71;
+    const filterHP = ctx.createBiquadFilter();
+    filterHP.type = "highpass";
+    filterHP.frequency.value = 20;
+    filterHP.Q.value = 0.71;
+
+    // FX en paralelo (sends): dry + delay + phaser.
+    const fxDry = ctx.createGain();
+    fxDry.gain.value = 1;
+    const dly = ctx.createDelay(4);
+    dly.delayTime.value = 0.3;
+    const dlyFb = ctx.createGain();
+    dlyFb.gain.value = 0;
+    const dlyWet = ctx.createGain();
+    dlyWet.gain.value = 0;
+    const phaWet = ctx.createGain();
+    phaWet.gain.value = 0;
+    const phaStages: BiquadFilterNode[] = [];
+    let phaNode: AudioNode = filterHP;
+    const phaLfo = ctx.createOscillator();
+    phaLfo.type = "sine";
+    phaLfo.frequency.value = 0.4;
+    const phaLfoGain = ctx.createGain();
+    phaLfoGain.gain.value = 900;
+    phaLfo.connect(phaLfoGain);
+    for (const f of [400, 800, 1600, 3200]) {
+      const ap = ctx.createBiquadFilter();
+      ap.type = "allpass";
+      ap.frequency.value = f;
+      ap.Q.value = 1.2;
+      phaLfoGain.connect(ap.frequency);
+      phaStages.push(ap);
     }
-    h.el.removeAttribute("src");
-    h.el.load();
-  }
+    phaLfo.start();
 
-  private createDeckElement(name: "A" | "B"): HTMLAudioElement {
-    const el = new Audio();
-    el.crossOrigin = "anonymous";
-    el.preload = "auto";
-    el.dataset.deck = name;
-    return el;
-  }
-
-  bindDeck(name: "A" | "B", el?: HTMLAudioElement): DeckHandle | null {
-    if (!el) {
-      const existing = this.deck(name);
-      if (existing) return existing;
-    } else if (this.boundElements.has(el)) {
-      return this.deck(name);
+    analyser.connect(trim);
+    trim.connect(eqLow);
+    eqLow.connect(eqMid);
+    eqMid.connect(eqHi);
+    eqHi.connect(lowKill);
+    lowKill.connect(filterLP);
+    filterLP.connect(filterHP);
+    // Dry
+    filterHP.connect(fxDry);
+    fxDry.connect(fader);
+    // Delay send
+    filterHP.connect(dly);
+    dly.connect(dlyFb);
+    dlyFb.connect(dly);
+    dly.connect(dlyWet);
+    dlyWet.connect(fader);
+    // Phaser send
+    for (const ap of phaStages) {
+      phaNode.connect(ap);
+      phaNode = ap;
     }
-    const target = el ?? this.createDeckElement(name);
+    phaNode.connect(phaWet);
+    phaWet.connect(fader);
+    // Pre-Fader Listen (CUE): después de EQ/Trim/Filtro, antes del fader.
+    filterHP.connect(cue);
+    cue.connect(this.cueBus!);
+
+    fader.connect(vu);
+    fader.connect(cross);
+    cross.connect(this.master!);
+
+    const handle: DeckHandle = {
+      buffer: null,
+      source: null,
+      keylockNode: null,
+      keylockEnabled: false,
+      playing: false,
+      startCtxTime: 0,
+      startOffset: 0,
+      wallTime: 0,
+      rate: 1,
+      pausedAt: 0,
+      loadingToken: 0,
+      analyser,
+      trim,
+      eqLow,
+      eqMid,
+      eqHi,
+      lowKill,
+      filterLP,
+      filterHP,
+      fader,
+      vu,
+      cross,
+      cue,
+      dly,
+      dlyFb,
+      dlyWet,
+      phaWet,
+      pitch: 0,
+      range: DEFAULT_PITCH_RANGE,
+      synced: false,
+      syncRole: null,
+      originalBpm: 0,
+      gridOff: 0,
+      masterName: null,
+      jogging: false,
+      eq: [0, 0, 0],
+      cueActive: false,
+      loop: null,
+      loopInPending: null,
+      el: new DeckElement(this, name),
+    };
+    return handle;
+  }
+
+  bindDeck(name: "A" | "B"): DeckHandle | null {
+    const existing = this.deck(name);
+    if (existing) return existing;
     try {
-      const ctx = this.ensureContext();
-      const source = ctx.createMediaElementSource(target);
-
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.75;
-
-      const trim = ctx.createGain();
-      trim.gain.value = 1;
-
-      const mkEq = (type: BiquadFilterType, freq: number, q?: number) => {
-        const f = ctx.createBiquadFilter();
-        f.type = type;
-        f.frequency.value = freq;
-        if (q !== undefined) f.Q.value = q;
-        f.gain.value = 0;
-        return f;
-      };
-      const eqLow = mkEq("lowshelf", 200);
-      const eqMid = mkEq("peaking", 1000, 0.8);
-      const eqHi = mkEq("highshelf", 3500);
-
-      const lowKill = ctx.createBiquadFilter();
-      lowKill.type = "highpass";
-      lowKill.frequency.value = 20;
-      lowKill.Q.value = 0.71;
-
-      const fader = ctx.createGain();
-      fader.gain.value = 1;
-
-      const vu = ctx.createAnalyser();
-      vu.fftSize = 1024;
-
-      const cross = ctx.createGain();
-      // Neutro: cos(π/4) = sin(π/4) = √2/2 — ambos canales al mismo nivel.
-      cross.gain.value = Math.SQRT1_2;
-
-      // CUE/PFL: ganancia pre-fader, antes del fader de canal y del crossfader.
-      const cue = ctx.createGain();
-      cue.gain.value = 0;
-
-      // Filtro bimodal (Color FX): LP a la izquierda (corta agudos), HP a la
-      // derecha (corta graves); ambos abiertos en el centro = neutral.
-      const filterLP = ctx.createBiquadFilter();
-      filterLP.type = "lowpass";
-      filterLP.frequency.value = 22000;
-      filterLP.Q.value = 0.71;
-      const filterHP = ctx.createBiquadFilter();
-      filterHP.type = "highpass";
-      filterHP.frequency.value = 20;
-      filterHP.Q.value = 0.71;
-
-      // DelayNode ESTÁTICO en serie con todos los envíos (dry + FX): vale
-      // PHASE_BASE en AMBOS decks (latencia relativa siempre nula). El SYNC
-      // es Hard Lock (un solo seek): este nodo NUNCA se modula.
-      const phase = ctx.createDelay(PHASE_MAX_DELAY);
-      phase.delayTime.value = PHASE_BASE;
-
-      // Envelope de loop: gain intercalado para micro-crossfade 3-5 ms en
-      // el fold del loop, eliminando clicks por discontinuidad de amplitud.
-      const loopEnv = ctx.createGain();
-      loopEnv.gain.value = 1;
-
-      // FX en paralelo (sends): dry + delay + phaser.
-      const fxDry = ctx.createGain();
-      fxDry.gain.value = 1;
-      const dly = ctx.createDelay(4);
-      dly.delayTime.value = 0.3;
-      const dlyFb = ctx.createGain();
-      dlyFb.gain.value = 0;
-      const dlyWet = ctx.createGain();
-      dlyWet.gain.value = 0;
-      const phaWet = ctx.createGain();
-      phaWet.gain.value = 0;
-      // Phaser: 4 etapas allpass moduladas por un LFO.
-      const phaStages: BiquadFilterNode[] = [];
-      let phaNode: AudioNode = phase;
-      const phaLfo = ctx.createOscillator();
-      phaLfo.type = "sine";
-      phaLfo.frequency.value = 0.4;
-      const phaLfoGain = ctx.createGain();
-      phaLfoGain.gain.value = 900;
-      phaLfo.connect(phaLfoGain);
-      for (const f of [400, 800, 1600, 3200]) {
-        const ap = ctx.createBiquadFilter();
-        ap.type = "allpass";
-        ap.frequency.value = f;
-        ap.Q.value = 1.2;
-        phaLfoGain.connect(ap.frequency);
-        phaStages.push(ap);
-      }
-      phaLfo.start();
-
-      source.connect(analyser);
-      analyser.connect(trim);
-      trim.connect(eqLow);
-      eqLow.connect(eqMid);
-      eqMid.connect(eqHi);
-      eqHi.connect(lowKill);
-      lowKill.connect(filterLP);
-      filterLP.connect(filterHP);
-      filterHP.connect(phase);
-      // Envelope de loop: todo el audio pasa por aquí antes de los sends y del
-      // fader/cue, así el micro-crossfade afecta tanto al master como al PFL.
-      phase.connect(loopEnv);
-      // Dry
-      loopEnv.connect(fxDry);
-      fxDry.connect(fader);
-      // Delay send
-      loopEnv.connect(dly);
-      dly.connect(dlyFb);
-      dlyFb.connect(dly);
-      dly.connect(dlyWet);
-      dlyWet.connect(fader);
-      // Phaser send
-      for (const ap of phaStages) {
-        phaNode.connect(ap);
-        phaNode = ap;
-      }
-      phaNode.connect(phaWet);
-      phaWet.connect(fader);
-
-      // Pre-Fader Listen: la señal se toma DESPUÉS de EQ/Trim/Filtro/FX phase
-      // y del envelope de loop, y ANTES del fader de canal, por lo que el cue
-      // no se ve afectado por el fader ni por el crossfader.
-      loopEnv.connect(cue);
-      cue.connect(this.cueBus!);
-
-      fader.connect(vu);
-      fader.connect(cross);
-      cross.connect(this.master!);
-
-      const handle: DeckHandle = {
-        el: target,
-        analyser,
-        trim,
-        eqLow,
-        eqMid,
-        eqHi,
-        lowKill,
-        fader,
-        vu,
-        cross,
-        pitch: 0,
-        range: DEFAULT_PITCH_RANGE,
-        synced: false,
-        syncRole: null,
-        originalBpm: 0,
-        gridOff: 0,
-        masterName: null,
-        jogging: false,
-        eq: [0, 0, 0],
-        objectUrl: null,
-        filterLP,
-        filterHP,
-        dly,
-        dlyFb,
-        dlyWet,
-        phaWet,
-        loopEnv,
-        phase,
-        phaseDelayTarget: PHASE_BASE,
-        cue,
-        cueActive: false,
-        loop: null,
-        loopInPending: null,
-        loopFadeState: "idle",
-      };
+      const handle = this.buildDeckGraph(name);
       if (name === "A") this.deckA = handle;
       else this.deckB = handle;
-      this.boundElements.add(target);
       return handle;
     } catch (err) {
       console.error("[audio] No se pudo enlazar el deck", name, err);
@@ -794,7 +600,812 @@ export class AudioEngine {
     }
   }
 
-  // ── Mixer: crossfader / master ──────────────────────────────────────────
+  /** Re-engancha un deck al grafo tras reconstruir el AudioContext. El
+   *  AudioBuffer sobrevive al contexto; solo se recrean los nodos y el source
+   *  y se restaura posición/tempo/SYNC/loop. */
+  private rebindDeckAfterCtxLoss(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    // Posición aproximada tras el crash: el reloj ctx ya no existe, así que se
+    // estima con wall-clock (performance.now) desde el último anclaje.
+    let time: number;
+    if (h.playing && h.buffer) {
+      const elapsed = (performance.now() - h.wallTime) / 1000;
+      time = clamp(h.startOffset + elapsed * h.rate, 0, h.buffer.duration);
+    } else {
+      time = h.pausedAt;
+    }
+    const snapshot = {
+      buffer: h.buffer,
+      time,
+      playing: h.playing,
+      rate: h.rate,
+      keylockEnabled: h.keylockEnabled,
+      pitch: h.pitch,
+      range: h.range,
+      synced: h.synced,
+      syncRole: h.syncRole,
+      originalBpm: h.originalBpm,
+      gridOff: h.gridOff,
+      masterName: h.masterName,
+      eq: h.eq,
+      cueActive: h.cueActive,
+      loop: h.loop,
+      loopInPending: h.loopInPending,
+    };
+    // Desconectar el grafo viejo del master para no dejar colas.
+    try {
+      h.cross.disconnect();
+      h.cue.disconnect();
+    } catch {
+      /* ok */
+    }
+
+    const fresh = this.buildDeckGraph(name);
+    fresh.buffer = snapshot.buffer;
+    fresh.rate = snapshot.rate;
+    fresh.keylockEnabled = snapshot.keylockEnabled;
+    fresh.pitch = snapshot.pitch;
+    fresh.range = snapshot.range;
+    fresh.synced = snapshot.synced;
+    fresh.syncRole = snapshot.syncRole;
+    fresh.originalBpm = snapshot.originalBpm;
+    fresh.gridOff = snapshot.gridOff;
+    fresh.masterName = snapshot.masterName;
+    fresh.eq = snapshot.eq;
+    fresh.cueActive = snapshot.cueActive;
+    fresh.loop = snapshot.loop;
+    fresh.loopInPending = snapshot.loopInPending;
+    if (name === "A") this.deckA = fresh;
+    else this.deckB = fresh;
+
+    this.setEq(name, 0, fresh.eq[0]);
+    this.setEq(name, 1, fresh.eq[1]);
+    this.setEq(name, 2, fresh.eq[2]);
+    this.setCueActive(name, fresh.cueActive);
+    if (fresh.keylockEnabled) {
+      void this.ensureWorklet().then(() => {
+        this.createKeylockNode(name);
+        this.applyKeylockRoute(name, true);
+      });
+    }
+    if (snapshot.playing) {
+      fresh.pausedAt = snapshot.time;
+      this.play(name);
+    } else {
+      fresh.pausedAt = snapshot.time;
+    }
+    if (snapshot.synced && snapshot.masterName && snapshot.playing) {
+      this.commitSync(name);
+    }
+  }
+
+  // ── Carga / liberación de fuente (decodeAudioData) ───────────────────────
+
+  /** Carga una fuente (URL/blob/ArrayBuffer), la decodifica a AudioBuffer y la
+   *  deja lista. Libera el buffer anterior. Devuelve una función de limpieza
+   *  opcional (compatibilidad con el API anterior). */
+  loadSource(name: "A" | "B", source: string | Blob | ArrayBuffer): (() => void) | undefined {
+    const h = this.deck(name);
+    if (!h) return undefined;
+    const token = ++h.loadingToken;
+    this.clearSync(name);
+    this.exitLoop(name);
+    h.loopInPending = null;
+    h.pausedAt = 0;
+    if (h.playing) this.pause(name);
+    // No se libera el buffer hasta que la nueva decodificación esté lista
+    // (evita un corte audible si la carga falla a mitad de camino).
+
+    void this.decodeToBuffer(source).then(
+      (buffer) => {
+        if (!this.deck(name) || token !== this.deck(name)!.loadingToken) return;
+        const hh = this.deck(name)!;
+        hh.buffer = buffer;
+        hh.pausedAt = 0;
+        hh.el.emit("loadedmetadata");
+        hh.el.emit("canplay");
+      },
+      (err) => {
+        console.warn("[audio] falló la carga de", name, err);
+        const el = this.deck(name)?.el;
+        if (el?.onerror) el.onerror(err);
+      },
+    );
+    return undefined;
+  }
+
+  /** Decodifica un ArrayBuffer/Blob/URL a AudioBuffer. */
+  private async decodeToBuffer(source: string | Blob | ArrayBuffer): Promise<AudioBuffer> {
+    const ctx = this.ensureContext();
+    let buf: ArrayBuffer;
+    if (typeof source === "string") {
+      const res = await fetch(source);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      buf = await res.arrayBuffer();
+    } else if (source instanceof ArrayBuffer) {
+      buf = source;
+    } else {
+      buf = await source.arrayBuffer();
+    }
+    return ctx.decodeAudioData(buf);
+  }
+
+  /** Libera la fuente del deck (pausa + suelta el buffer). */
+  releaseSource(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    this.clearSync(name);
+    this.exitLoop(name);
+    h.loopInPending = null;
+    this.pause(name);
+    this.setCueActive(name, false);
+    h.loadingToken += 1;
+    h.buffer = null;
+    h.pausedAt = 0;
+  }
+
+  // ── Transporte (ABSS) ────────────────────────────────────────────────────
+
+  /** Posición CRUDA (sin envolver el loop) del deck en el buffer. */
+  private rawPosition(h: DeckHandle): number {
+    if (!h.buffer) return 0;
+    if (!h.playing) return h.pausedAt;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    return h.startOffset + (now - h.startCtxTime) * h.rate;
+  }
+
+  /** Envuelve t dentro del loop activo (si lo hay). */
+  private loopWrap(h: DeckHandle, t: number): number {
+    if (!h.loop) return t;
+    const len = h.loop.end - h.loop.start;
+    if (len <= 0) return t;
+    return h.loop.start + ((((t - h.loop.start) % len) + len) % len);
+  }
+
+  /** Posición EFECTIVA (envuelta al loop) — lo que "suena"/se muestra. */
+  deckPosition(h: DeckHandle): number {
+    if (!h.buffer) return 0;
+    const raw = this.rawPosition(h);
+    const pos = this.loopWrap(h, raw);
+    return clamp(pos, 0, h.buffer.duration);
+  }
+
+  /** Re-ancla la posición de seguimiento (startOffset/startCtxTime) al ahora. */
+  private rebase(h: DeckHandle): number {
+    const pos = this.deckPosition(h);
+    h.startOffset = pos;
+    h.startCtxTime = this.ctx ? this.ctx.currentTime : 0;
+    h.wallTime = performance.now();
+    return pos;
+  }
+
+  /** Crea y arranca un source (con loop si procede) en `when` a partir de
+   *  `offset`. El offset se envuelve al loop para arrancar siempre dentro. */
+  private startSource(h: DeckHandle, when: number, offset: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !h.buffer) return;
+    if (h.loop) offset = this.loopWrap(h, offset);
+    const src = ctx.createBufferSource();
+    src.buffer = h.buffer;
+    src.loop = !!h.loop;
+    if (h.loop) {
+      src.loopStart = h.loop.start;
+      src.loopEnd = h.loop.end;
+    }
+    src.playbackRate.value = h.rate;
+    if (h.keylockEnabled && h.keylockNode) src.connect(h.keylockNode);
+    else src.connect(h.analyser);
+    src.onended = () => {
+      if (h.source === src) {
+        h.source = null;
+        if (h.playing && !h.loop) {
+          h.playing = false;
+          h.pausedAt = h.buffer ? h.buffer.duration : 0;
+          h.el.emit("ended");
+        }
+      }
+    };
+    h.source = src;
+    try {
+      src.start(when, offset);
+    } catch {
+      /* sin datos aún */
+    }
+  }
+
+  /** Detiene y desconecta el source actual. */
+  private stopSource(h: DeckHandle): void {
+    const src = h.source;
+    h.source = null;
+    if (src) {
+      src.onended = null;
+      try {
+        src.stop();
+      } catch {
+        /* ya detenido */
+      }
+      try {
+        src.disconnect();
+      } catch {
+        /* ok */
+      }
+    }
+  }
+
+  /** Aplica loop/loopStart/loopEnd al source activo (o al próximo arranque). */
+  private applyLoopToSource(h: DeckHandle): void {
+    if (!h.source) return;
+    h.source.loop = !!h.loop;
+    if (h.loop) {
+      h.source.loopStart = h.loop.start;
+      h.source.loopEnd = h.loop.end;
+    }
+  }
+
+  play(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || h.playing) return;
+    // SYNC activo: alinear fase (snap inaudible si estaba pausado) + rate.
+    if (h.synced && h.masterName) this.commitSync(name);
+    void this.resume();
+    const offset = h.loop ? this.loopWrap(h, h.pausedAt) : h.pausedAt;
+    const now = this.ctx ? this.ctx.currentTime : 0;
+    this.startSource(h, now, offset);
+    h.playing = true;
+    h.startCtxTime = now;
+    h.startOffset = offset;
+    h.wallTime = performance.now();
+    h.el.emit("play");
+  }
+
+  pause(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || !h.playing) return;
+    h.pausedAt = this.deckPosition(h);
+    h.playing = false;
+    this.stopSource(h);
+    h.el.emit("pause");
+    // PAUSE/CUE: congelar la corrección de fase de inmediato (limpia el bias).
+    this.resetPhaseLock();
+  }
+
+  toggle(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    if (h.playing) this.pause(name);
+    else this.play(name);
+  }
+
+  seek(name: "A" | "B", t: number): void {
+    const h = this.deck(name);
+    if (!h) return;
+    const dur = h.buffer ? h.buffer.duration : Number.MAX_SAFE_INTEGER;
+    let target = clamp(t, 0, dur);
+    if (h.loop) target = this.loopWrap(h, target);
+    if (h.playing) {
+      const now = this.ctx ? this.ctx.currentTime : 0;
+      this.stopSource(h);
+      this.startSource(h, now, target);
+      h.startOffset = target;
+      h.startCtxTime = now;
+      h.wallTime = performance.now();
+      // Reinicia el estado del phase-vocoder (nuevo contenido, fase distinta).
+      if (h.keylockEnabled && h.keylockNode) {
+        h.keylockNode.port.postMessage({ type: "reset" });
+      }
+    } else {
+      h.pausedAt = target;
+    }
+    this.servoRetune(name);
+  }
+
+  stopAll(): void {
+    this.pause("A");
+    this.pause("B");
+  }
+
+  // ── Pitch / rate ─────────────────────────────────────────────────────────
+
+  /** Fija el playbackRate (y el factor de key lock 1/rate) con rampa suave. */
+  setRate(name: "A" | "B", target: number, smooth = true): void {
+    const h = this.deck(name);
+    if (!h) return;
+    const rate = clamp(target, 0.25, 4);
+    if (h.playing) this.rebase(h);
+    h.rate = rate;
+    if (h.source && this.ctx) {
+      const now = this.ctx.currentTime;
+      const pr = h.source.playbackRate;
+      pr.cancelScheduledValues(now);
+      if (smooth) pr.setTargetAtTime(rate, now, RATE_TAU);
+      else pr.setValueAtTime(rate, now);
+    }
+    if (h.keylockEnabled && h.keylockNode && this.ctx) {
+      const now = this.ctx.currentTime;
+      const kr = h.keylockNode.parameters.get("rate");
+      if (kr) {
+        kr.cancelScheduledValues(now);
+        if (smooth) kr.setTargetAtTime(1 / rate, now, RATE_TAU);
+        else kr.setValueAtTime(1 / rate, now);
+      }
+    }
+  }
+
+  setPitch(name: "A" | "B", pct: number): void {
+    const h = this.deck(name);
+    if (!h) return;
+    if (h.synced) this.clearSync(name);
+    h.pitch = clamp(pct, -h.range, h.range);
+    this.applyManualRate(name);
+    this.recommitFollowersOf(name);
+  }
+
+  private applyManualRate(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || h.synced || h.jogging) return;
+    this.setRate(name, clamp(1 + h.pitch / 100, 0.5, 2), true);
+  }
+
+  getPitch(name: "A" | "B"): number {
+    return this.deck(name)?.pitch ?? 0;
+  }
+
+  getPitchRange(name: "A" | "B"): number {
+    return this.deck(name)?.range ?? DEFAULT_PITCH_RANGE;
+  }
+
+  getEffectiveBpm(name: "A" | "B"): number {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return 0;
+    return h.originalBpm * h.rate;
+  }
+
+  isSynced(name: "A" | "B"): boolean {
+    return this.deck(name)?.synced ?? false;
+  }
+
+  getSyncState(
+    name: "A" | "B",
+  ): { isSynced: boolean; role: "master" | "follower" | null; masterDeck: "A" | "B" | null } {
+    const h = this.deck(name);
+    return {
+      isSynced: h?.synced ?? false,
+      role: h?.syncRole ?? null,
+      masterDeck: h?.masterName ?? null,
+    };
+  }
+
+  // ── Key lock (phase-vocoder) ─────────────────────────────────────────────
+
+  private createKeylockNode(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || !this.ctx || h.keylockNode) return;
+    const node = new AudioWorkletNode(this.ctx, "phase-vocoder", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: 2,
+      channelCountMode: "explicit",
+      outputChannelCount: [2],
+    });
+    node.parameters.get("rate")?.setValueAtTime(1 / (h.rate || 1), this.ctx.currentTime);
+    node.connect(h.analyser);
+    h.keylockNode = node;
+  }
+
+  /** Conecta el source a través del vocoder (on) o directo al analizador (off). */
+  private applyKeylockRoute(name: "A" | "B", enabled: boolean): void {
+    const h = this.deck(name);
+    if (!h || !this.ctx) return;
+    if (h.source) {
+      try {
+        h.source.disconnect();
+      } catch {
+        /* ok */
+      }
+      if (enabled && h.keylockNode) h.source.connect(h.keylockNode);
+      else h.source.connect(h.analyser);
+    }
+  }
+
+  setKeyLock(name: "A" | "B", enabled: boolean): void {
+    const h = this.deck(name);
+    if (!h) return;
+    h.keylockEnabled = enabled;
+    if (enabled && !h.keylockNode) {
+      void this.ensureWorklet().then(() => {
+        this.createKeylockNode(name);
+        this.applyKeylockRoute(name, true);
+      });
+      return;
+    }
+    this.applyKeylockRoute(name, enabled);
+  }
+
+  // ── SYNC ─────────────────────────────────────────────────────────────────
+
+  private phaseShift(name: "A" | "B", masterName: "A" | "B"): number {
+    const slave = this.deck(name);
+    const master = this.deck(masterName);
+    if (!slave || !master || slave === master) return 0;
+    if (!slave.originalBpm || !master.originalBpm) return 0;
+    return hardAlignShift(
+      this.deckPosition(master),
+      master.originalBpm,
+      master.gridOff,
+      this.deckPosition(slave),
+      slave.originalBpm,
+      slave.gridOff,
+    );
+  }
+
+  alignPhase(name: "A" | "B", masterName: "A" | "B"): number {
+    const h = this.deck(name);
+    if (!h) return 0;
+    const shift = this.phaseShift(name, masterName);
+    if (Math.abs(shift) < 0.0005) return 0;
+    this.seek(name, this.deckPosition(h) + shift);
+    return shift;
+  }
+
+  alignToMasterOnce(name: "A" | "B", masterName: "A" | "B"): number {
+    const slave = this.deck(name);
+    const master = this.deck(masterName);
+    if (!slave || !master || slave === master) return 0;
+    if (!slave.originalBpm || !master.originalBpm) return 0;
+    return this.alignPhase(name, masterName);
+  }
+
+  syncTo(name: "A" | "B", masterName: "A" | "B"): boolean {
+    const slave = this.deck(name);
+    const master = this.deck(masterName);
+    if (!slave || !master || slave === master) return false;
+    if (!slave.originalBpm || !master.originalBpm) return false;
+
+    if (master.synced && master.masterName === name) {
+      this.clearSync(masterName);
+    }
+    if (master.syncRole === "follower") {
+      this.clearSync(masterName);
+    }
+    master.syncRole = "master";
+    master.masterName = null;
+
+    const masterBpm = this.getEffectiveBpm(masterName) || master.originalBpm;
+    const targetRate = syncPlaybackRate(masterBpm, slave.originalBpm);
+    slave.pitch = (targetRate - 1) * 100;
+    slave.synced = true;
+    slave.syncRole = "follower";
+    slave.masterName = masterName;
+    this.servo[name].bias = 0;
+
+    this.commitSync(name);
+    return true;
+  }
+
+  private syncTargetRate(h: DeckHandle): number {
+    if (!h.synced || !h.masterName) return clamp(1 + h.pitch / 100, 0.5, 2);
+    const master = this.deck(h.masterName);
+    const masterBpm = this.getEffectiveBpm(h.masterName) || master?.originalBpm || 0;
+    if (!masterBpm || !h.originalBpm) return h.rate;
+    return syncPlaybackRate(masterBpm, h.originalBpm);
+  }
+
+  private commitSync(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || !h.synced || !h.masterName) return;
+    const master = this.deck(h.masterName);
+    if (!master) return;
+    const targetRate = this.syncTargetRate(h);
+    // Tempo: rampa suave al rate base (1:1 exacto). El tempo SIEMPRE se copia,
+    // suene o no el otro deck.
+    this.setRate(name, targetRate, true);
+    // Fase: solo se alinea si AMBOS decks están reproduciendo. Si el otro deck
+    // está pausado/detenido, el SYNC únicamente copia el BPM/pitch y deja el
+    // audio correr normal sin seeks (la fase se corregirá cuando ambos suenen).
+    const period = 60 / h.originalBpm;
+    const shift = this.phaseShift(name, h.masterName);
+    const bothPlaying = h.playing && master.playing;
+    const needSnap =
+      bothPlaying &&
+      Number.isFinite(period) &&
+      period > 0 &&
+      Math.abs(shift) > SERVO_SNAP_BEATS * period;
+    if (needSnap) this.snapPhaseToMaster(name);
+    this.servoRetune(name);
+    this.servoRetune(h.masterName);
+    this.ensureServo();
+  }
+
+  private snapPhaseToMaster(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h || !h.synced || !h.masterName || !h.buffer) return;
+    const shift = this.phaseShift(name, h.masterName);
+    if (Math.abs(shift) < 0.0001) return;
+    this.seek(name, this.deckPosition(h) + shift);
+  }
+
+  clearSync(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    const wasMaster = h.syncRole === "master";
+    const masterRef = h.masterName;
+    h.synced = false;
+    h.syncRole = null;
+    h.masterName = null;
+    if (wasMaster) {
+      const other = name === "A" ? "B" : "A";
+      const otherDeck = this.deck(other);
+      if (otherDeck && otherDeck.synced && otherDeck.masterName === name) {
+        otherDeck.synced = false;
+        otherDeck.syncRole = null;
+        otherDeck.masterName = null;
+        this.servo[other].bias = 0;
+        this.servoRetune(other);
+      }
+    } else if (masterRef) {
+      const m = this.deck(masterRef);
+      if (m && m.syncRole === "master" && !m.synced) {
+        m.syncRole = null;
+      }
+    }
+    this.servo[name].bias = 0;
+    this.servoRetune(name);
+    this.stopServoIfIdle();
+    if (!h.playing) {
+      h.pitch = 0;
+      this.setRate(name, 1, true);
+      return;
+    }
+    this.setRate(name, clamp(1 + h.pitch / 100, 0.5, 2), true);
+  }
+
+  private recommitFollowersOf(masterName: "A" | "B"): void {
+    for (const [n, h] of [["A", this.deckA], ["B", this.deckB]] as const) {
+      if (!h || h.synced !== true || h.masterName !== masterName) continue;
+      this.commitSync(n);
+    }
+  }
+
+  // ── Servo de fase (Master Audio Clock) ───────────────────────────────────
+
+  private servoRetune(name: "A" | "B"): void {
+    /* con ABSS la posición sale del reloj ctx (sin deriva): solo re-ancla el
+     * bias integral si el deck dejó de existir. */
+    const h = this.deck(name);
+    if (!h) this.servo[name].bias = 0;
+  }
+
+  /** Limpia los buffers de corrección de fase (bias integral) de ambos decks.
+   *  Se invoca al PAUSE/CUE de cualquier deck: el deck que sigue reproduciendo
+   *  congela la corrección de fase de inmediato (mantiene el tempo emparejado
+   *  pero ignora la posición del deck detenido, sin entrar en re-sync). */
+  private resetPhaseLock(): void {
+    this.servo.A.bias = 0;
+    this.servo.B.bias = 0;
+    this.servoRetune("A");
+    this.servoRetune("B");
+  }
+
+  private ensureServo(): void {
+    if (this.servoTimer !== null) return;
+    if (!this.deckA?.synced && !this.deckB?.synced) return;
+    this.servoTimer = setInterval(() => this.servoTick(), SERVO_INTERVAL_MS);
+  }
+
+  private stopServoIfIdle(): void {
+    if (this.servoTimer === null) return;
+    if (this.deckA?.synced || this.deckB?.synced) return;
+    clearInterval(this.servoTimer);
+    this.servoTimer = null;
+  }
+
+  private servoTick(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (!this.deckA?.synced && !this.deckB?.synced) {
+      this.stopServoIfIdle();
+      return;
+    }
+    // Regla estricta: solo corregir FASE si AMBOS decks están reproduciendo.
+    // Si uno está pausado/detenido, se congela la corrección de fase de
+    // inmediato (se mantiene el tempo emparejado, pero se ignora la posición
+    // del deck parado para no entrar en el bucle de re-sync).
+    if (!(this.deckA?.playing && this.deckB?.playing)) return;
+    for (const n of ["A", "B"] as const) {
+      const h = this.deck(n);
+      if (!h || !h.synced || !h.masterName) continue;
+      const master = this.deck(h.masterName);
+      if (!master || master === h) continue;
+      if (!h.originalBpm || !master.originalBpm) continue;
+      if (master.synced) continue;
+      if (!h.playing) continue;
+      if (h.jogging || h.loop) continue;
+
+      const err = this.phaseShift(n, h.masterName);
+      const period = 60 / h.originalBpm;
+
+      if (Math.abs(err) > SERVO_SNAP_BEATS * period) {
+        this.snapPhaseToMaster(n);
+        this.servo[n].bias = 0;
+        continue;
+      }
+
+      // Corrección PI suave (sin seeks): el trim de tasa converge la fase a
+      // 0 ms; el bias sostiene el lock contra el residuo mínimo de redondeo.
+      const p = err / SERVO_CONVERGE_S;
+      const s = this.servo[n];
+      const dt = SERVO_INTERVAL_MS / 1000;
+      s.bias = clamp(s.bias + err * SERVO_I_GAIN * dt, -SERVO_MAX_TRIM, SERVO_MAX_TRIM);
+      const trim = clamp(p + s.bias, -SERVO_MAX_TRIM, SERVO_MAX_TRIM);
+      const baseRate = this.syncTargetRate(h);
+      const target = clamp(baseRate * (1 + trim), 0.5, 2);
+      if (Math.abs(target - h.rate) > 1e-5) {
+        this.setRate(n, target, true);
+      }
+    }
+  }
+
+  // ── Loops / Beat Jump / Loop Roll (Slip) ─────────────────────────────────
+
+  private gridBeatStart(h: DeckHandle, t: number): number {
+    const period = 60 / h.originalBpm;
+    let k = Math.round((t - h.gridOff) / period);
+    let start = h.gridOff + k * period;
+    if (start > t) {
+      k -= 1;
+      start = h.gridOff + k * period;
+    }
+    return Math.max(0, start);
+  }
+
+  setLoop(name: "A" | "B", start: number, end: number, beats: number): LoopInfo | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm || !h.buffer) return null;
+    const dur = h.buffer.duration;
+    const s = clamp(start, 0, Math.max(0, dur - 0.05));
+    const e = clamp(end, s + 0.05, dur);
+    if (e <= s) return null;
+    const raw = this.rawPosition(h);
+    h.loop = { start: s, end: e, beats, roll: false, rollBase: 0, rollStartCtx: 0 };
+    this.applyLoopToSource(h);
+    // Re-anclar dentro del loop si el source quedó fuera del rango.
+    if (h.playing && (raw < s || raw >= e)) {
+      this.seek(name, this.loopWrap(h, raw));
+    }
+    return h.loop;
+  }
+
+  setLoopManual(name: "A" | "B", start: number, end: number): LoopInfo | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return null;
+    const period = 60 / h.originalBpm;
+    const beats = Math.max(0.125, Math.round((end - start) / period));
+    return this.setLoop(name, start, end, beats);
+  }
+
+  setAutoLoop(name: "A" | "B", beats: number): LoopInfo | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return null;
+    const period = 60 / h.originalBpm;
+    const t = this.deckPosition(h);
+    const start = this.gridBeatStart(h, t);
+    const end = start + beats * period;
+    return this.setLoop(name, start, end, beats);
+  }
+
+  setLoopIn(name: "A" | "B"): number | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return null;
+    const t = this.deckPosition(h);
+    const point = this.gridBeatStart(h, t);
+    h.loopInPending = point;
+    return point;
+  }
+
+  setLoopOut(name: "A" | "B"): LoopInfo | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm || h.loopInPending === null) return null;
+    const period = 60 / h.originalBpm;
+    const t = this.deckPosition(h);
+    const out = this.gridBeatStart(h, t) + period;
+    const start = h.loopInPending;
+    if (out - start < 0.25 * period) return null;
+    const beats = (out - start) / period;
+    h.loopInPending = null;
+    return this.setLoop(name, start, out, beats);
+  }
+
+  startLoopRoll(name: "A" | "B", beats: number): LoopInfo | null {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return null;
+    const period = 60 / h.originalBpm;
+    const t = this.deckPosition(h);
+    const start = this.gridBeatStart(h, t);
+    const end = start + beats * period;
+    const dur = h.buffer ? h.buffer.duration : Number.MAX_SAFE_INTEGER;
+    const s = clamp(start, 0, Math.max(0, dur - 0.05));
+    const e = clamp(end, s + 0.05, dur);
+    if (e <= s) return null;
+    const raw = this.rawPosition(h);
+    h.loop = { start: s, end: e, beats, roll: true, rollBase: t, rollStartCtx: this.ctx ? this.ctx.currentTime : 0 };
+    this.applyLoopToSource(h);
+    if (h.playing && (raw < s || raw >= e)) {
+      this.seek(name, this.loopWrap(h, raw));
+    }
+    return h.loop;
+  }
+
+  exitLoop(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    const loop = h.loop;
+    h.loop = null;
+    if (h.source) h.source.loop = false;
+    if (loop && loop.roll && this.ctx) {
+      const elapsed = this.ctx.currentTime - loop.rollStartCtx;
+      const virtual = loop.rollBase + elapsed * h.rate;
+      this.seek(name, virtual);
+    }
+    this.servoRetune(name);
+  }
+
+  getLoop(name: "A" | "B"): LoopInfo | null {
+    return this.deck(name)?.loop ?? null;
+  }
+
+  isLoopActive(name: "A" | "B"): boolean {
+    return this.deck(name)?.loop != null;
+  }
+
+  beatJump(name: "A" | "B", beats: number): void {
+    const h = this.deck(name);
+    if (!h || !h.originalBpm) return;
+    const period = 60 / h.originalBpm;
+    const dur = h.buffer ? h.buffer.duration : Number.MAX_SAFE_INTEGER;
+    this.seek(name, clamp(this.deckPosition(h) + beats * period, 0, dur));
+  }
+
+  // ── Jog / scratch ────────────────────────────────────────────────────────
+
+  beginJog(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    h.jogging = true;
+  }
+
+  setJogRate(name: "A" | "B", rate: number): void {
+    const h = this.deck(name);
+    if (!h) return;
+    const r = clamp(rate, 0.1, 4);
+    this.setRate(name, r, false);
+  }
+
+  scratchSeek(name: "A" | "B", deltaSec: number): void {
+    const h = this.deck(name);
+    if (!h) return;
+    this.seek(name, this.deckPosition(h) + deltaSec);
+  }
+
+  endJog(name: "A" | "B"): void {
+    const h = this.deck(name);
+    if (!h) return;
+    h.jogging = false;
+    if (h.synced && h.masterName) {
+      const master = this.deck(h.masterName);
+      if (master) {
+        const masterBpm = this.getEffectiveBpm(h.masterName) || master.originalBpm;
+        this.setRate(name, syncPlaybackRate(masterBpm, h.originalBpm), true);
+        this.servoRetune(name);
+        return;
+      }
+    }
+    this.applyManualRate(name);
+    this.servoRetune(name);
+  }
+
+  // ── Mixer: crossfader / master ───────────────────────────────────────────
+
   setCrossfader(position: number): void {
     this.crossfader = clamp(position, 0, 1);
     const t = clamp(this.crossfader / CROSSFADE_CUTOFF, 0, 1);
@@ -813,14 +1424,12 @@ export class AudioEngine {
     this.master.gain.setTargetAtTime(clamp(v, 0, 1.4), this.ctx.currentTime, 0.012);
   }
 
-  /** EQ global master (0 = LOW, 1 = MID, 2 = HIGH) en dB. */
   setMasterEq(band: 0 | 1 | 2, db: number): void {
     if (!this.masterEq || !this.ctx) return;
     const clamped = clamp(db, EQ_MIN_DB, EQ_MAX_DB);
     this.masterEq[band].gain.setTargetAtTime(db <= EQ_MIN_DB ? -60 : clamped, this.ctx.currentTime, 0.01);
   }
 
-  /** Filtro bimodal master (-1 LPF … 0 neutral … +1 HPF). */
   setMasterFilter(v: number): void {
     if (!this.masterFilterLP || !this.masterFilterHP || !this.ctx) return;
     const t = this.ctx.currentTime;
@@ -838,11 +1447,8 @@ export class AudioEngine {
     }
   }
 
-  // ── Headphones / CUE (PFL) ──────────────────────────────────────────────
+  // ── Headphones / CUE (PFL) ───────────────────────────────────────────────
 
-  /** Activa/desactiva el CUE (PFL) de un canal: la señal se toma antes del
-   *  fader y del crossfader, por lo que suena en los auriculares aunque el
-   *  canal esté cortado en el master. */
   setCueActive(name: "A" | "B", active: boolean): void {
     const h = this.deck(name);
     if (!h) return;
@@ -861,7 +1467,6 @@ export class AudioEngine {
     this.applyHeadphoneGains(this.ctx ? this.ctx.currentTime : 0);
   }
 
-  /** Split mode: L = CUE, R = MASTER (mezcla de auriculares). */
   setSplitMode(enabled: boolean): void {
     if (!this.hpMixBus || !this.hpMerger || !this.hpLevelGain) return;
     this.splitMode = enabled;
@@ -894,7 +1499,6 @@ export class AudioEngine {
     if (!this.hpMasterGain || !this.hpCueGain || !this.hpLevelGain) return;
     const level = this.headphoneLevel;
     if (this.splitMode) {
-      // En split el paneo es hard (L=CUE, R=MASTER); MIX no aplica.
       this.hpMasterGain.gain.setTargetAtTime(0, now, 0.01);
       this.hpCueGain.gain.setTargetAtTime(0, now, 0.01);
       this.hpLevelGain.gain.setTargetAtTime(level, now, 0.01);
@@ -905,7 +1509,8 @@ export class AudioEngine {
     }
   }
 
-  // ── Mixer: canal (gain / EQ / fader) ────────────────────────────────────
+  // ── Mixer: canal (gain / EQ / fader / filter / FX) ───────────────────────
+
   setGain(name: "A" | "B", gain: number): void {
     const h = this.deck(name);
     if (!h || !this.ctx) return;
@@ -928,7 +1533,6 @@ export class AudioEngine {
     h.fader.gain.setTargetAtTime(clamp(v, 0, 1), this.ctx.currentTime, 0.012);
   }
 
-  /** FILTER (Low Kill): ON corta los graves con un pasa-altos de golpe. */
   setLowKill(name: "A" | "B", on: boolean): void {
     const f = this.deck(name)?.lowKill;
     if (!f) return;
@@ -936,10 +1540,6 @@ export class AudioEngine {
     f.frequency.setTargetAtTime(on ? 110 : 20, t, 0.004);
   }
 
-  /**
-   * Filtro bimodal (Color FX): v = -1 (LPF, corta agudos) → 0 (neutral) →
-   * +1 (HPF, corta graves). Conectado a nodos BiquadFilterNode en serie.
-   */
   setFilter(name: "A" | "B", v: number): void {
     const h = this.deck(name);
     if (!h || !this.ctx) return;
@@ -958,7 +1558,6 @@ export class AudioEngine {
     }
   }
 
-  /** FX de deck: DLY (delay con feedback) y PHA (phaser) en paralelo. */
   setDeckFx(name: "A" | "B", fxId: string, amount: number, active: boolean): void {
     const h = this.deck(name);
     if (!h || !this.ctx) return;
@@ -980,7 +1579,8 @@ export class AudioEngine {
     h.phaWet.gain.setTargetAtTime(0, t, 0.02);
   }
 
-  // ── Meting (VU) ─────────────────────────────────────────────────────────
+  // ── Meting (VU) ──────────────────────────────────────────────────────────
+
   private rms(an: AnalyserNode | null): number {
     if (!an) return 0;
     an.getFloatTimeDomainData(this.meterBuf);
@@ -1001,7 +1601,8 @@ export class AudioEngine {
     return this.rms(this.masterAnalyser);
   }
 
-  // ── Track meta / pitch / sync ───────────────────────────────────────────
+  // ── Track meta ───────────────────────────────────────────────────────────
+
   setDeckMeta(name: "A" | "B", meta: { originalBpm?: number; gridOff?: number }): void {
     const h = this.deck(name);
     if (!h) return;
@@ -1010,811 +1611,17 @@ export class AudioEngine {
     if (meta.originalBpm !== undefined) h.originalBpm = meta.originalBpm > 0 ? meta.originalBpm : 0;
     if (meta.gridOff !== undefined) h.gridOff = meta.gridOff;
     if (bpmChanged || gridChanged) {
-      // La referencia de fase (rejilla) se movió: la corrección estacionaria
-      // aprendida ya no aplica — memoria integral a cero y ventana re-abierta.
       this.servo[name].bias = 0;
       this.servoRetune(name);
     }
   }
 
-  setPitch(name: "A" | "B", pct: number): void {
-    const h = this.deck(name);
-    if (!h) return;
-    if (h.synced) this.clearSync(name);
-    h.pitch = clamp(pct, -h.range, h.range);
-    this.applyManualRate(name);
-    // Si este deck es MAESTRO de un esclavo sincronizado, su tempo efectivo
-    // acaba de cambiar: se re-comite el SYNC del esclavo AHORA (rate 1:1
-    // exacto + snap de fase) para que la diferencia quede en 0 ms sin
-    // desviación acumulativa. Un solo disparo, sin bucles de corrección.
-    this.recommitFollowersOf(name);
-  }
+  // ── Grabación (REC) del bus master ───────────────────────────────────────
 
-  /** Re-comite el Hard Lock de todos los decks sincronizados que tengan a
-   *  `masterName` como maestro. Se usa cuando el tempo EFECTIVO del maestro
-   *  cambia (pitch, jog o carga de track): el esclavo vuelve a clavar rate
-   *  y fase en un solo disparo (sin watchdog ni PLL). */
-  private recommitFollowersOf(masterName: "A" | "B"): void {
-    for (const [n, h] of [["A", this.deckA], ["B", this.deckB]] as const) {
-      if (!h || h.synced !== true || h.masterName !== masterName) continue;
-      this.commitSync(n);
-    }
-  }
-
-  private applyManualRate(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h || h.synced || h.jogging) return;
-    const rate = clamp(1 + h.pitch / 100, 0.5, 2);
-    h.el.playbackRate = rate;
-    try {
-      if (!h.el.preservesPitch) h.el.preservesPitch = true;
-    } catch {
-      /* navegadores sin soporte */
-    }
-  }
-
-  getPitch(name: "A" | "B"): number {
-    return this.deck(name)?.pitch ?? 0;
-  }
-
-  getPitchRange(name: "A" | "B"): number {
-    return this.deck(name)?.range ?? DEFAULT_PITCH_RANGE;
-  }
-
-  getEffectiveBpm(name: "A" | "B"): number {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return 0;
-    return h.originalBpm * h.el.playbackRate;
-  }
-
-  isSynced(name: "A" | "B"): boolean {
-    return this.deck(name)?.synced ?? false;
-  }
-
-  /** Estado de SYNC del deck según el MOTOR (fuente de verdad del audio):
-   *  isSynced = este deck es ESCLAVO de otro (su rate no es libre), role =
-   *  papel dentro de la pareja (master/follower) y masterDeck = deck maestro
-   * al que sigue. La UI lo espeja para pintar MASTER / FOLLOW A|B según el
-   * master ACTIVO — las etiquetas jamás se cruzan porque salen del motor. */
-  getSyncState(
-    name: "A" | "B",
-  ): { isSynced: boolean; role: "master" | "follower" | null; masterDeck: "A" | "B" | null } {
-    const h = this.deck(name);
-    return {
-      isSynced: h?.synced ?? false,
-      role: h?.syncRole ?? null,
-      masterDeck: h?.masterName ?? null,
-    };
-  }
-
-  /** Desfase EXACTO de grilla (Beat Offset, segundos de tiempo de fuente)
-   *  entre esclavo y maestro, calculado UNA vez para el Hard Lock: cuánto hay
-   *  que mover la aguja del esclavo para que su línea de beat quede 100%
-   *  superpuesta (0 ms) sobre la rejilla del maestro. La fase se mide en
-   *  TIEMPO DE FUENTE con los periodos ORIGINALES (60 / BPM_Original): la
-   *  rejilla vive en tiempo de fuente y, con BPM efectivos iguales, la
-   *  alineación queda ESTÁTICA para siempre. Solo cálculo puro: no toca el
-   *  elemento. */
-  private phaseShift(name: "A" | "B", masterName: "A" | "B"): number {
-    const slave = this.deck(name);
-    const master = this.deck(masterName);
-    if (!slave || !master || slave === master) return 0;
-    if (!slave.originalBpm || !master.originalBpm) return 0;
-    return hardAlignShift(
-      master.el.currentTime,
-      master.originalBpm,
-      master.gridOff,
-      slave.el.currentTime,
-      slave.originalBpm,
-      slave.gridOff,
-    );
-  }
-
-  /** Hard Phase Lock: un solo seek rígido de la aguja del esclavo al beat más
-   *  cercano del maestro. Sin rampas, sin filtros, sin re-centrados: se
-   *  calcula una vez y se aplica en el instante. */
-  alignPhase(name: "A" | "B", masterName: "A" | "B"): number {
-    const slave = this.deck(name);
-    if (!slave) return 0;
-    const shift = this.phaseShift(name, masterName);
-    if (Math.abs(shift) < 0.0005) return 0;
-    slave.el.currentTime = Math.max(0, slave.el.currentTime + shift);
-    return shift;
-  }
-
-  /**
-   * Alineación con la rejilla del master (sin cambiar tempo) para el QUANTIZE
-   * al dar Play. El deck está en pausa: el seek cuantizado a beat es
-   * inaudible y deja la rejilla clavada (Absolute Snap de un solo disparo).
-   */
-  alignToMasterOnce(name: "A" | "B", masterName: "A" | "B"): number {
-    const slave = this.deck(name);
-    const master = this.deck(masterName);
-    if (!slave || !master || slave === master) return 0;
-    if (!slave.originalBpm || !master.originalBpm) return 0;
-    return this.alignPhase(name, masterName);
-  }
-
-  /**
-   * SYNC profesional (Master Audio Clock + Phase Lock continuo):
-   *   · Tempo: playbackRate base = BPM_Master_efectivo / BPM_Original_del_deck,
-   *     SIEMPRE 1:1 (sin ratios armónicos).
-   *   · Fase: Hard Alignment al enganchar (seek cuantizado al beat más
-   *     cercano del maestro, 0 ms) + servo PI continuo durante la
-   *     reproducción (servoTick) que congela la fase en 0 ms para siempre,
-   *     sin deriva acumulativa (ver cabecera del archivo).
-   */
-  syncTo(name: "A" | "B", masterName: "A" | "B"): boolean {
-    const slave = this.deck(name);
-    const master = this.deck(masterName);
-    if (!slave || !master || slave === master) return false;
-    if (!slave.originalBpm || !master.originalBpm) return false;
-
-    // Guard anti-ciclo (A sincronizado a B y B a la vez a A): sin referencia
-    // independiente la fase deriva sin correctivo posible. El deck que pulsa
-    // SYNC se convierte en esclavo y el antiguo esclavo queda liberado como
-    // maestro independiente (determinista, una sola referencia de tempo).
-    if (master.synced && master.masterName === name) {
-      this.clearSync(masterName);
-    }
-
-    // Establecer roles Master/Follower de forma explícita. Si el deck maestro
-    // ya era follower de alguien, lo liberamos primero para garantizar una
-    // única referencia de tempo.
-    if (master.syncRole === "follower") {
-      this.clearSync(masterName);
-    }
-    master.syncRole = "master";
-    master.masterName = null;
-
-    // BPM objetivo: el efectivo del maestro (source BPM × pitch del maestro).
-    const masterBpm = this.getEffectiveBpm(masterName) || master.originalBpm;
-    // rate base = BPM_Master / BPM_Original (1:1 exacto, sin ratios).
-    const targetRate = syncPlaybackRate(masterBpm, slave.originalBpm);
-    slave.pitch = (targetRate - 1) * 100;
-    slave.synced = true;
-    slave.syncRole = "follower";
-    slave.masterName = masterName;
-    // Enganche fresco: la corrección estacionaria se aprende de cero para
-    // esta pareja de decks (el bias es tasa, no posición).
-    this.servo[name].bias = 0;
-
-    // Aplicación inmediata (rate base + snap rígido de fase), suene o no.
-    this.commitSync(name);
-    return true;
-  }
-
-  // ── Hard Phase Lock (tempo fijo + snap único) ────────────────────────────
-
-  /** Rate objetivo FIJO del esclavo bajo SYNC (masterBPM / trackBPM, 1:1).
-   *  Constante mientras el SYNC esté activo: nunca se re-modula en bucle. */
-  private syncTargetRate(h: DeckHandle): number {
-    if (!h.synced || !h.masterName) return clamp(1 + h.pitch / 100, 0.5, 2);
-    const master = this.deck(h.masterName);
-    const masterBpm = this.getEffectiveBpm(h.masterName) || master?.originalBpm || 0;
-    if (!masterBpm || !h.originalBpm) return h.el.playbackRate;
-    return syncPlaybackRate(masterBpm, h.originalBpm);
-  }
-
-  /**
-   * Aplica el SYNC (rate base + fase):
-   *   1) Tempo: playbackRate = masterBPM / trackBPM (1:1 exacto).
-   *   2) Fase: Hard Alignment — seek único cuantizado de la aguja a la línea
-   *      de beat más cercana de la rejilla del maestro (0 ms de desfasaje).
-   *   3) Arranca el servo de fase (Master Audio Clock): a partir de aquí la
-   *      fase se mantiene CONGELADA por corrección continua de rate (±0.15%
-   *      en lock), sin deriva acumulativa durante todo el set.
-   */
-  private commitSync(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h || !h.synced || !h.masterName) return;
-    const master = this.deck(h.masterName);
-    if (!master) return;
-    // rate = masterBPM / trackBPM (1:1 exacto).
-    const targetRate = this.syncTargetRate(h);
-    try {
-      // Keylock: solo si no está ya activo (evita re-configurar el modo de
-      // resampling del elemento mientras suena).
-      if (!h.el.preservesPitch) h.el.preservesPitch = true;
-    } catch {
-      /* sin soporte */
-    }
-    // Tempo EXACTO al instante: el BPM se clava de inmediato.
-    h.el.playbackRate = targetRate;
-    // Fase: Hard Alignment (un seek rígido de 0 ms al enganchar).
-    this.snapPhaseToMaster(name);
-    // Ventanas de medición frescas (esclavo y maestro) + servo en marcha.
-    this.servoRetune(name);
-    this.servoRetune(h.masterName);
-    this.ensureServo();
-  }
-
-  /** Hard Alignment: mueve la aguja del esclavo a la línea de beat más
-   *  cercana de la rejilla del maestro con UN seek exacto (0 ms de
-   *  desfasaje). Tras el seek, la ventana de medición del servo se re-abre
-   *  (una discontinuidad de posición no es error de tasa). El retardo del
-   *  grafo permanece SIEMPRE en reposo (PHASE_BASE). */
-  private snapPhaseToMaster(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h || !h.synced || !h.masterName) return;
-    // Sin datos cargados aún no hay timeline sobre el que seekear: el snap se
-    // re-intenta en el commitSync del propio PLAY (readyState ≥ 1).
-    if (h.el.readyState < 1) return;
-    const shift = this.phaseShift(name, h.masterName);
-    if (Math.abs(shift) < 0.00005) return; // ya clavado a 0 ms (ruido float)
-    try {
-      h.el.currentTime = Math.max(0, h.el.currentTime + shift);
-    } catch {
-      /* seek no disponible todavía: se reintenta en el próximo commitSync */
-    }
-    this.servoRetune(name);
-  }
-
-  clearSync(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const wasMaster = h.syncRole === "master";
-    const masterRef = h.masterName;
-    h.synced = false;
-    h.syncRole = null;
-    h.masterName = null;
-    // Si este deck era maestro, liberar también a sus followers para evitar
-    // que queden huérfanos de referencia.
-    if (wasMaster) {
-      const other = name === "A" ? "B" : "A";
-      const otherDeck = this.deck(other);
-      if (otherDeck && otherDeck.synced && otherDeck.masterName === name) {
-        otherDeck.synced = false;
-        otherDeck.syncRole = null;
-        otherDeck.masterName = null;
-        this.servo[other].bias = 0;
-        this.servoRetune(other);
-      }
-    } else if (masterRef) {
-      // Roles RELACIONALES: al liberarse el follower, la pareja deja de
-      // existir y el maestro pierde también su rol. Así MASTER / FOLLOW son
-      // estados de la MISMA pareja (nunca queda un "MASTER" huérfano que
-      // cruce las etiquetas del botón SYNC).
-      const m = this.deck(masterRef);
-      if (m && m.syncRole === "master" && !m.synced) {
-        m.syncRole = null;
-      }
-    }
-    // El servo deja de corregir este deck: memoria integral a cero y
-    // ventana de medición re-abierta (por si se re-engancha más tarde).
-    this.servo[name].bias = 0;
-    this.servoRetune(name);
-    this.stopServoIfIdle();
-    if (h.el.paused) {
-      // SYNC cancelado antes de sonar: el rate nunca se aplicó; se restaura
-      // el tempo neutro para que el próximo PLAY salga limpio.
-      h.pitch = 0;
-      try {
-        h.el.playbackRate = 1;
-      } catch {
-        /* sin soporte */
-      }
-      return;
-    }
-    // Vuelta al tempo manual: escritura DIRECTA e instantánea (sin rampas).
-    h.el.playbackRate = clamp(1 + h.pitch / 100, 0.5, 2);
-  }
-
-  // ── Master Audio Clock: servo de fase continua (Phase Lock pro) ─────────
-  //
-  // Los decoders de los dos <audio> avanzan a tasas REALES ligeramente
-  // distintas (pipeline por elemento, keylock, buffering): un rate escrito
-  // una sola vez deriva ~0.1-0.3% ⇒ decenas de ms por minuto de set. Este
-  // servo cierra el bucle sobre el observable real — el desfase de fase
-  // contra la rejilla del maestro — referenciado SIEMPRE al reloj maestro
-  // (AudioContext.currentTime, muestras consumidas): nunca se acumula
-  // tiempo, nunca se arrastra error de redondeo.
-
-  /** Re-abre la ventana de medición del servo de un deck (tras seeks,
-   *  plays, cambios de rate, commits de sync o liberaciones). No toca el
-   *  término integral: el bias es conocimiento de tasa, no de posición. */
-  private servoRetune(name: "A" | "B"): void {
-    const h = this.deck(name);
-    const s = this.servo[name];
-    s.lastDt = 0;
-    if (!h) {
-      s.init = false;
-      return;
-    }
-    s.ctxTime = this.ctx ? this.ctx.currentTime : 0;
-    s.deckTime = Number.isFinite(h.el.currentTime) ? h.el.currentTime : 0;
-    s.rate = h.el.playbackRate;
-    s.init = true;
-  }
-
-  /** Arranca el servo de fase si hay algún deck sincronizado (idempotente). */
-  private ensureServo(): void {
-    if (this.servoTimer !== null) return;
-    if (!this.deckA?.synced && !this.deckB?.synced) return;
-    this.servoTimer = setInterval(() => this.servoTick(), SERVO_INTERVAL_MS);
-  }
-
-  /** Detiene el servo cuando ya no queda ningún deck sincronizado. */
-  private stopServoIfIdle(): void {
-    if (this.servoTimer === null) return;
-    if (this.deckA?.synced || this.deckB?.synced) return;
-    clearInterval(this.servoTimer);
-    this.servoTimer = null;
-  }
-
-  /** Un paso de medición de un deck contra el reloj maestro. Devuelve:
-   *  · "fresh"   — ventana recién abierta (sin dato comparable aún).
-   *  · "ok"      — ventana válida: el decoder avanzó conforme a su rate.
-   *  · "jump"    — discontinuidad (seek/beat jump/carga): ventana re-abierta.
-   *  · "frozen"  — reloj del deck congelado (pausa o estancamiento). */
-  private servoMeasure(name: "A" | "B", nowCtx: number): "fresh" | "ok" | "jump" | "frozen" {
-    const h = this.deck(name);
-    const s = this.servo[name];
-    if (!h) {
-      s.init = false;
-      return "fresh";
-    }
-    const t = h.el.currentTime;
-    if (!Number.isFinite(t)) {
-      s.init = false;
-      return "fresh";
-    }
-    if (!s.init) {
-      this.servoRetune(name);
-      return "fresh";
-    }
-    const dtCtx = nowCtx - s.ctxTime;
-    if (dtCtx <= 0.005) return "ok"; // reloj maestro detenido (ctx suspendido)
-    // Deck pausado: su reloj está congelado (nunca es un "salto" de posición).
-    if (h.el.paused) {
-      s.ctxTime = nowCtx;
-      s.deckTime = t;
-      s.rate = h.el.playbackRate;
-      s.lastDt = dtCtx;
-      return "frozen";
-    }
-    const dt = t - s.deckTime;
-    const expected = s.rate * dtCtx;
-    if (Math.abs(dt - expected) > SERVO_SEEK_DETECT) {
-      // Salto de posición o estancamiento grande: re-abrir la ventana. La
-      // tasa realizada de este intervalo sería basura (Δposición inválido).
-      this.servoRetune(name);
-      return "jump";
-    }
-    // Ventana válida: actualizar la medición (la tasa realizada del decoder
-    // queda implícita en dt/dtCtx; el servo actúa sobre el error de fase
-    // absoluto, que no depende de esta ventana).
-    s.ctxTime = nowCtx;
-    s.deckTime = t;
-    s.rate = h.el.playbackRate;
-    s.lastDt = dtCtx;
-    if (Math.abs(dt) < 0.002) return "frozen"; // decoder estancado (buffering)
-    return "ok";
-  }
-
-  /** Un tick del servo de fase: corrección PI continua del SYNC. Mide el
-   *  error de fase EXACTO (posición vs posición, en tiempo de fuente) del
-   *  esclavo contra la rejilla del maestro y recorta su playbackRate para
-   *  converger y CONGELAR la fase en 0 ms, sin seeks audibles. */
-  private servoTick(): void {
-    const ctx = this.ctx;
-    if (!ctx) return;
-    if (!this.deckA?.synced && !this.deckB?.synced) {
-      this.stopServoIfIdle();
-      return;
-    }
-    const nowCtx = ctx.currentTime;
-
-    for (const n of ["A", "B"] as const) {
-      const h = this.deck(n);
-      if (!h || !h.synced || !h.masterName) continue;
-      const master = this.deck(h.masterName);
-      if (!master || master === h) continue;
-      if (!h.originalBpm || !master.originalBpm) continue;
-
-      const s = this.servo[n];
-      const slaveMeas = this.servoMeasure(n, nowCtx);
-      const masterMeas = this.servoMeasure(h.masterName, nowCtx);
-
-      // Ciclo de sync (A↔B): sin referencia independiente no se corrige
-      // (syncTo lo impide al enganchar; defensa en profundidad).
-      if (master.synced) continue;
-      // El esclavo no avanza (pausa/buffering) o acaba de saltar (seek):
-      // sin trim este tick — la ventana se re-abre en el próximo.
-      if (slaveMeas !== "ok") continue;
-      // Maestro congelado (pausado/estancado): su rejilla no avanza; se
-      // congela también el tempo del esclavo (corregir contra un reloj
-      // parado arrastraría la fase sin referencia real).
-      if (masterMeas === "frozen") continue;
-      // Un salto del maestro discontinuo en posición pero CONTINUO en fase
-      // (loop fold / beat jump del maestro: bordes cuantizados a la rejilla)
-      // NO anula el término integral: el error de fase no se movió. Si el
-      // salto rompe la fase de verdad, el umbral catastrófico de abajo
-      // re-engecha con Hard Snap y ahí sí se anula el bias.
-      // El jog y el loop poseen el rate/posición del esclavo: no interferir.
-      if (h.jogging || h.loop) continue;
-
-      // Error de fase EXACTO (s de tiempo de fuente del esclavo) contra la
-      // rejilla del maestro: > 0 ⇒ el esclavo va retrasado.
-      const err = hardAlignShift(
-        master.el.currentTime,
-        master.originalBpm,
-        master.gridOff,
-        h.el.currentTime,
-        h.originalBpm,
-        h.gridOff,
-      );
-      const period = 60 / h.originalBpm;
-
-      // Deriva catastrófica (> ~medio beat: seek manual del esclavo o
-      // estancamiento largo): re-enganche rígido al beat del maestro.
-      // NO aplicamos trimming continuo de playbackRate: ese pitch-bending
-      // gradual genera distorsión perceptible, especialmente al iniciar la
-      // reproducción con SYNC. El lock se mantiene mediante Hard Snap
-      // instantáneo + rate base exacto (BPM_Maestro / BPM_Original).
-      if (Math.abs(err) > SERVO_SNAP_BEATS * period) {
-        this.snapPhaseToMaster(n);
-        s.bias = 0;
-        this.servoRetune(n);
-        this.servoRetune(h.masterName);
-        continue;
-      }
-
-      // El trimming continuo está DESHABILITADO para evitar pitch-bending y
-      // distorsión. Mantenemos la medición y el bias por si en el futuro se
-      // opta por una corrección suave, pero no se toca el playbackRate aquí.
-      // La sincronización se sostiene con rate base exacto + Hard Snap.
-    }
-  }
-
-  // ── Loops / Beat Jump / Loop Roll (Slip) ─────────────────────────────────
-  //
-  // Los loops viven en TIEMPO DE FUENTE y quedan cuantizados a la rejilla
-  // (gridOff + k · 60/originalBpm): la longitud del loop es SIEMPRE un
-  // número exacto de beats, así que la fase de la rejilla es continua a
-  // través del corte (0 ms de desfase por ciclo) y el SYNC Hard Lock sigue
-  // clavado mientras el loop suena.
-  //
-  // Vigilante de loops: un ÚNICO rAF que solo existe mientras hay un loop o
-  // roll activo. En cada frame, al cruzar el final del loop, se busca con
-  // compensación de overshoot (mod de la longitud): el audio nunca se atrasa
-  // ni se adelanta y el corte es imperceptible. Fuera de los loops NO se
-  // toca la posición ni el rate (cero interferencia con el SYNC).
-
-  /** Beat de la rejilla en el que cae `t` (start del beat, tiempo de fuente).
-   *  Con seguridad de borde flotante: nunca devuelve un beat FUTURO. */
-  private gridBeatStart(h: DeckHandle, t: number): number {
-    const period = 60 / h.originalBpm;
-    let k = Math.round((t - h.gridOff) / period);
-    let start = h.gridOff + k * period;
-    if (start > t) {
-      k -= 1;
-      start = h.gridOff + k * period;
-    }
-    return Math.max(0, start);
-  }
-
-  /** Loop genérico (start/end ya cuantizados, tiempos de fuente). */
-  setLoop(name: "A" | "B", start: number, end: number, beats: number): LoopInfo | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return null;
-    const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
-    const s = clamp(start, 0, Math.max(0, dur - 0.05));
-    const e = clamp(end, s + 0.05, dur);
-    if (e <= s) return null;
-    h.loop = { start: s, end: e, beats, roll: false, rollBase: 0, rollStartWall: 0 };
-    h.loopFadeState = "idle";
-    this.ensureLoopWatcher();
-    return h.loop;
-  }
-
-  /** Loop manual con límites ya cuantizados (LOOP IN/OUT y arrastre de
-   *  bordes): la longitud en beats se deriva del BPM ORIGINAL. */
-  setLoopManual(name: "A" | "B", start: number, end: number): LoopInfo | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return null;
-    const period = 60 / h.originalBpm;
-    const beats = Math.max(0.125, Math.round((end - start) / period));
-    return this.setLoop(name, start, end, beats);
-  }
-
-  /** Auto Loop: arma un loop de N beats desde el beat actual de la rejilla.
-   *  Inmediato: el watcher ya está activo y el borde cae exacto en la grilla. */
-  setAutoLoop(name: "A" | "B", beats: number): LoopInfo | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return null;
-    const period = 60 / h.originalBpm;
-    const t = h.el.currentTime;
-    const start = this.gridBeatStart(h, t);
-    const end = start + beats * period;
-    return this.setLoop(name, start, end, beats);
-  }
-
-  /** LOOP IN manual: cuantiza la posición actual a la grilla y guarda el
-   *  punto pendiente. No altera la reproducción. */
-  setLoopIn(name: "A" | "B"): number | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return null;
-    const t = h.el.currentTime;
-    const point = this.gridBeatStart(h, t);
-    h.loopInPending = point;
-    return point;
-  }
-
-  /** LOOP OUT manual: cierra el loop con el punto pendiente (cuantizado al
-   *  beat actual) y lo arma al instante. Sin IN pendiente no hace nada. */
-  setLoopOut(name: "A" | "B"): LoopInfo | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm || h.loopInPending === null) return null;
-    const period = 60 / h.originalBpm;
-    const t = h.el.currentTime;
-    const out = this.gridBeatStart(h, t) + period; // el OUT cae en el SIGUIENTE beat
-    const start = h.loopInPending;
-    if (out - start < 0.25 * period) return null; // demasiado corto
-    const beats = (out - start) / period;
-    h.loopInPending = null;
-    return this.setLoop(name, start, out, beats);
-  }
-
-  /** Loop Roll (Slip): loop momentáneo mientras se mantiene el pad. El audio
-   *  buclea cuantizado a la grilla y el reloj VIRTUAL sigue avanzando; al
-   *  soltar, exitLoop retoma exactamente donde le correspondía en tiempo
-   *  real (rollBase + wall-clock × rate), conservando la fase del SYNC. */
-  startLoopRoll(name: "A" | "B", beats: number): LoopInfo | null {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return null;
-    const period = 60 / h.originalBpm;
-    const t = h.el.currentTime;
-    const start = this.gridBeatStart(h, t);
-    const end = start + beats * period;
-    const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
-    const s = clamp(start, 0, Math.max(0, dur - 0.05));
-    const e = clamp(end, s + 0.05, dur);
-    if (e <= s) return null;
-    h.loop = { start: s, end: e, beats, roll: true, rollBase: t, rollStartWall: performance.now() };
-    h.loopFadeState = "idle";
-    this.ensureLoopWatcher();
-    return h.loop;
-  }
-
-  /** Restaura el envelope de loop a unity con una micro-rampa de 4 ms
-   *  (cambio de planes: pausa, seek lejos del borde o salida del loop).
-   *  Deja el vigilante en idle para que el pre-fade se re-programe limpio. */
-  private restoreLoopEnv(h: DeckHandle): void {
-    const now = this.ctx ? this.ctx.currentTime : 0;
-    try {
-      h.loopEnv.gain.cancelScheduledValues(now);
-      h.loopEnv.gain.setValueAtTime(Math.max(0, Math.min(h.loopEnv.gain.value, 1)), now);
-      h.loopEnv.gain.linearRampToValueAtTime(1, now + LOOP_CROSSFADE_S);
-    } catch {
-      /* ok */
-    }
-    h.loopFadeState = "idle";
-  }
-
-  /** Libera el loop (Auto / Manual / Roll) sin desfasar el track: la aguja
-   *  sigue fluyendo desde donde está (fase continua). En un Roll con Slip se
-   *  retoma la posición real virtual. */
-  exitLoop(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const loop = h.loop;
-    h.loop = null;
-    // Restaurar el envelope de loop a unity al salir.
-    this.restoreLoopEnv(h);
-    this.updateLoopWatcher();
-    if (loop && loop.roll) {
-      // Slip: retomar donde le correspondía en tiempo real. El reloj virtual
-      // avanza a la MISMA velocidad efectiva que el maestro sincronizado, de
-      // modo que la fase del SYNC se conserva exacta.
-      const elapsed = (performance.now() - loop.rollStartWall) / 1000;
-      const virtual = loop.rollBase + elapsed * h.el.playbackRate;
-      try {
-        h.el.currentTime = Math.max(0, virtual);
-      } catch {
-        /* seek no disponible todavía */
-      }
-    }
-    // Discontinuidad de posición (salida del loop / slip): ventana del
-    // servo re-abierta (el loop era un estado custodiado, no error de tasa).
-    this.servoRetune(name);
-  }
-
-  /** Loop activo del deck (o null). */
-  getLoop(name: "A" | "B"): LoopInfo | null {
-    return this.deck(name)?.loop ?? null;
-  }
-
-  isLoopActive(name: "A" | "B"): boolean {
-    return this.deck(name)?.loop !== null;
-  }
-
-  /** Beat Jump: salto EXACTO de N beats sobre la grilla (tiempo de fuente).
-   *  Como el salto es un múltiplo entero del periodo, la fase de la rejilla
-   *  no cambia: el Phase Lock se conserva (el servo solo re-abre ventana). */
-  beatJump(name: "A" | "B", beats: number): void {
-    const h = this.deck(name);
-    if (!h || !h.originalBpm) return;
-    const period = 60 / h.originalBpm;
-    const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
-    h.el.currentTime = clamp(h.el.currentTime + beats * period, 0, dur);
-    this.servoRetune(name);
-  }
-
-  /** Arranca el rAF del vigilante (idempotente). */
-  private ensureLoopWatcher(): void {
-    if (this.loopRaf !== null) return;
-    this.loopRaf = requestAnimationFrame(this.loopTick);
-  }
-
-  /** Detiene el rAF si ya no queda ningún loop/roll activo. */
-  private updateLoopWatcher(): void {
-    if (this.loopRaf !== null && !this.deckA?.loop && !this.deckB?.loop) {
-      cancelAnimationFrame(this.loopRaf);
-      this.loopRaf = null;
-    }
-  }
-
-  /** Un frame del vigilante: dobla cada deck cuyo loop esté activo al
-   *  cruzar su borde final. Micro-crossfade DETERMINISTA de 4 ms en la
-   *  costura (borra el "saltito"/click del seamless loop repeat):
-   *   1) PRE-FADE: al entrar el borde en la ventana de anticipación
-   *      (≤ 50 ms reales, ≤ 1/4 del loop) se programa una rampa que
-   *      MANTIENE el gain hasta 4 ms antes del borde y cae a 0 EXACTO en
-   *      el borde — instante REAL corregido por playbackRate (la aguja
-   *      avanza a rate × tiempo real, no a tiempo de fuente).
-   *   2) FOLD: cruzado el borde → seek compensado por overshoot (mod de
-   *      la longitud) de vuelta al Loop In + fade-in lineal de 4 ms a
-   *      unity: la discontinuidad de fase de la onda en la muestra de
-   *      retorno queda suavizada por el micro-crossfade.
-   *   3) Fugas (pausa / seek lejos del borde): el envelope se restaura a
-   *      unity y el micro-fade se re-programa limpio desde idle.
-   *  Caída y subida de 4 ms cada una (3-5 ms): inaudibles como ducking,
-   *  suficientes para eliminar el click de fase en el reinicio del ciclo. */
-  private loopTick = (): void => {
-    for (const h of [this.deckA, this.deckB]) {
-      if (!h || !h.loop) continue;
-      // Pausa con el micro-fade abierto: el AudioContext sigue corriendo y
-      // la rampa programada dejaría el gain en 0 para siempre. Se restaura
-      // a unity y el pre-fade se re-programa al reanudar la reproducción.
-      if (h.el.paused) {
-        if (h.loopFadeState !== "idle") this.restoreLoopEnv(h);
-        continue;
-      }
-      const loop = h.loop;
-      const t = h.el.currentTime;
-      if (!Number.isFinite(t)) continue;
-      const len = loop.end - loop.start;
-      if (len <= 0) continue;
-
-      const now = this.ctx ? this.ctx.currentTime : 0;
-      const rate = h.el.playbackRate > 0.01 ? h.el.playbackRate : 1;
-      const lookaheadSrc = Math.min(LOOP_FADE_WIN_S, len * 0.25) * rate;
-
-      // FASE 1 — FOLD: cruzamos el borde → seek compensado + micro fade-in
-      // de 4 ms justo en la muestra de retorno (Loop In).
-      if (t >= loop.end) {
-        const target = loop.start + ((((t - loop.start) % len) + len) % len);
-        try {
-          h.el.currentTime = Math.max(0, target);
-        } catch {
-          /* seek no disponible todavía */
-        }
-        try {
-          h.loopEnv.gain.cancelScheduledValues(now);
-          h.loopEnv.gain.setValueAtTime(Math.max(0, Math.min(h.loopEnv.gain.value, 1)), now);
-          h.loopEnv.gain.linearRampToValueAtTime(1, now + LOOP_CROSSFADE_S);
-        } catch {
-          /* ok */
-        }
-        h.loopFadeState = "fade-in";
-        continue;
-      }
-
-      // FASE 2 — PRE-FADE: rampa a 0 con llegada EXACTA al borde; la caída
-      // audible se concentra en los últimos 4 ms (hold → 0), nunca un
-      // decaimiento largo que se oiga como ducking.
-      if (h.loopFadeState === "idle") {
-        const distSrc = loop.end - t;
-        if (distSrc <= lookaheadSrc) {
-          const tBorder = now + Math.max(distSrc / rate, 0.0005);
-          const fadeStart = Math.max(now, tBorder - LOOP_CROSSFADE_S);
-          try {
-            h.loopEnv.gain.cancelScheduledValues(now);
-            h.loopEnv.gain.setValueAtTime(h.loopEnv.gain.value, now);
-            h.loopEnv.gain.setValueAtTime(h.loopEnv.gain.value, fadeStart);
-            h.loopEnv.gain.linearRampToValueAtTime(0, tBorder);
-          } catch {
-            /* ok */
-          }
-          h.loopFadeState = "fade-out";
-        }
-      }
-
-      // FASE 2b — FUGA: en fade-out pero la aguja quedó lejos del borde
-      // (seek manual / borde arrastrado): el fade programado ya no aplica,
-      // se restaura a unity y se re-programa desde idle.
-      if (h.loopFadeState === "fade-out" && loop.end - t > lookaheadSrc) {
-        this.restoreLoopEnv(h);
-      }
-
-      // FASE 3 — fade-in completado (gain de vuelta a unity) → idle.
-      if (h.loopFadeState === "fade-in") {
-        try {
-          if (h.loopEnv.gain.value >= 0.99) h.loopFadeState = "idle";
-        } catch {
-          h.loopFadeState = "idle";
-        }
-      }
-    }
-    this.loopRaf = requestAnimationFrame(this.loopTick);
-  };
-
-  // ── Jog / scratch / pads ────────────────────────────────────────────────
-  beginJog(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    h.jogging = true; // el scratch toma el control directo del rate
-  }
-
-  /** Rate directo durante el jog (1 = normal, >1 acelera, <1 frena). */
-  setJogRate(name: "A" | "B", rate: number): void {
-    const h = this.deck(name);
-    if (!h) return;
-    h.el.playbackRate = clamp(rate, 0.1, 4);
-  }
-
-  /** Seek relativo durante el scratch con el deck en pausa. */
-  scratchSeek(name: "A" | "B", deltaSec: number): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
-    h.el.currentTime = clamp(h.el.currentTime + deltaSec, 0, dur);
-    this.servoRetune(name);
-  }
-
-  endJog(name: "A" | "B"): void {
-    const h = this.deck(name);
-    if (!h) return;
-    h.jogging = false;
-    // Con SYNC activo se restaura el rate BASE del SYNC (masterBPM/trackBPM)
-    // y el servo de fase retoma el control: re-converge el desfase que haya
-    // dejado el jog con trims inaudibles (±0.15%) o, si es mayor de ~medio
-    // beat, re-engecha con Hard Snap.
-    if (h.synced && h.masterName) {
-      const master = this.deck(h.masterName);
-      if (master) {
-        const masterBpm = this.getEffectiveBpm(h.masterName) || master.originalBpm;
-        h.el.playbackRate = syncPlaybackRate(masterBpm, h.originalBpm);
-        this.servoRetune(name);
-        return;
-      }
-    }
-    this.applyManualRate(name);
-    this.servoRetune(name);
-  }
-
-  seek(name: "A" | "B", t: number): void {
-    const h = this.deck(name);
-    if (!h) return;
-    const dur = Number.isFinite(h.el.duration) ? h.el.duration : Number.MAX_SAFE_INTEGER;
-    h.el.currentTime = clamp(t, 0, dur);
-    // Seek = discontinuidad de posición: ventana de medición re-abierta (el
-    // servo re-alineará la fase con trims suaves o Hard Snap si procede).
-    this.servoRetune(name);
-  }
-
-  stopAll(): void {
-    this.deckA?.el.pause();
-    this.deckB?.el.pause();
-  }
-
-  // ── Grabación (REC) del bus master ──────────────────────────────────────
   get isRecording(): boolean {
     return this.recording;
   }
 
-  /** Inicia/detiene la grabación del master; al parar descarga un .webm. */
   toggleRecording(): boolean {
     if (this.recording) {
       this.recorder?.stop();
